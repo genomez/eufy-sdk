@@ -3,7 +3,7 @@ import { DeviceType } from "../device-types.js";
 import { WALL_LIGHT_TYPES } from "../device-family.js";
 import { setScalar, setJson, setPayload, describeDevice } from "./access.js";
 import type { CapabilityModule, CapabilityActions, CommandContext } from "./types.js";
-import { propertiesOf, type Members, type Surface, type MemberDeps } from "./members.js";
+import { memberWrite, propertiesOf, type Members, type Surface, type MemberDeps } from "./members.js";
 import type { Command } from "../../core/contracts.js";
 
 /**
@@ -255,6 +255,13 @@ export const LIGHT_MEMBERS = {
     description:
       "Light on/off (1400) — lit right now, not a setting: it follows whichever client is streaming. " +
       "Verified via P2P state readback (3/3); session-scoped behaviour measured live on a T8170.",
+    observation: {
+      reflects: (value, ctx) =>
+        ctx.paramIds.has(LIGHT_CMD.FLOODLIGHT_SWITCH)
+          ? { param: LIGHT_CMD.FLOODLIGHT_SWITCH, expected: asBool(value) ? 1 : 0, observed: asBool(value) }
+          : undefined,
+      timeoutMs: 20_000,
+    },
     write: (v, ctx) => switchFrame(asBool(v), ctx),
     writeAs: "set",
     aliases: { on: true, off: false },
@@ -342,7 +349,8 @@ export const LIGHT: CapabilityModule = {
    * caller expects, the same shape the derived setter gets from `bindMembers`.
    */
   actions({ ctx, sink }: MemberDeps): CapabilityActions {
-    const dispatchSwitch = async (on: boolean): Promise<void> => sink.dispatch(switchFrame(on, ctx));
+    const dispatchSwitch = async (on: boolean): Promise<void> =>
+      sink.dispatch(memberWrite("isOn", LIGHT_MEMBERS.isOn, on, ctx));
     return {
       on: () => dispatchSwitch(true),
       off: () => dispatchSwitch(false),

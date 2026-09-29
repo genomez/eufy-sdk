@@ -317,7 +317,8 @@ export interface Ff09Identity {
 
 /** @internal */
 export interface CommandObservation {
-  event: string;
+  /** Optional valueless transition event emitted after convergence. */
+  event?: string;
   /** The RAW param value the device must report before this write counts as landed. */
   expected: boolean | number | string;
   /**

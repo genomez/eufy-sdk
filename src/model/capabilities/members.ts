@@ -62,9 +62,9 @@ export interface ValueMember {
   description: string;
   /** The wire, or absent for read-only. `undefined` from it = this value is not one we accept. */
   write?: (value: boolean | number | string, ctx: CommandContext) => Command | undefined;
-  /** @internal Policy for confirming this write through bounded readback before emitting its transition event. */
+  /** @internal Bounded readback policy, with an optional valueless transition event after convergence. */
   observation?: {
-    event: string;
+    event?: string;
     /**
      * The param this write will be reflected under and the raw value to expect there, resolved together for
      * THIS device — because on some members the family decides both at once.
