@@ -340,3 +340,8 @@ Line-ending-only differences are normalized without claiming behavioral changes.
 - `docs/scripts/guard-docs.sh`
 - `scripts/device-artwork-to-webp.sh`
 - `scripts/release.sh`
+
+
+## Safety candidate, 2026-10-14
+
+Local ICE callbacks require an open signaling socket. Base source commit: `5e81218e0a14109b1f002fe7a3ebd3e4accb7f31`. Use only an owner-approved local candidate or an exact matching published artifact with its checksum and corresponding sources.

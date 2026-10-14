@@ -121,10 +121,10 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     // the handshake never completes because the answer and its transport parameters are split across
     // two channels.
     this.peer.on("iceCandidate", (c) => {
-      if (!this.closed) this.signaling.sendInfoCandidate(toWireCandidate(c), this.channelId);
+      if (!this.closed && this.signaling.isOpen) this.signaling.sendInfoCandidate(toWireCandidate(c), this.channelId);
     });
     this.peer.on("iceGatheringComplete", () => {
-      if (!this.closed) this.signaling.sendInfoCandidate("", this.channelId);
+      if (!this.closed && this.signaling.isOpen) this.signaling.sendInfoCandidate("", this.channelId);
     });
     this.peer.on("commandChannelOpen", () => {
       if (this.connected || this.closed) return;

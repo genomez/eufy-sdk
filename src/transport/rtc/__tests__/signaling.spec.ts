@@ -1,6 +1,9 @@
 /** Modified for genomez S1 experimental source preview, 2026-10-14. */
 import { describe, expect, it, vi } from "vitest";
 import { createHmac } from "node:crypto";
+import { EventEmitter } from "node:events";
+import type { RtcPeer } from "../peer.js";
+import { RtcSession } from "../session.js";
 import {
   PORTAL_ORIGIN,
   RtcSignError,
@@ -78,7 +81,7 @@ function okSign(sign = "SIGNBLOB"): typeof fetch {
 
 function client(overrides: Partial<RtcSignalingOptions> = {}) {
   const sockets: FakeSocket[] = [];
-  const c = new RtcSignalingClient({
+  const opts: RtcSignalingOptions = {
     authToken: "TOKEN",
     userId: "user-1",
     stationSn: "T9000P0000000001",
@@ -94,9 +97,108 @@ function client(overrides: Partial<RtcSignalingOptions> = {}) {
     now: () => 1_790_000_000_000,
     makeMsgId: () => "deadbeef",
     ...overrides,
-  });
-  return { c, sockets };
+  };
+  const c = new RtcSignalingClient(opts);
+  return { c, sockets, opts };
 }
+
+describe("local ICE signaling lifecycle", () => {
+  function sessionFor(s: ReturnType<typeof client>) {
+    const peer = Object.assign(new EventEmitter(), { close: vi.fn() });
+    const session = new RtcSession({
+      ...s.opts,
+      channelId: 7,
+      createSignaling: () => s.c,
+      createPeer: () => peer as unknown as RtcPeer,
+    });
+    return { session, peer };
+  }
+
+  const events = ["iceCandidate", "iceGatheringComplete"] as const;
+  const candidate = "a=candidate:1 1 udp 1 192.0.2.10 1234 typ host";
+
+  it.each(events)("sends %s on the session channel while the socket is open", async (event) => {
+    const s = client();
+    const { session, peer } = sessionFor(s);
+    try {
+      const socket = await opened(s.c, s.sockets);
+      const before = socket.sent.length;
+      peer.emit(event, candidate);
+      expect(socket.sent).toHaveLength(before + 1);
+      const envelope = JSON.parse(socket.sent.at(-1)!);
+      const inner = JSON.parse(envelope.data);
+      expect(inner).toMatchObject({ dataType: "info", channelId: 7 });
+      expect(JSON.parse(inner.data).candidate).toBe(event === "iceCandidate" ? candidate.slice(2) : "");
+    } finally {
+      session.close();
+    }
+  });
+
+  it.each([0, 2, 3].flatMap((state) => events.map((event) => [state, event] as const)))(
+    "drops late %s/%s before the socket close event",
+    async (state, event) => {
+      const s = client();
+      const { session, peer } = sessionFor(s);
+      try {
+        const socket = await opened(s.c, s.sockets);
+        const before = socket.sent.length;
+        socket.readyState = state;
+        expect(session.closeOrigin).toBeNull();
+        expect(() => peer.emit(event, candidate)).not.toThrow();
+        expect(socket.sent).toHaveLength(before);
+        expect(() => s.c.sendCall(7)).toThrow(/not connected/);
+        expect(() => s.c.sendAck(7)).toThrow(/not connected/);
+        expect(() => s.c.sendInfoSdp("synthetic-answer", 7)).toThrow(/not connected/);
+      } finally {
+        session.close();
+      }
+    },
+  );
+
+  it.each(events)("drops %s before signaling has a socket", (event) => {
+    const s = client();
+    const { session, peer } = sessionFor(s);
+    try {
+      expect(() => peer.emit(event, candidate)).not.toThrow();
+      expect(s.sockets).toEqual([]);
+    } finally {
+      session.close();
+    }
+  });
+
+  it.each(["local", "socket"] as const)("ignores ICE after %s closure", async (ending) => {
+    const s = client();
+    const { session, peer } = sessionFor(s);
+    try {
+      const socket = await opened(s.c, s.sockets);
+      if (ending === "local") session.close();
+      else socket.close();
+      expect(session.closeOrigin).toBe(ending === "local" ? "local" : "signaling_closed");
+      const before = socket.sent.length;
+      for (const event of events) expect(() => peer.emit(event, candidate)).not.toThrow();
+      expect(socket.sent).toHaveLength(before);
+      expect(peer.close).toHaveBeenCalledOnce();
+    } finally {
+      session.close();
+    }
+  });
+
+  it.each(events)("preserves genuine send errors from %s on an open socket", async (event) => {
+    const s = client();
+    const { session, peer } = sessionFor(s);
+    try {
+      const socket = await opened(s.c, s.sockets);
+      const failure = new Error("synthetic-send-failure");
+      vi.spyOn(socket, "send").mockImplementation(() => {
+        throw failure;
+      });
+      expect(() => peer.emit(event, candidate)).toThrow(failure);
+      expect(session.closeOrigin).toBeNull();
+    } finally {
+      session.close();
+    }
+  });
+});
 
 describe("region rules", () => {
   it("derives host and cluster from the mega shard, and sends the country only on the sign request", async () => {

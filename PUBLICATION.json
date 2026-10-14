@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "releaseDate": "2026-10-14",
+  "runtimeSourceRelease": "https://github.com/genomez/ha-eufy-sdk-addon/releases/tag/s1-runtime-0.4.1.experimental.2",
+  "candidateSourceManifest": "SOURCE_MANIFEST.json",
+  "candidatePreparationReceiptsAreHistorical": true,
+  "repositoryPreservedFiles": [],
+  "knownLimitations": [
+    "Synthetic verification does not establish physical hardware or live-media acceptance."
+  ],
+  "verification": {
+    "testFiles": 254,
+    "tests": 4960
+  },
+  "npmPublication": false,
+  "changeScope": "Local ICE callbacks skip signaling sockets that are not open; required signaling messages remain strict."
+}

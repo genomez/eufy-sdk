@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "baseCommit": "5e81218e0a14109b1f002fe7a3ebd3e4accb7f31",
+  "repository": "https://github.com/genomez/eufy-sdk",
+  "reviewedImplementationPatches": {
+    "src/transport/rtc/session.ts": "007e3824531e71611e0706c2d0648de05505007e12979e29c6fe986d28f5bdde",
+    "src/transport/rtc/__tests__/signaling.spec.ts": "a6729cc5e61459d2aa8521506df3ae1836a9b6a216848a61bf8c9d58fe82670e"
+  },
+  "implementationUnmodified": false,
+  "packagingVersion": "0.2.1-s1.experimental.2",
+  "privateQualificationArtifactsUsed": false,
+  "sourceDate": "2026-10-14",
+  "changeDescription": "Local ICE callbacks require an open signaling socket."
+}
