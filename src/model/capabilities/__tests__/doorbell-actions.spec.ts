@@ -1,0 +1,71 @@
+import { type DoorbellActions, type QuickResponse } from "../doorbell.js";
+import { bind } from "./bind.js";
+import type { CommandContext } from "../types.js";
+import type { MediaProvider } from "../../../core/contracts.js";
+
+/** The bound `dev.doorbell()` object — every method is a member, derived in the barrel. */
+const doorbellOf = (media?: MediaProvider) => bind<DoorbellActions>("doorbell", ctx, { media });
+
+/**
+ * Doorbell capability-native surface (offline). The status LED is NOT a doorbell action — it's the
+ * shared `camera().setStatusLed()` surface (family-aware; see camera.spec). Here: play rides the
+ * `set-param` direct-binary scalar (1706, value = voice_id), and the `quickResponses` query accessor
+ * is present only when a media provider is bound (and parses its generic p2pQuery reply).
+ */
+const ctx: CommandContext = { channel: 3, codec: "camera", deviceType: 94, model: "T8214", paramIds: new Set() };
+
+describe("doorbell actions", () => {
+  it("has no setStatusLed — the LED is the shared camera surface, not a doorbell action", () => {
+    const { acts } = doorbellOf();
+    expect((acts as Record<string, unknown>).setStatusLed).toBeUndefined();
+  });
+
+  it("playQuickResponse with {engage:false} emits a direct-binary set-param (1706, value = voiceId)", async () => {
+    const { acts, sent } = doorbellOf();
+    // Caller says they already have a stream open → skip engagement, just dispatch.
+    await acts.playQuickResponse(2, { engage: false });
+    expect(sent).toEqual([{ kind: "set-param", param: 1706, value: 2, form: "direct-binary", channel: 3 }]);
+  });
+
+  it("playQuickResponse THROWS when engage is requested but no stream comes up (no silent success)", async () => {
+    const { acts, sent } = doorbellOf();
+
+    // (a) engage default, but the device isn't bound to a live client (no media provider).
+    await expect(acts.playQuickResponse(2)).rejects.toThrow(/not bound to a live client/);
+
+    // (b) engage default, media present but live() fails → must reject, and NOT dispatch 1706.
+    const media = {
+      live: async () => {
+        throw new Error("stream boom");
+      },
+    } as unknown as MediaProvider;
+    await expect(doorbellOf(media).acts.playQuickResponse(2)).rejects.toThrow(/could not engage a live stream/);
+    expect(sent).toEqual([]); // nothing fired into the void
+  });
+
+  it("quickResponses is absent without a media provider, and parses the generic p2pQuery reply with one", async () => {
+    expect(doorbellOf().acts.quickResponses).toBeUndefined();
+
+    // The doorbell owns the semantics: it queries sub-cmd 6237 and parses {voice_list} → QuickResponse[].
+    let queriedSubCmd = -1;
+    const media = {
+      p2pQuery: async (subCmd: number) => {
+        queriedSubCmd = subCmd;
+        return {
+          voice_list: [
+            { voice_id: 2, voice_name: "Please leave it at the door", voice_path: "/system/snd//QuickReply_2.snd" },
+            { voice_id: 100, voice_name: "hello", voice_path: "/user/quick_respone_diy//QuickReply_4.aac" },
+          ],
+        };
+      },
+    } as unknown as MediaProvider;
+    const { acts } = doorbellOf(media);
+    expect(acts.quickResponses).toBeDefined();
+    const list = await acts.quickResponses!();
+    expect(queriedSubCmd).toBe(6237); // doorbell supplies the sub-command, not the transport
+    expect(list).toEqual<QuickResponse[]>([
+      { voiceId: 2, name: "Please leave it at the door", path: "/system/snd//QuickReply_2.snd", custom: false },
+      { voiceId: 100, name: "hello", path: "/user/quick_respone_diy//QuickReply_4.aac", custom: true },
+    ]);
+  });
+});

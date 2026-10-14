@@ -1,0 +1,21 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "plugin": ["typedoc-plugin-markdown", "typedoc-vitepress-theme"],
+  "entryPoints": ["../src/index.ts"],
+  "tsconfig": "../tsconfig.json",
+  "out": "api",
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "excludeExternals": true,
+  "readme": "none",
+  "hideGenerator": true,
+  "hidePageHeader": true,
+  "useCodeBlocks": true,
+  "docsRoot": ".",
+  "navigation": {
+    "includeGroups": true,
+    "includeFolders": true
+  },
+  "disableSources": true,
+  "treatWarningsAsErrors": true
+}

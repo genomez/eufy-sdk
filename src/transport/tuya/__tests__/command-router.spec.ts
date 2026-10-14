@@ -1,0 +1,57 @@
+import { generateKeyPairSync } from "node:crypto";
+import { TuyaCommandRouter } from "../command-router.js";
+import type { TuyaHttpPost } from "../request.js";
+
+function makeTestRsaKey(): { n: string; e: string } {
+  const { publicKey } = generateKeyPairSync("rsa", { modulusLength: 512 });
+  const jwk = publicKey.export({ format: "jwk" }) as { n: string; e: string };
+  const n = BigInt("0x" + Buffer.from(jwk.n, "base64url").toString("hex")).toString(10);
+  const e = BigInt("0x" + Buffer.from(jwk.e, "base64url").toString("hex")).toString(10);
+  return { n, e };
+}
+
+describe("TuyaCommandRouter", () => {
+  it("bind resets loginOnce so a re-login triggers a fresh attempt", () => {
+    const router = new TuyaCommandRouter();
+    router.bind("uid-1");
+    // @ts-expect-error — accessing private field for test
+    router.loginOnce = Promise.resolve();
+    router.bind("uid-2");
+    // @ts-expect-error — accessing private field for test
+    expect(router.loginOnce).toBeNull();
+  });
+
+  it("clears loginOnce on login failure so the next dispatch retries rather than re-throwing the stale error", async () => {
+    const { n, e } = makeTestRsaKey();
+    const tokenReply = { success: true, result: { token: "TOK", publicKey: n, exponent: e } };
+
+    let loginAttempt = 0;
+    const http: TuyaHttpPost = async (_url, body) => {
+      const a = new URLSearchParams(body).get("a");
+      if (a === "smartlife.m.user.username.token.get") return tokenReply;
+      loginAttempt++;
+      if (loginAttempt === 1) return { success: false, errorMsg: "TRANSIENT_FAILURE" };
+      return { success: true, result: { sid: "good-sid", uid: "good-uid" } };
+    };
+
+    const router = new TuyaCommandRouter({ allowUnverified: true, http });
+    router.bind("uid-1");
+    router.registerDevice("sn-1", "dev-1");
+
+    const cmd = { kind: "aiot-dp" as const, dp: 101, value: true };
+
+    // First dispatch: login fails with a transient error.
+    await expect(router.dispatchCommand("sn-1", cmd)).rejects.toThrow(/TRANSIENT_FAILURE/);
+
+    // loginOnce must be cleared after failure.
+    // @ts-expect-error — accessing private field for test
+    expect(router.loginOnce).toBeNull();
+
+    // Second dispatch: login succeeds on the retry. publishDps may still fail (the stub doesn't handle
+    // thing.m.device.dp.publish) — but the error must NOT be the stale TRANSIENT_FAILURE, proving
+    // the login was retried rather than the rejected promise reused.
+    const secondErr = await router.dispatchCommand("sn-1", cmd).catch((err: Error) => err.message);
+    // second dispatch must not re-throw the stale TRANSIENT_FAILURE (it either succeeds or fails differently)
+    expect(secondErr ?? "").not.toMatch(/TRANSIENT_FAILURE/);
+  });
+});

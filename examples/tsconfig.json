@@ -1,0 +1,19 @@
+{
+  // Type-checks the examples against the BUILT library types (../dist/*.d.ts). Run `npm run build`
+  // first. `npm run typecheck:examples` runs this with --noEmit; CI does too. Examples are ESM .ts
+  // run directly by Node 24 (type-stripping), importing the ESM dist.
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    // Examples are run directly by Node (type-stripping), so imports name the real .ts files.
+    "allowImportingTsExtensions": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["**/*.ts"]
+}

@@ -1,0 +1,10 @@
+# Modified for genomez S1 experimental source preview, 2026-10-14.
+# Treat source as text so a stray control byte on one side of a diff can't flip the
+# whole file to "Binary file not shown". Also normalises line endings to LF.
+*.ts   text diff eol=lf
+*.tsx  text diff eol=lf
+*.js   text diff eol=lf
+*.mjs  text diff eol=lf
+*.json text diff eol=lf
+*.md   text diff eol=lf
+*.sh   text diff eol=lf

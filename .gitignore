@@ -1,0 +1,20 @@
+node_modules/
+dist/
+*.log
+
+# credentials — the SDK reads them from the environment, never from a committed file
+.env*
+!.env*.example
+
+# docs build artifacts
+docs/api/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+
+.DS_Store
+scratch/
+
+owner-rtc-probe.mjs
+ws-diag.mjs
+start-live-probe.mjs
+raw-probe.mjs

@@ -1,0 +1,114 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { EufyDevice } from "../../../core/types.js";
+
+/**
+ * `MqttCommandRouter.ensureSecurityMqttFor` — the broker-instance probe. The regional hostname fronts
+ * several independent backend instances that do not share subscribe routing, so the router probes each
+ * candidate with a SUBSCRIBE-only connection and pins the real connection to the first that grants.
+ * A device whose session is on none of them is reported as offline rather than connected to a broker
+ * that will never route to it.
+ *
+ * The account's own credentials are the ONLY credentials used — there is no cert override, so the
+ * router does no filesystem access at all. `discoverReachableInstance` and `SecureMqtt` are mocked (no
+ * real network); `secureTopic`/`buildAppShapedClientId`/`mqttUuidFrom` stay real (pure).
+ */
+const discoverReachableInstance = vi.fn();
+vi.mock("../broker-discovery.js", () => ({ discoverReachableInstance }));
+
+const connectMock = vi.fn().mockResolvedValue(undefined);
+let lastConstructedWith: any;
+vi.mock("../secure-mqtt.js", async () => {
+  const { EventEmitter } = await import("node:events");
+  class FakeSecureMqtt extends EventEmitter {
+    constructor(opts: any) {
+      super();
+      lastConstructedWith = opts;
+    }
+    connect = connectMock;
+  }
+  return {
+    SecureMqtt: FakeSecureMqtt,
+    secureTopic: (d: EufyDevice, leg: string = "res") => `cmd/${d.category}/${d.model}/${d.sn}/${leg}`,
+  };
+});
+
+const { MqttCommandRouter } = await import("../command-router.js");
+const { mqttUuidFrom } = await import("../app-client-id.js");
+
+const DEV = { sn: "T85D0K0000000000", category: "eufy_security", model: "T85D0" } as unknown as EufyDevice;
+
+const OWN_CREDS = {
+  endpoint_addr: "aiot-mqtt-us.anker.com",
+  endpoint_port: 8883,
+  certificate_pem: "OWN_CERT",
+  private_key: "OWN_KEY",
+  aws_root_ca1_pem: "CA",
+  user_id: "u1",
+};
+
+/** The install identity the one-shot client id is built from, as `MegaHttpClient` resolves it. */
+const OPENUDID = "a".repeat(16);
+
+function makeRouter() {
+  return new MqttCommandRouter({
+    mega: { getUserMqttInfo: vi.fn().mockResolvedValue(OWN_CREDS), openudid: OPENUDID } as any,
+    listDevices: () => [DEV],
+    ensureDevices: async () => {},
+    onCommandAck: () => {},
+    onError: () => {},
+  });
+}
+
+function granted(ip: string) {
+  return [{ ip, granted: true, grantedQos: 1, ms: 10 }];
+}
+function allDenied() {
+  return [
+    { ip: "1.1.1.1", granted: false, error: "denied", ms: 10 },
+    { ip: "2.2.2.2", granted: false, error: "denied", ms: 10 },
+  ];
+}
+
+describe("MqttCommandRouter.ensureSecurityMqttFor — broker-instance probe", () => {
+  beforeEach(() => {
+    discoverReachableInstance.mockReset();
+    lastConstructedWith = undefined;
+  });
+
+  it("pins the connection to the granting instance, using the account's own credentials", async () => {
+    discoverReachableInstance.mockResolvedValueOnce(granted("3.139.229.186"));
+    const router = makeRouter();
+
+    const { instanceIp } = await (router as any).ensureSecurityMqttFor(DEV);
+
+    expect(instanceIp).toBe("3.139.229.186");
+    expect(discoverReachableInstance).toHaveBeenCalledTimes(1);
+    expect(lastConstructedWith.credentials).toMatchObject({
+      certificate_pem: "OWN_CERT",
+      private_key: "OWN_KEY",
+      endpoint_addr: "aiot-mqtt-us.anker.com",
+      aws_root_ca1_pem: "CA",
+    });
+  });
+
+  it("identifies itself the same way on every run, being built from the install's own identity", async () => {
+    discoverReachableInstance.mockResolvedValue(granted("3.139.229.186"));
+
+    await (makeRouter() as any).ensureSecurityMqttFor(DEV);
+    const first = lastConstructedWith.clientId;
+    await (makeRouter() as any).ensureSecurityMqttFor(DEV);
+
+    expect(first.split("-")[3]).toBe(mqttUuidFrom(OPENUDID));
+    expect(lastConstructedWith.clientId.split("-")[3]).toBe(first.split("-")[3]);
+  });
+
+  it("throws after one probe round when every candidate denies", async () => {
+    discoverReachableInstance.mockResolvedValueOnce(allDenied());
+    const router = makeRouter();
+
+    await expect((router as any).ensureSecurityMqttFor(DEV)).rejects.toThrow(
+      /no broker instance currently holds this device's session/,
+    );
+    expect(discoverReachableInstance).toHaveBeenCalledTimes(1);
+  });
+});

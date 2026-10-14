@@ -1,0 +1,4 @@
+{
+  "//": "Marks the examples as ESM (they use import syntax + import.meta). Not published; this scope only affects examples/.",
+  "type": "module"
+}
