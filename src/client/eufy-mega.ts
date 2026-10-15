@@ -104,6 +104,7 @@ import { isHomeBase } from "../model/device-family.js";
 import { namespaceForCodec } from "../model/param-namespace.js";
 import { DeviceRegistry, type DeviceRecord, type ParamChange } from "./device-registry.js";
 import type {
+  SdkErrorOrigin,
   EufyMegaOptions,
   EufyMegaEvent,
   EufyMegaEventMap,
@@ -114,6 +115,8 @@ import type {
 } from "./types.js";
 
 export type {
+  SdkErrorOrigin,
+  SdkErrorContext,
   EufyMegaOptions,
   EufyMegaEvent,
   EufyMegaEventMap,
@@ -425,7 +428,7 @@ export class EufyMega extends EventEmitter {
     }
     this.registry = new DeviceRegistry({
       mega: this.mega,
-      onError: (e) => this.reportError(e),
+      onError: (e) => this.reportError(e, "device_registry"),
       logger: opts.logger,
     });
     this.p2p = new P2PCommandRouter({
@@ -444,7 +447,7 @@ export class EufyMega extends EventEmitter {
       },
       onConnect: (sn) => this.emit("p2pConnect", sn),
       onClose: (sn) => this.emit("p2pClose", sn),
-      onError: (e) => this.reportError(e),
+      onError: (e) => this.reportError(e, "p2p"),
       onLevel2Ready: (sn, cipherId) => this.emit("p2pLevel2Ready", { stationSn: sn, cipherId }),
       onFrame: (stationSn, f) => this.onP2PFrame(stationSn, f),
     });
@@ -465,7 +468,7 @@ export class EufyMega extends EventEmitter {
       onFrame: (stationSn, frame) => this.onRtcFrame(stationSn, frame),
       ffmpegPath: opts.ffmpegPath,
       ffmpegLogLevel: opts.ffmpegLogLevel,
-      onError: (e) => this.reportError(e),
+      onError: (e) => this.reportError(e, "rtc_session"),
     });
     this.mqtt = new MqttCommandRouter({
       mega: this.mega,
@@ -476,7 +479,7 @@ export class EufyMega extends EventEmitter {
         this.reconcileStorageTelemetryOwners();
       },
       onCommandAck: (info) => this.emit("commandAck", info as EufyMegaEventMap["commandAck"][0]),
-      onError: (e) => this.reportError(e),
+      onError: (e) => this.reportError(e, "mqtt"),
       // The `a2` account id an `eufy_life` DP frame embeds â€” the owning member's `admin_user_id`,
       // falling back to the logged-in account's user id (the confirmed script path does the same).
       resolveAccountId: (dev) => {
@@ -552,7 +555,7 @@ export class EufyMega extends EventEmitter {
       });
       return;
     }
-    this.reportError(e);
+    this.reportError(e, "command_execution");
   }
 
   /**
@@ -570,14 +573,14 @@ export class EufyMega extends EventEmitter {
    * Only reported-error paths reach here â€” an error thrown straight out of a direct call is the caller's
    * to handle.
    */
-  private reportError(e: unknown): void {
+  private reportError(e: unknown, origin: SdkErrorOrigin): void {
     const err = e instanceof Error ? e : new Error(String(e));
     if (err instanceof SessionExpiredError) {
       if (this.listenerCount("sessionExpired")) this.emit("sessionExpired", err);
       else this.opts.logger?.warn?.(`[eufy] ${err.message}`);
       return;
     }
-    if (this.listenerCount("error")) this.emit("error", err);
+    if (this.listenerCount("error")) this.emit("error", err, { origin });
     else this.opts.logger?.warn?.(`[eufy] ${err.message}`);
   }
 
@@ -986,7 +989,7 @@ export class EufyMega extends EventEmitter {
       this.boundParamIds.set(sn, new Set([...(this.boundParamIds.get(sn) ?? []), ...ctx.paramIds]));
       this.emit("deviceState", this.deviceState(sn));
     } catch (e) {
-      this.reportError(e);
+      this.reportError(e, "state_refresh");
     }
   }
 
@@ -1028,7 +1031,7 @@ export class EufyMega extends EventEmitter {
             if (!refreshed) return;
             this.emitSemantic(event, payload, { edge: opts.edge });
           })
-          .catch((error) => this.reportError(error));
+          .catch((error) => this.reportError(error, "state_refresh"));
         void emission;
         return;
       }
@@ -1834,7 +1837,7 @@ export class EufyMega extends EventEmitter {
           if (error instanceof RealtimeStartupSupersededError) return;
           readiness.push.failed++;
           readiness.push.pending--;
-          this.reportError(error);
+          this.reportError(error, "push_connection");
         },
       );
       const mqttStarts = scopes.map((scope) =>
@@ -1846,7 +1849,7 @@ export class EufyMega extends EventEmitter {
           (error) => {
             readiness.mqtt.failed++;
             readiness.mqtt.pending--;
-            this.reportError(error);
+            this.reportError(error, "mqtt");
           },
         ),
       );
@@ -1855,7 +1858,7 @@ export class EufyMega extends EventEmitter {
           readiness.wiredP2p = result;
         },
         (error) => {
-          this.reportError(error);
+          this.reportError(error, "p2p");
           readiness.wiredP2p.pending = 0;
           startupFailed = true;
         },
@@ -1874,7 +1877,7 @@ export class EufyMega extends EventEmitter {
       this.settleRealtimeGeneration(generation, failures || startupFailed ? "partial" : "ready");
       this.scheduleStateRefresh(generation);
     } catch (e) {
-      this.reportError(e);
+      this.reportError(e, "realtime_startup");
       readiness.push.failed += readiness.push.pending;
       readiness.push.pending = 0;
       this.settleRealtimeGeneration(generation, epoch === this.realtimeEpoch ? "partial" : "superseded");
@@ -2021,7 +2024,7 @@ export class EufyMega extends EventEmitter {
             failure = stateRefreshFailure(error);
             retiredSession = consumeRetiredInformationRead(error) && stations.size === 1;
             connectionDeadline = consumeConnectionDeadline(error) && stations.size === 1;
-            this.reportError(error);
+            this.reportError(error, "state_refresh");
           }
         }
         if (stations.size && epoch === this.realtimeEpoch && !abort.signal.aborted) {
@@ -2105,7 +2108,7 @@ export class EufyMega extends EventEmitter {
     try {
       result = await this.refreshRealtimeStates(generation, "scheduled");
     } catch (error) {
-      this.reportError(error);
+      this.reportError(error, "state_refresh");
     } finally {
       if (generation.epoch === this.realtimeEpoch && !generation.abort.signal.aborted) {
         generation.stateRefreshFailures = result.refreshed ? 0 : (generation.stateRefreshFailures ?? 0) + 1;
@@ -2189,7 +2192,7 @@ export class EufyMega extends EventEmitter {
       if (generation?.epoch === epoch && (await this.refreshRealtimeStates(generation, "cloud_poll")).refreshed)
         this.scheduleStateRefresh(generation, true);
     } catch (e) {
-      this.reportError(e);
+      this.reportError(e, "cloud_poll");
     }
   }
 
@@ -2412,7 +2415,7 @@ export class EufyMega extends EventEmitter {
       this.boundParamIds.set(sn, ctx.paramIds);
       this.emit("deviceCapabilities", { deviceSn: sn, gained, capabilities: [...dev.capabilities] });
     } catch (e) {
-      this.reportError(e);
+      this.reportError(e, "state_refresh");
     }
   }
 
@@ -2625,10 +2628,10 @@ export class EufyMega extends EventEmitter {
       for (const out of decodeCapabilityEvent(signal, caps))
         this.emitSemantic(out.event, out.payload, { edge: true, refresh: out.refresh });
     });
-    transport.on("error", (e) => this.reportError(e));
+    transport.on("error", (e) => this.reportError(e, "mqtt"));
 
     this.emit("connect");
-    for (const e of whileConnecting) this.reportError(e);
+    for (const e of whileConnecting) this.reportError(e, "mqtt");
     return transport;
   }
 
@@ -2649,10 +2652,10 @@ export class EufyMega extends EventEmitter {
             .then((dps) => {
               if (dps) this.tuyaDpRouter.deliver(d.sn, dps);
             })
-            .catch((e) => this.reportError(e));
+            .catch((e) => this.reportError(e, "state_refresh"));
         }
       } catch (e) {
-        this.reportError(e);
+        this.reportError(e, "realtime_subscription");
       }
     }
   }
@@ -2988,7 +2991,7 @@ export class EufyMega extends EventEmitter {
     try {
       await this.mega.registerPushToken(persisted.creds.fcmToken);
     } catch (e) {
-      this.reportError(e);
+      this.reportError(e, "push_connection");
     }
 
     const client = new PushClient(persisted.creds, this.opts.logger, this.pushLifecycle);
@@ -3026,7 +3029,7 @@ export class EufyMega extends EventEmitter {
       client.once("error", onError);
       client.connect();
     });
-    client.on("error", (e) => this.reportError(e));
+    client.on("error", (e) => this.reportError(e, "push_connection"));
     return client;
   }
 
@@ -3059,7 +3062,7 @@ export class EufyMega extends EventEmitter {
       }
     } catch (e) {
       this.thumbnailEvidence.decision("admission_error");
-      this.reportError(e);
+      this.reportError(e, "image");
     }
   }
 

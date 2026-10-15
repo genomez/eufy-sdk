@@ -2,7 +2,7 @@ import { consumeRetiredInformationRead } from "../retired-information-read.js";
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EufyDevice } from "../../../core/types.js";
-import { RtcCommandRouter } from "../command-router.js";
+import { RtcCommandRouter, type RtcIdentity } from "../command-router.js";
 import { buildPortalHeader, parsePortalHeader } from "../portal-packet.js";
 import type { RtcSession, RtcSessionOptions } from "../session.js";
 
@@ -52,11 +52,18 @@ class Session extends EventEmitter {
     return true;
   }
 }
-function setup(options: { enabled?: boolean; idle?: number; configure?: (s: Session, index: number) => void } = {}) {
+function setup(
+  options: {
+    enabled?: boolean;
+    idle?: number;
+    identity?: () => RtcIdentity | undefined;
+    configure?: (s: Session, index: number) => void;
+  } = {},
+) {
   const sessions: Session[] = [];
   const onFrame = vi.fn();
   const router = new RtcCommandRouter({
-    identity: () => ({ authToken: "synthetic", userId: "synthetic-user" }),
+    identity: options.identity ?? (() => ({ authToken: "synthetic", userId: "synthetic-user" })),
     shard: () => "us-pr",
     accountName: () => "synthetic",
     findDevice: () => ({ sn: SN, model: "T9000", stationSn: SN }) as EufyDevice,
@@ -77,6 +84,22 @@ const tick = () => vi.advanceTimersByTimeAsync(0);
 async function open(router: RtcCommandRouter) {
   const lease = await router.sessionFor(SN);
   lease.release();
+}
+
+async function prepareLeaseBlockedReplacement(options: Parameters<typeof setup>[0] = {}) {
+  const state = setup({
+    ...options,
+    configure: (session, index) => {
+      if (index === 1) session.autoOpen = false;
+      options.configure?.(session, index);
+    },
+  });
+  await open(state.router);
+  await vi.advanceTimersByTimeAsync(270_000);
+  const lease = await state.router.sessionFor(SN);
+  state.sessions[1]!.open();
+  await tick();
+  return { ...state, lease };
 }
 
 describe("bounded proactive RTC session replacement", () => {
@@ -338,6 +361,321 @@ describe("bounded proactive RTC session replacement", () => {
     router.close();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("retries a lease-blocked idle timeout once after release, a fresh read, and the cooldown", async () => {
+    const { router, sessions } = setup({
+      configure: (s, index) => {
+        if (index === 1) s.autoOpen = false;
+      },
+    });
+    await open(router);
+    await vi.advanceTimersByTimeAsync(270_000);
+    const lease = await router.sessionFor(SN);
+    sessions[1]!.open();
+    await vi.advanceTimersByTimeAsync(15_000);
+    const failed = router.getSessionRefreshDiagnostics().lastFailure;
+    expect(failed).toMatchObject({
+      phase: "idle",
+      failure: "replacement_timeout",
+      candidateConnected: true,
+      informationVerified: true,
+      originalLeasesAtFinish: 1,
+    });
+    expect(sessions[0]!.closed).toBe(false);
+    expect(sessions[1]!.closed).toBe(true);
+    lease.release();
+    await vi.advanceTimersByTimeAsync(1);
+    await router.refreshInformation(SN);
+    await vi.advanceTimersByTimeAsync(29_998);
+    expect(sessions).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sessions).toHaveLength(3);
+    expect(sessions.map((s) => s.closed)).toEqual([true, true, false]);
+    expect(sessions.map((s) => s.sends)).toEqual([1, 1, 1]);
+    expect(router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 2, failures: 1, successes: 1 });
+    expect(router.getSessionRefreshDiagnostics().lastFailure).toEqual(failed);
+    expect(router.getSessionRefreshDiagnostics().lastAttempt).toMatchObject({
+      attemptOrdinal: 2,
+      originalSessionGeneration: 1,
+      candidateSessionGeneration: 3,
+      retryProofStartedAtMs: 285_001,
+      retryProofFinishedAtMs: 285_001,
+      phase: "adoption",
+      outcome: "success",
+    });
+    router.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["missing", "before failure", "begun before failure", "ACK only"])(
+    "rejects %s original-read proof after a lease-blocked timeout",
+    async (proof) => {
+      const { router, sessions, lease } = await prepareLeaseBlockedReplacement();
+      await vi.advanceTimersByTimeAsync(14_000);
+      if (proof === "before failure") await router.refreshInformation(SN);
+      let read: ReturnType<RtcCommandRouter["refreshInformation"]> | undefined;
+      if (proof === "begun before failure") {
+        sessions[0]!.answer = false;
+        read = router.refreshInformation(SN);
+      }
+      await vi.advanceTimersByTimeAsync(1_001);
+      if (read) {
+        sessions[0]!.emit(
+          "commandData",
+          Buffer.concat([buildPortalHeader(1103, 4, 255, sessions[0]!.lastSegment, 1), Buffer.alloc(4)]),
+          1,
+        );
+        const body = Buffer.from('{"params":[]}');
+        sessions[0]!.emit("commandData", Buffer.concat([buildPortalHeader(1103, body.length, 0, 0, 0), body]), 3);
+        await read;
+      }
+      if (proof === "ACK only") {
+        sessions[0]!.ackOnly = true;
+        const incomplete = expect(router.refreshInformation(SN)).rejects.toThrow("information response timed out");
+        await vi.advanceTimersByTimeAsync(8_000);
+        await incomplete;
+      }
+      lease.release();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sessions).toHaveLength(2);
+      expect(router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 1, failures: 1, successes: 0 });
+      expect(sessions[0]!.closed).toBe(proof === "ACK only");
+      router.close();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("waits for every original lease at the retry cooldown and adopts only after the final release", async () => {
+    const { router, sessions, lease } = await prepareLeaseBlockedReplacement();
+    const second = await router.sessionFor(SN);
+    await vi.advanceTimersByTimeAsync(15_001);
+    expect(router.getSessionRefreshDiagnostics().lastFailure?.originalLeasesAtFinish).toBe(2);
+    await router.refreshInformation(SN);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(sessions).toHaveLength(2);
+    lease.release();
+    lease.release();
+    await tick();
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]!.closed).toBe(false);
+    second.release();
+    await tick();
+    expect(sessions).toHaveLength(3);
+    expect(router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 2, failures: 1, successes: 1 });
+    expect(router.getSessionRefreshDiagnostics().lastAttempt?.originalLeasesAtFinish).toBe(0);
+    router.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("requires another complete read when lease-blocked retry proof expires during a long hold", async () => {
+    const { router, sessions, lease } = await prepareLeaseBlockedReplacement();
+    await vi.advanceTimersByTimeAsync(15_001);
+    await router.refreshInformation(SN);
+    await vi.advanceTimersByTimeAsync(60_000);
+    lease.release();
+    await tick();
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]!.closed).toBe(false);
+    await router.refreshInformation(SN);
+    await tick();
+    expect(sessions).toHaveLength(3);
+    expect(router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 2, failures: 1, successes: 1 });
+    router.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("exhausts the retry budget when a new lease also outlasts the second verified candidate", async () => {
+    const { router, sessions, lease } = await prepareLeaseBlockedReplacement({
+      configure: (session, index) => {
+        if (index === 2) session.autoOpen = false;
+      },
+    });
+    await vi.advanceTimersByTimeAsync(15_001);
+    lease.release();
+    await router.refreshInformation(SN);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(sessions).toHaveLength(3);
+    const secondLease = await router.sessionFor(SN);
+    sessions[2]!.open();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(sessions.map((session) => session.closed)).toEqual([false, true, true]);
+    expect(
+      router.getSessionRefreshDiagnostics().recent.map((entry) => [entry.attemptOrdinal, entry.phase, entry.failure]),
+    ).toEqual([
+      [1, "idle", "replacement_timeout"],
+      [2, "idle", "replacement_timeout"],
+    ]);
+    secondLease.release();
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(30_000);
+      await router.refreshInformation(SN);
+    }
+    expect(sessions).toHaveLength(3);
+    expect(router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 2, failures: 2, successes: 0 });
+    expect(sessions[0]!.closed).toBe(false);
+    router.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["closed", "disconnected", "unknown error", "signaling error"])(
+    "does not grant an idle retry for a verified candidate that becomes %s",
+    async (ending) => {
+      const { router, sessions, lease } = await prepareLeaseBlockedReplacement();
+      if (ending === "closed") sessions[1]!.close();
+      else if (ending === "disconnected") sessions[1]!.isConnected = false;
+      else
+        sessions[1]!.emit(
+          "error",
+          new Error(ending === "signaling error" ? "RTC scall 486 after 0 retries" : "synthetic failure"),
+        );
+      await vi.advanceTimersByTimeAsync(15_001);
+      expect(router.getSessionRefreshDiagnostics().lastFailure).toMatchObject({
+        phase: "idle",
+        failure: "replacement_timeout",
+        informationVerified: true,
+        originalLeasesAtFinish: 1,
+      });
+      lease.release();
+      await router.refreshInformation(SN);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sessions).toHaveLength(2);
+      expect(sessions[0]!.closed).toBe(false);
+      expect(sessions[1]!.closed).toBe(true);
+      expect(router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 1, failures: 1, successes: 0 });
+      router.close();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(["missing", "changed"])(
+    "does not adopt or retry a verified candidate after identity is %s",
+    async (change) => {
+      let identity: RtcIdentity | undefined = { authToken: "synthetic", userId: "synthetic-user" };
+      const { router, sessions, lease } = await prepareLeaseBlockedReplacement({ identity: () => identity });
+      identity = change === "missing" ? undefined : { authToken: "synthetic", userId: "other-synthetic-user" };
+      lease.release();
+      await tick();
+      expect(router.getSessionRefreshDiagnostics().lastFailure).toMatchObject({
+        phase: "adoption",
+        failure: "superseded",
+        informationVerified: true,
+      });
+      identity = { authToken: "synthetic", userId: "synthetic-user" };
+      await vi.advanceTimersByTimeAsync(1);
+      await router.refreshInformation(SN);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sessions).toHaveLength(2);
+      expect(sessions.map((session) => session.closed)).toEqual([false, true]);
+      router.close();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(["before timeout", "after timeout"])(
+    "does not retry a lease-blocked owner tainted %s and retires it after release",
+    async (timing) => {
+      const { router, sessions, lease } = await prepareLeaseBlockedReplacement();
+      if (timing === "after timeout") {
+        await vi.advanceTimersByTimeAsync(15_001);
+        await router.refreshInformation(SN);
+      }
+      sessions[0]!.answer = false;
+      const read = expect(router.refreshInformation(SN)).rejects.toThrow("information response timed out");
+      await vi.advanceTimersByTimeAsync(8_000);
+      await read;
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(sessions).toHaveLength(2);
+      expect(sessions.map((session) => session.closed)).toEqual([false, true]);
+      expect(router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 1, failures: 1, successes: 0 });
+      lease.release();
+      expect(sessions[0]!.closed).toBe(true);
+      router.close();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(["missing", "changed"])(
+    "does not grant an idle-timeout retry when identity is %s at failure even if later restored",
+    async (change) => {
+      const originalIdentity: RtcIdentity = { authToken: "synthetic", userId: "synthetic-user" };
+      let identity: RtcIdentity | undefined = originalIdentity;
+      const { router, sessions, lease } = await prepareLeaseBlockedReplacement({ identity: () => identity });
+      identity = change === "missing" ? undefined : { authToken: "synthetic", userId: "other-synthetic-user" };
+      await vi.advanceTimersByTimeAsync(15_001);
+      expect(router.getSessionRefreshDiagnostics().lastFailure).toMatchObject({
+        phase: "idle",
+        failure: "replacement_timeout",
+        informationVerified: true,
+        originalLeasesAtFinish: 1,
+      });
+      identity = originalIdentity;
+      lease.release();
+      await router.refreshInformation(SN);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sessions).toHaveLength(2);
+      expect(sessions.map((session) => session.closed)).toEqual([false, true]);
+      expect(router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 1, failures: 1, successes: 0 });
+      router.close();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(["missing", "changed"])(
+    "does not start an idle-timeout retry when identity becomes %s during cooldown",
+    async (change) => {
+      let identity: RtcIdentity | undefined = { authToken: "synthetic", userId: "synthetic-user" };
+      const { router, sessions, lease } = await prepareLeaseBlockedReplacement({ identity: () => identity });
+      await vi.advanceTimersByTimeAsync(15_001);
+      lease.release();
+      await router.refreshInformation(SN);
+      identity = change === "missing" ? undefined : { authToken: "synthetic", userId: "other-synthetic-user" };
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sessions).toHaveLength(2);
+      expect(sessions.map((session) => session.closed)).toEqual([false, true]);
+      expect(router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 1, failures: 1, successes: 0 });
+      router.close();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(["router close", "peer close"])(
+    "keeps a newer owner and its diagnostics after %s cancels an idle-timeout retry",
+    async (ending) => {
+      const { router, sessions, lease, onFrame } = await prepareLeaseBlockedReplacement({
+        configure: (session, index) => {
+          if (index === 2) session.autoOpen = false;
+        },
+      });
+      await vi.advanceTimersByTimeAsync(15_001);
+      lease.release();
+      await router.refreshInformation(SN);
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(sessions).toHaveLength(3);
+      if (ending === "router close") router.close();
+      else sessions[0]!.close();
+      const current = await router.sessionFor(SN);
+      await tick();
+      expect(current.session).toBe(sessions[3]);
+      expect(sessions.slice(0, 3).every((session) => session.closed)).toBe(true);
+      const snapshot = router.getSessionRefreshDiagnostics();
+      const reads = router.getReadDiagnostics();
+      if (ending === "router close") expect(snapshot).toMatchObject({ attempts: 0, failures: 0, successes: 0 });
+      else expect(snapshot.lastAttempt?.outcome).toBe("cancelled");
+      sessions[2]!.emit("connected");
+      const body = Buffer.from('{"params":[]}');
+      sessions[2]!.emit("commandData", Buffer.concat([buildPortalHeader(1103, body.length, 0, 0, 0), body]), 3);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sessions).toHaveLength(4);
+      expect(sessions[3]!.closed).toBe(false);
+      expect(router.getSessionRefreshDiagnostics()).toEqual(snapshot);
+      expect(router.getReadDiagnostics()).toEqual(reads);
+      expect(onFrame).toHaveBeenCalledTimes(2);
+      for (const retired of sessions.slice(0, 3)) expect(retired.eventNames()).toEqual([]);
+      current.release();
+      router.close();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
 
   it.each([486, 408])("retains signaling %s events separately from the eventual connection timeout", async (status) => {
     const { router, sessions } = setup({

@@ -1,17 +1,34 @@
 {
   "schemaVersion": 1,
-  "releaseDate": "2026-10-14",
-  "runtimeSourceRelease": "https://github.com/genomez/ha-eufy-sdk-addon/releases/tag/s1-runtime-0.4.1.experimental.2",
+  "releaseDate": "2026-10-15",
+  "version": "0.2.1-s1.experimental.4",
+  "runtimeSourceRelease": "https://github.com/genomez/ha-eufy-sdk-addon/releases/tag/s1-runtime-0.4.1.experimental.4",
   "candidateSourceManifest": "SOURCE_MANIFEST.json",
   "candidatePreparationReceiptsAreHistorical": true,
-  "repositoryPreservedFiles": [],
   "knownLimitations": [
     "Synthetic verification does not establish physical hardware or live-media acceptance."
   ],
   "verification": {
-    "testFiles": 254,
-    "tests": 4960
+    "tests": 4983,
+    "passed": 4981,
+    "windowsOnlyDocSnippetFailures": 2
   },
   "npmPublication": false,
-  "changeScope": "Local ICE callbacks skip signaling sockets that are not open; required signaling messages remain strict."
+  "changeScope": "Inherited signaling safety, guarded renewal retry (from unpublished experimental.3) and SDK error-origin labels.",
+  "publicationDocumentationOverrides": {
+    "README.md": {
+      "candidateSha256": "220480052b4fb40a4c62877170c9ef60cf5f81e070f8b33352619801c986c883",
+      "publicationSha256": "0994a30c196712c4d8b636b54e7176564a785b92bea053052afcec98c14f7d2a",
+      "reason": "Replace local-preparation status with the published prerelease link; implementation unchanged."
+    },
+    "EXPERIMENTAL.md": {
+      "candidateSha256": "3e533688e65869c6f39989184b960a92995d53a4435936c0ec3f25731780d36d",
+      "publicationSha256": "1ddca0b238f1be5fd677ca13ab393f303d83a6a7d426fa190c1c4d09fdb28af4",
+      "reason": "Replace local-preparation status with the published prerelease link; implementation unchanged."
+    },
+    "PUBLICATION.json": {
+      "candidateSha256": "d1b76bb0acba45d68c6aa39b82465e7636a675f03c7b518f45656d8e05e81db7",
+      "reason": "Rewritten at publication; records this publication's scope."
+    }
+  }
 }

@@ -160,7 +160,41 @@ describe("EufyMega auto-realtime", () => {
       state: "ready",
       push: { required: 1, ready: 1, failed: 0, pending: 0 },
     });
+    const listener = vi.fn();
+    c.eufy.on("error", listener);
+    const error = new Error("Synthetic push connection failure");
+    client.emit("error", error);
+    expect(listener).toHaveBeenCalledExactlyOnceWith(error, { origin: "push_connection" });
     await c.eufy.disconnect();
+  });
+
+  it("reports RTC session errors with a fixed origin and preserves one-argument listeners", async () => {
+    const { eufy } = makeClient({ mqtt: 0 });
+    const rtc = (eufy as any).rtc;
+    const session = Object.assign(new EventEmitter(), {
+      isConnected: true,
+      connect: async () => {
+        session.emit("connected");
+      },
+      close: () => {
+        session.emit("close");
+      },
+    });
+    rtc.deps.identity = () => ({ userId: "synthetic-user", authToken: "synthetic-token" });
+    rtc.deps.createSession = () => session;
+    const listener = vi.fn();
+    const errors: Error[] = [];
+    eufy.on("error", listener);
+    eufy.on("error", (error) => errors.push(error));
+    try {
+      await rtc.sessionFor("T8000P0000000000");
+      const error = new Error("Synthetic RTC session failure");
+      session.emit("error", error);
+      expect(listener).toHaveBeenCalledExactlyOnceWith(error, { origin: "rtc_session" });
+      expect(errors).toEqual([error]);
+    } finally {
+      await eufy.disconnect();
+    }
   });
 
   it("keeps wired P2P pending until the station handshake completes", async () => {
@@ -310,7 +344,7 @@ describe("EufyMega auto-realtime", () => {
     vi.spyOn((c.eufy as any).p2p, "ensureStation").mockImplementation(async (...args: unknown[]) => {
       const sn = args[0];
       if (sn === "wired-b") {
-        (c.eufy as any).reportError(p2pError);
+        (c.eufy as any).reportError(p2pError, "p2p");
         throw p2pError;
       }
     });
@@ -443,8 +477,8 @@ describe("EufyMega sessionExpired event", () => {
     c.eufy.on("error", (e) => errors.push(e));
     c.eufy.on("sessionExpired", (e) => expired.push(e));
 
-    (c.eufy as any).reportError(new SessionExpiredError("token kicked out"));
-    (c.eufy as any).reportError(new Error("transient boom"));
+    (c.eufy as any).reportError(new SessionExpiredError("token kicked out"), "cloud_poll");
+    (c.eufy as any).reportError(new Error("transient boom"), "cloud_poll");
 
     // Auth loss goes to the dedicated event, NOT the generic error bus.
     expect(expired).toHaveLength(1);

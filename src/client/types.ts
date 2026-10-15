@@ -18,6 +18,39 @@ import type { VacuumMapSnapshot } from "../model/index.js";
 import type { PushEvent, RawPushMessage } from "../transport/push/types.js";
 import type { AvailabilityObservation, EufyDevice, RealtimeMessage } from "../core/types.js";
 
+/**
+ * Fixed technical origin of a reported error.
+ *
+ * - `device_registry`: cloud inventory and device-record retrieval.
+ * - `p2p`: P2P routing, sessions and wired-session startup.
+ * - `rtc_session`: RTC router session errors.
+ * - `mqtt`: MQTT routing, connection startup and transport errors.
+ * - `command_execution`: asynchronous command failures outside convergence outcomes.
+ * - `state_refresh`: state reads, rebinding and capability refreshes.
+ * - `realtime_startup`: realtime generation orchestration.
+ * - `cloud_poll`: periodic cloud inventory and parameter polling.
+ * - `push_connection`: push token registration, startup and connection errors.
+ * - `realtime_subscription`: device realtime subscription setup.
+ * - `image`: stored-image admission.
+ */
+export type SdkErrorOrigin =
+  | "device_registry"
+  | "p2p"
+  | "rtc_session"
+  | "mqtt"
+  | "command_execution"
+  | "state_refresh"
+  | "realtime_startup"
+  | "cloud_poll"
+  | "push_connection"
+  | "realtime_subscription"
+  | "image";
+
+/** Fixed origin attached to a reported error; contains no device or account identity. */
+export interface SdkErrorContext {
+  readonly origin: SdkErrorOrigin;
+}
+
 /** Count-only startup status for one auto-managed realtime transport plane. */
 export interface RealtimePlaneReadiness {
   /** Number of transport starts selected for the plane. */
@@ -405,7 +438,7 @@ export type EufyMegaEventMap = {
    */
   sessionExpired: [err: SessionExpiredError];
   // Any transport error.
-  error: [err: Error];
+  error: [err: Error, context: SdkErrorContext];
 };
 
 /** Event names {@link EufyMega} can emit. */

@@ -135,6 +135,23 @@ carries each event, and how P2P opens on demand, is covered in [Realtime transpo
 Low-level escape hatches remain (`message`, `p2p`, `pushRaw`, connect/disconnect lifecycle, `error`)
 for when you want the raw frame.
 
+The `error` event supplies `(error, { origin })`; one-argument listeners continue to receive the same
+`Error`. `origin` is a fixed `SdkErrorOrigin` label, never a device or account identifier:
+
+| Origin                  | Technical job                                               |
+| ----------------------- | ----------------------------------------------------------- |
+| `device_registry`       | Cloud inventory and device-record retrieval.                |
+| `p2p`                   | P2P routing, sessions and wired-session startup.            |
+| `rtc_session`           | RTC router session errors.                                  |
+| `mqtt`                  | MQTT routing, connection startup and transport errors.      |
+| `command_execution`     | Asynchronous command failures outside convergence outcomes. |
+| `state_refresh`         | State reads, rebinding and capability refreshes.            |
+| `realtime_startup`      | Realtime generation orchestration.                          |
+| `cloud_poll`            | Periodic cloud inventory and parameter polling.             |
+| `push_connection`       | Push token registration, startup and connection errors.     |
+| `realtime_subscription` | Device realtime subscription setup.                         |
+| `image`                 | Stored-image admission.                                     |
+
 A write the device accepted on the wire and then never applied surfaces as its own
 **`commandUnconfirmed`** event, not on `error`. Every setter resolves once the transport has carried the
 command — that is delivery, not convergence — and the observation a member declares decides separately

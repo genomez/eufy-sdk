@@ -533,10 +533,13 @@ describe("cloud-param poll loop", () => {
       .mockRejectedValueOnce(boom)
       .mockResolvedValue({ params: [], added: [], removed: [], reported: [] });
     const errors: unknown[] = [];
+    const listener = vi.fn();
+    eufy.on("error", listener);
     eufy.on("error", (e) => errors.push(e));
 
     (eufy as any).schedulePoll();
     await vi.advanceTimersByTimeAsync(1000);
+    expect(listener).toHaveBeenCalledExactlyOnceWith(boom, { origin: "cloud_poll" });
     expect(errors).toContain(boom); // surfaced, not thrown
 
     await vi.advanceTimersByTimeAsync(1000);
@@ -1341,9 +1344,12 @@ describe("generation-owned RTC state refresh", () => {
   it("backs off, pauses after three failures, and resumes after a successful normal sweep", async () => {
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     const errors: unknown[] = [];
+    const listener = vi.fn();
+    eufy.on("error", listener);
     eufy.on("error", (error) => errors.push(error));
     await (eufy as any).ensureRealtime();
-    refresh.mockRejectedValue(new Error("Synthetic read failure"));
+    const error = new Error("Synthetic read failure");
+    refresh.mockRejectedValue(error);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(refresh).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(59_999);
@@ -1355,6 +1361,7 @@ describe("generation-owned RTC state refresh", () => {
     await vi.advanceTimersByTimeAsync(600_000);
     expect(refresh).toHaveBeenCalledTimes(4);
     expect(errors).toHaveLength(3);
+    expect(listener.mock.calls).toEqual(Array.from({ length: 3 }, () => [error, { origin: "state_refresh" }]));
     expect(
       eufy
         .getStateRefreshDiagnostics()

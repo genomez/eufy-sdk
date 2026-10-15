@@ -140,8 +140,10 @@ interface StationSession {
   refreshTimer?: ReturnType<typeof setTimeout>;
   refreshPending?: boolean;
   refreshAttempts?: number;
-  /** Earliest second attempt after a connection-stage failure. */
+  /** Earliest second attempt after an eligible replacement failure. */
   refreshRetryAtMs?: number;
+  /** User identity required by a retry after a lease-blocked verified replacement. */
+  refreshRetryUserId?: string;
   /** Successful complete read on this generation; ACK alone is insufficient. */
   lastInformationRead?: { startedAtMs: number; finishedAtMs: number };
   replacement?: { controller: AbortController; candidate?: StationSession };
@@ -1001,6 +1003,7 @@ export class RtcCommandRouter {
     return (
       attempts === 1 &&
       st.refreshRetryAtMs !== undefined &&
+      (st.refreshRetryUserId === undefined || this.deps.identity()?.userId === st.refreshRetryUserId) &&
       read !== undefined &&
       read.startedAtMs > st.refreshRetryAtMs - 30_000 &&
       Date.now() >= read.finishedAtMs &&
@@ -1058,13 +1061,17 @@ export class RtcCommandRouter {
     });
   }
 
-  /** Verify a replacement within fifteen seconds, then adopt it only between operations. */
+  /**
+   * Verify a replacement within fifteen seconds and adopt it only between operations.
+   * A verified candidate blocked by leases may use the single proof-gated retry after its cooldown.
+   */
   private async replaceSession(sn: string, original: StationSession): Promise<void> {
     if (this.sessions.get(sn) !== original || original.replacement || !this.canRefresh(original)) return;
     const retryProof = original.refreshAttempts === 1 ? original.lastInformationRead : undefined;
     original.refreshAttempts = (original.refreshAttempts ?? 0) + 1;
     const attemptOrdinal = original.refreshAttempts;
     original.refreshRetryAtMs = undefined;
+    original.refreshRetryUserId = undefined;
     const epoch = this.epoch;
     const started = Date.now();
     const replacement: NonNullable<StationSession["replacement"]> = { controller: new AbortController() };
@@ -1082,10 +1089,12 @@ export class RtcCommandRouter {
     let phase: RenewalPhase = "connect";
     let failure: RenewalFailure | null = null;
     let informationVerified = false;
+    let replacementUserId: string | undefined;
     let outcome: RtcSessionRefreshDiagnostics["lastOutcome"] = "failed";
     try {
       const identity = this.deps.identity();
       if (!identity) throw new Error("RTC session replacement unavailable");
+      replacementUserId = identity.userId;
       const member = ((this.deps.findDevice(sn)?.raw ?? {}) as { member?: { admin_user_id?: unknown } }).member;
       const accountId = (typeof member?.admin_user_id === "string" && member.admin_user_id) || identity.userId;
       const candidate = this.createStationSession(sn, accountId, identity, true);
@@ -1170,16 +1179,28 @@ export class RtcCommandRouter {
         }
         if (
           outcome === "failed" &&
-          phase === "connect" &&
           original.refreshAttempts === 1 &&
-          (failure === "connect_timeout" ||
-            failure === "session_closed" ||
-            failure === "signaling_486" ||
-            failure === "signaling_408") &&
           evidence.sessionError !== "other" &&
-          this.sessions.get(sn) === original
+          this.sessions.get(sn) === original &&
+          ((phase === "connect" &&
+            (failure === "connect_timeout" ||
+              failure === "session_closed" ||
+              failure === "signaling_486" ||
+              failure === "signaling_408")) ||
+            (phase === "idle" &&
+              failure === "replacement_timeout" &&
+              informationVerified &&
+              candidateConnected &&
+              candidateCloseOrigin === null &&
+              evidence.sessionError === null &&
+              replacementUserId !== undefined &&
+              this.deps.identity()?.userId === replacementUserId &&
+              original.leases > 0 &&
+              original.session.isConnected &&
+              !original.informationTainted))
         ) {
           original.refreshRetryAtMs = evidence.finishedAtMs + 30_000;
+          original.refreshRetryUserId = phase === "idle" ? replacementUserId : undefined;
         }
       }
     }

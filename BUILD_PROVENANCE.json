@@ -1,14 +1,36 @@
 {
   "schemaVersion": 1,
-  "baseCommit": "5e81218e0a14109b1f002fe7a3ebd3e4accb7f31",
+  "baseCommit": "9716ee3ffb103482cbe2c6a21da4de6d467c7933",
   "repository": "https://github.com/genomez/eufy-sdk",
   "reviewedImplementationPatches": {
     "src/transport/rtc/session.ts": "007e3824531e71611e0706c2d0648de05505007e12979e29c6fe986d28f5bdde",
-    "src/transport/rtc/__tests__/signaling.spec.ts": "a6729cc5e61459d2aa8521506df3ae1836a9b6a216848a61bf8c9d58fe82670e"
+    "src/transport/rtc/__tests__/signaling.spec.ts": "a6729cc5e61459d2aa8521506df3ae1836a9b6a216848a61bf8c9d58fe82670e",
+    "src/transport/rtc/command-router.ts": "36b54c432613b032479541a141a00a18c16b04142d1c43f3ce264b28adfc24cf",
+    "src/transport/rtc/__tests__/session-refresh.spec.ts": "c3c1aae50a4509f109e2e9bb2d0b32f5d83e689bc99aee545e36b29aa7d08fe3",
+    "src/client/__tests__/connect.spec.ts": "c734552276f00dfbb61013be26e3a94661ec539df7fdc6cc738a317976615a1d",
+    "src/client/__tests__/poll.spec.ts": "c2cbdca24a9756a4e780a38701901f992ba6d36c138ce41d6753dbb6be4d7266",
+    "src/client/eufy-mega.ts": "49f3a7e35267ffff78a2a3d38a2e425bfc6c4227cb16691ea42d3cd937adcf87",
+    "src/client/types.ts": "bb5fe8a0648f73daca14df0058582c366d8aadcd32e1d9e6d363144679b571ec"
   },
   "implementationUnmodified": false,
-  "packagingVersion": "0.2.1-s1.experimental.2",
-  "privateQualificationArtifactsUsed": false,
-  "sourceDate": "2026-10-14",
-  "changeDescription": "Local ICE callbacks require an open signaling socket."
+  "packagingVersion": "0.2.1-s1.experimental.4",
+  "privateQualificationArtifactsUsed": true,
+  "privateQualificationArtifactsIncluded": false,
+  "sourceDate": "2026-10-15",
+  "changeDescription": "Inherited signaling safety and guarded renewal retry; SDK error events now carry an origin label.",
+  "preparationStatus": "Local candidate only; publication and release qualification are pending.",
+  "implementationEvidence": {
+    "kind": "Historical offline synthetic verification of the inherited experimental.3 implementation input; excludes the error-origin changes.",
+    "sourceArchiveSha256": "133bf5b91c38c0e87e0afdf8f0a96d92cfde9f035179d218005e5f429bf11ecc",
+    "sourceManifestSha256": "f3b6cef7579970962ac259d6b11e6cce2140ecb69200d20679d4f6b80e31bd39",
+    "sourceFileCount": 514,
+    "testCount": 4982,
+    "testFileCount": 254,
+    "srcByteIdenticalToVerifiedInput": false,
+    "testsRerunDuringSourcePreparation": false,
+    "packagingMetadataMatchesHistoricalInput": false,
+    "realDeviceAcceptance": false
+  },
+  "npmPublication": false,
+  "implementationCommit": "6a68dd44f87dd6d72753b9216bbb23e559e29269"
 }

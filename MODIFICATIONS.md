@@ -341,7 +341,21 @@ Line-ending-only differences are normalized without claiming behavioral changes.
 - `scripts/device-artwork-to-webp.sh`
 - `scripts/release.sh`
 
-
 ## Safety candidate, 2026-10-14
 
 Local ICE callbacks require an open signaling socket. Base source commit: `5e81218e0a14109b1f002fe7a3ebd3e4accb7f31`. Use only an owner-approved local candidate or an exact matching published artifact with its checksum and corresponding sources.
+
+## Renewal retry candidate, 2026-10-14
+
+Modified by genomez for version `0.2.1-s1.experimental.3`, based on public source commit `9716ee3ffb103482cbe2c6a21da4de6d467c7933`.
+
+- `src/transport/rtc/command-router.ts`: permits the existing single proof-gated retry after a verified replacement is blocked by held leases; retains identity, connection, complete-read, cooldown, attempt-budget and cancellation guards.
+- `src/transport/rtc/__tests__/session-refresh.spec.ts`: adds synthetic lease, proof, identity, candidate-failure, budget and cancellation coverage.
+- `package.json` and `package-lock.json`: change only root version labels; dependencies, private status, authors and license remain unchanged.
+- `README.md`, `EXPERIMENTAL.md`, `BUILD_PROVENANCE.json`, `PUBLICATION.json` and `SOURCE_MANIFEST.json`: identify local preparation status, matching sources and historical implementation evidence without claiming publication or a new test run.
+
+Implementation bytes are identical to the historically verified input. Release qualification of this final metadata combination is pending. Original copyright, license, contributors and modification notices are preserved.
+
+## Error-origin candidate, 2026-10-15
+
+Version `0.2.1-s1.experimental.4` adds SDK error-event `origin` labels, typed event metadata, documentation and synthetic regression coverage. Existing signaling safety and renewal behavior are retained. Packaging metadata and source hashes identify this unpublished local candidate. Original attribution and licenses are preserved.
