@@ -684,6 +684,124 @@ describe("device hot-plug events", () => {
   });
 });
 
+describe("realtime teardown failures", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  function fixture() {
+    const eufy = makeClient();
+    const client = eufy as any;
+    const mqtt = { disconnect: vi.fn(async () => {}) };
+    const rtc = vi.spyOn(client.rtc, "close").mockImplementation(() => {});
+    const p2p = vi.spyOn(client.p2p, "closeAll").mockResolvedValue(undefined);
+    const push = { close: vi.fn() };
+    client.transports.set("default", mqtt);
+    client.mqttReady.set("default", Promise.resolve());
+    client.pushClient = push;
+    return { eufy, client, mqtt, rtc, p2p, push };
+  }
+
+  it("closes every channel and clears MQTT ownership when a disconnect rejects", async () => {
+    const { eufy, client, mqtt, rtc, p2p, push } = fixture();
+    const failure = new Error("Synthetic MQTT close failure");
+    mqtt.disconnect.mockRejectedValue(failure);
+    const second = { disconnect: vi.fn(async () => {}) };
+    client.transports.set("eufy_life", second);
+    client.mqttReady.set("eufy_life", Promise.resolve());
+
+    await expect(eufy.disconnect()).rejects.toBe(failure);
+
+    expect(mqtt.disconnect).toHaveBeenCalledTimes(1);
+    expect(second.disconnect).toHaveBeenCalledTimes(1);
+    expect(rtc).toHaveBeenCalledTimes(1);
+    expect(p2p).toHaveBeenCalledTimes(1);
+    expect(push.close).toHaveBeenCalledTimes(1);
+    expect(client.transports.size).toBe(0);
+    expect(client.mqttReady.size).toBe(0);
+    expect(client.pushClient).toBeUndefined();
+    await eufy.disconnect();
+    expect(mqtt.disconnect).toHaveBeenCalledTimes(1);
+    expect(second.disconnect).toHaveBeenCalledTimes(1);
+    expect(push.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes push and rejects when P2P closure fails", async () => {
+    const { eufy, client, mqtt, rtc, p2p, push } = fixture();
+    const failure = new Error("Synthetic P2P close failure");
+    p2p.mockRejectedValue(failure);
+
+    await expect(eufy.disconnect()).rejects.toBe(failure);
+
+    expect(mqtt.disconnect).toHaveBeenCalledTimes(1);
+    expect(rtc).toHaveBeenCalledTimes(1);
+    expect(push.close).toHaveBeenCalledTimes(1);
+    expect(client.pushClient).toBeUndefined();
+  });
+
+  it("collects MQTT failures and synchronous channel-close failures", async () => {
+    const { eufy, client, mqtt, rtc, p2p, push } = fixture();
+    const failures = ["MQTT one", "MQTT two", "RTC", "P2P", "push"].map((message) => new Error(message));
+    mqtt.disconnect.mockRejectedValue(failures[0]);
+    client.transports.set("eufy_life", {
+      disconnect: vi.fn(() => {
+        throw failures[1];
+      }),
+    });
+    rtc.mockImplementation(() => {
+      throw failures[2];
+    });
+    p2p.mockRejectedValue(failures[3]);
+    push.close.mockImplementation(() => {
+      throw failures[4];
+    });
+
+    const error = await eufy.disconnect().catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors.slice(1)).toEqual(failures.slice(2));
+    const mqttError = (error as AggregateError).errors[0] as AggregateError;
+    expect(mqttError).toBeInstanceOf(AggregateError);
+    expect(mqttError.errors).toEqual(failures.slice(0, 2));
+    expect(client.transports.size).toBe(0);
+    expect(client.mqttReady.size).toBe(0);
+    expect(client.pushClient).toBeUndefined();
+  });
+
+  it("detaches pending disposals so repeated teardown preserves successor entries", async () => {
+    const { eufy, client, mqtt, push } = fixture();
+    let finish!: () => void;
+    mqtt.disconnect.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+
+    const stopping = eufy.disconnect();
+    expect(client.transports.size).toBe(0);
+    expect(client.mqttReady.size).toBe(0);
+    expect(client.pushClient).toBeUndefined();
+    await eufy.disconnect();
+    expect(mqtt.disconnect).toHaveBeenCalledTimes(1);
+    expect(push.close).toHaveBeenCalledTimes(1);
+
+    const successor = { disconnect: vi.fn(async () => {}) };
+    const memo = Promise.resolve();
+    const freshPush = { close: vi.fn() };
+    client.transports.set("default", successor);
+    client.mqttReady.set("default", memo);
+    client.pushClient = freshPush;
+    finish();
+    await stopping;
+
+    expect(client.transports.get("default")).toBe(successor);
+    expect(client.mqttReady.get("default")).toBe(memo);
+    expect(client.pushClient).toBe(freshPush);
+    expect(successor.disconnect).not.toHaveBeenCalled();
+    expect(freshPush.close).not.toHaveBeenCalled();
+    await eufy.disconnect();
+  });
+});
+
 /**
  * Shutdown vs the fire-and-forget realtime bring-up.
  *
@@ -1372,6 +1490,54 @@ describe("generation-owned RTC state refresh", () => {
     await (eufy as any).pollOnce();
     await vi.advanceTimersByTimeAsync(30_000);
     expect(refresh).toHaveBeenCalledTimes(6);
+    await eufy.disconnect();
+  });
+
+  it("backs off and pauses empty replies until a useful cloud-poll sweep resets the budget", async () => {
+    const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
+    await (eufy as any).ensureRealtime();
+    const success = eufy.getStateRefreshDiagnostics().lastSuccessMs;
+    refresh.mockResolvedValue({ ...result, devicesUpdated: 0, parametersUpdated: 0 });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect((eufy as any).realtimeGeneration.stateRefreshFailures).toBe(1);
+    await (eufy as any).pollOnce();
+    expect((eufy as any).realtimeGeneration.stateRefreshFailures).toBe(1);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(refresh).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((eufy as any).realtimeGeneration.stateRefreshFailures).toBe(2);
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(refresh).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((eufy as any).realtimeGeneration.stateRefreshFailures).toBe(3);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(refresh).toHaveBeenCalledTimes(5);
+    await (eufy as any).pollOnce();
+    expect((eufy as any).realtimeGeneration.stateRefreshFailures).toBe(3);
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({
+      successes: 1,
+      failures: 5,
+      lastSuccessMs: success,
+      lastFailureKind: "empty_response",
+    });
+    expect(
+      eufy
+        .getStateRefreshDiagnostics()
+        .schedules.slice(-3)
+        .map((item) => [item.consecutiveFailures, item.delayMs]),
+    ).toEqual([
+      [1, 60_000],
+      [2, 120_000],
+      [3, null],
+    ]);
+
+    refresh.mockResolvedValue(result);
+    await (eufy as any).pollOnce();
+    expect((eufy as any).realtimeGeneration.stateRefreshFailures).toBe(0);
+    expect(eufy.getStateRefreshDiagnostics().lastSuccessMs).toBe(Date.now());
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(refresh).toHaveBeenCalledTimes(8);
     await eufy.disconnect();
   });
 

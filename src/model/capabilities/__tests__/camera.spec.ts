@@ -135,6 +135,16 @@ describe("reported camera Wi-Fi signal", () => {
     });
     expect(dev.announcements(changed)).toEqual([{ property: "wifiRssi" }]);
   });
+
+  it.each([-100, "-100", " -100 ", "-100.0"])("treats the %j placeholder as no reading", (raw) => {
+    const dev = Device.fromRecord("T8425P0000000000", { deviceType: 9, model: "T8425", params: { 1142: "-40" } });
+    dev.bindActions(ctx(1, { paramIds: new Set([1142]) }), { dispatch: async () => undefined });
+    const changed = dev.applyParams({ 1142: raw as never });
+    expect(dev.getPropertyValue("wifiRssi")).toBeUndefined();
+    expect(dev.announcements(changed)).toEqual([{ property: "wifiRssi" }]);
+    dev.applyParams({ 1142: "-99" });
+    expect(dev.getPropertyValue("wifiRssi")).toBe(-99);
+  });
 });
 
 describe("camera capability module", () => {

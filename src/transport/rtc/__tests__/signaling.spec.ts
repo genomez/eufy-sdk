@@ -271,6 +271,25 @@ describe("region rules", () => {
     const forbidden = new RtcSignError("HTTP 403 Request Failed", 403, undefined);
     expect(forbidden.tokenRevoked).toBe(false);
   });
+
+  it.each(["token = %s", 'TOKEN: "%s"'])("redacts a refused sign's echoed credential (%s)", async (echo) => {
+    const token = "synthetic-rejected-token_0123456789.test";
+    const refused = vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      json: async () => ({ code: 26000, msg: `token not exist, ${echo.replace("%s", token)}` }),
+    })) as unknown as typeof fetch;
+    const { c } = client({ authToken: token, fetch: refused });
+    const err = await c.fetchSign().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RtcSignError);
+    const error = err as RtcSignError;
+    expect(error.message).toContain("token not exist, token = <redacted>");
+    expect(String(error)).not.toContain(token);
+    expect(error.stack).not.toContain(token);
+    expect(error.httpStatus).toBe(401);
+    expect(error.apiCode).toBe(26000);
+    expect(error.tokenRevoked).toBe(true);
+  });
 });
 
 describe("socket handshake", () => {

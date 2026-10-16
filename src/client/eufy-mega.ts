@@ -32,7 +32,12 @@ import { consumeConnectionDeadline } from "../transport/rtc/connection-deadline.
 import { RtcCommandRouter } from "../transport/rtc/command-router.js";
 import type { PortalResponse } from "../transport/rtc/portal-packet.js";
 import { stationOf } from "../transport/p2p/station-channels.js";
-import { rtcStateParameters } from "./rtc-state.js";
+import {
+  rtcCommandConfirmed,
+  rtcCommandReadbackRequested,
+  rtcReportParameters,
+  rtcStateParameters,
+} from "./rtc-state.js";
 import { inspectRtcPushSignal } from "./rtc-push.js";
 import { EventRoutingRecorder, type EventRoutingDiagnostics } from "./event-routing-diagnostics.js";
 export type { EventRoutingDiagnostics } from "./event-routing-diagnostics.js";
@@ -384,6 +389,13 @@ export class EufyMega extends EventEmitter {
   private readonly pollTimer = new Timer();
   /** Optional station-state schedule, independent of the cloud polling timer. */
   private readonly stateRefreshTimer = new Timer();
+  private readonly reportRefreshes = new Map<
+    string,
+    {
+      timer?: ReturnType<typeof setTimeout>;
+      promise?: ReturnType<EufyMega["refreshDeviceState"]>;
+    }
+  >();
   /** One station-state sweep shared by startup and polling within a realtime generation. */
   private stateRefreshSweep?: {
     epoch: number;
@@ -464,8 +476,13 @@ export class EufyMega extends EventEmitter {
       connectTimeoutMs: opts.rtc?.connectTimeoutMs,
       idleCloseMs: opts.rtc?.idleCloseMs,
       sessionRefreshMs: opts.rtc?.sessionRefreshMs,
+      commandKeepaliveMs: opts.rtc?.commandKeepaliveMs,
       maxCallRetries: opts.rtc?.maxCallRetries,
       onFrame: (stationSn, frame) => this.onRtcFrame(stationSn, frame),
+      requestsCommandReadback: (stationSn, deviceSn, command, frame) =>
+        rtcCommandReadbackRequested(stationSn, deviceSn, command, frame, this.registry),
+      confirmsCommand: (stationSn, deviceSn, command, frame) =>
+        rtcCommandConfirmed(stationSn, deviceSn, command, frame, this.registry),
       ffmpegPath: opts.ffmpegPath,
       ffmpegLogLevel: opts.ffmpegLogLevel,
       onError: (e) => this.reportError(e, "rtc_session"),
@@ -719,6 +736,7 @@ export class EufyMega extends EventEmitter {
   /** Apply qualified RTC information and dispatch scoped notifications through the model event path. */
   private onRtcFrame(stationSn: string, frame: PortalResponse): void {
     const observedAtMs = Date.now();
+    if (rtcReportParameters(stationSn, frame, this.registry).size) this.scheduleReportRefresh(stationSn);
     for (const [sn, params] of rtcStateParameters(stationSn, frame, this.registry)) {
       this.applyRealtimeState(sn, params);
       const device = this.liveDevices.get(sn)?.deref();
@@ -862,6 +880,52 @@ export class EufyMega extends EventEmitter {
       reads.delete(controller);
       if (!reads.size && this.storageTelemetryReads.get(sn) === reads) this.storageTelemetryReads.delete(sn);
     }
+  }
+
+  /** Debounce report triggers on ready sessions without pending exchanges; scheduled recovery owns any refresh backoff. */
+  private scheduleReportRefresh(stationSn: string): void {
+    const generation = this.realtimeGeneration;
+    if (
+      this.opts.autoRealtime === false ||
+      !generation ||
+      generation.epoch !== this.realtimeEpoch ||
+      generation.abort.signal.aborted ||
+      (generation.stateRefreshFailures ?? 0) > 0 ||
+      this.stateRefreshSweep ||
+      !this.rtc.informationRefreshReady(stationSn)
+    )
+      return;
+    const pending = this.reportRefreshes.get(stationSn);
+    if (pending?.promise) return;
+    if (pending?.timer) clearTimeout(pending.timer);
+    const entry: { timer?: ReturnType<typeof setTimeout>; promise?: ReturnType<EufyMega["refreshDeviceState"]> } = {};
+    this.reportRefreshes.set(stationSn, entry);
+    entry.timer = setTimeout(() => {
+      entry.timer = undefined;
+      if (
+        generation.epoch !== this.realtimeEpoch ||
+        generation.abort.signal.aborted ||
+        (generation.stateRefreshFailures ?? 0) > 0 ||
+        this.stateRefreshSweep ||
+        !this.rtc.informationRefreshReady(stationSn)
+      ) {
+        if (this.reportRefreshes.get(stationSn) === entry) this.reportRefreshes.delete(stationSn);
+        return;
+      }
+      entry.promise = this.refreshDeviceState(stationSn, { signal: generation.abort.signal, timeoutMs: 15_000 });
+      void entry.promise
+        .catch((error) => {
+          if (generation.epoch === this.realtimeEpoch && !generation.abort.signal.aborted) {
+            generation.stateRefreshFailures = (generation.stateRefreshFailures ?? 0) + 1;
+            this.scheduleStateRefresh(generation);
+            this.reportError(error, "state_refresh");
+          }
+        })
+        .finally(() => {
+          if (this.reportRefreshes.get(stationSn) === entry) this.reportRefreshes.delete(stationSn);
+        });
+    }, 1_500);
+    entry.timer.unref?.();
   }
 
   /**
@@ -1930,6 +1994,11 @@ export class EufyMega extends EventEmitter {
     return this.rtc.getSessionRefreshDiagnostics();
   }
 
+  /** Passive command-session keepalive counters without connection identifiers. */
+  getRtcKeepaliveDiagnostics() {
+    return this.rtc.getKeepaliveDiagnostics();
+  }
+
   /** Passive bounded control-operation observations. */
   getRtcCommandDiagnostics() {
     return this.rtc.getCommandDiagnostics();
@@ -2008,11 +2077,13 @@ export class EufyMega extends EventEmitter {
           if (epoch !== this.realtimeEpoch || abort.signal.aborted)
             return { refreshed: false, retiredSession: false, connectionDeadline: false };
           try {
-            const result = await this.refreshDeviceState(station, { signal: abort.signal, timeoutMs: 15_000 });
+            const result = await (this.reportRefreshes.get(station)?.promise ??
+              this.refreshDeviceState(station, { signal: abort.signal, timeoutMs: 15_000 }));
             if (epoch !== this.realtimeEpoch || abort.signal.aborted)
               return { refreshed: false, retiredSession: false, connectionDeadline: false };
             parameters += result.parametersUpdated;
             if (result.parametersUpdated === 0) {
+              refreshed = false;
               qualified = false;
               failure ??= "empty_response";
             }
@@ -2104,6 +2175,7 @@ export class EufyMega extends EventEmitter {
   /** Complete one scheduled read before rearming; obsolete generations cannot restart the timer. */
   private async runScheduledStateRefresh(generation: RealtimeGeneration): Promise<void> {
     if (generation.epoch !== this.realtimeEpoch || generation.abort.signal.aborted) return;
+    const failuresAtStart = generation.stateRefreshFailures ?? 0;
     let result: StateRefreshResult = { refreshed: false, retiredSession: false, connectionDeadline: false };
     try {
       result = await this.refreshRealtimeStates(generation, "scheduled");
@@ -2111,7 +2183,9 @@ export class EufyMega extends EventEmitter {
       this.reportError(error, "state_refresh");
     } finally {
       if (generation.epoch === this.realtimeEpoch && !generation.abort.signal.aborted) {
-        generation.stateRefreshFailures = result.refreshed ? 0 : (generation.stateRefreshFailures ?? 0) + 1;
+        generation.stateRefreshFailures = result.refreshed
+          ? 0
+          : Math.max(failuresAtStart + 1, generation.stateRefreshFailures ?? 0);
         this.scheduleStateRefresh(generation, false, result.retiredSession, result.connectionDeadline);
       }
     }
@@ -3099,28 +3173,40 @@ export class EufyMega extends EventEmitter {
    * created, so they cannot clear a successor generation's map.
    */
   private async closeMqttTransports(): Promise<void> {
-    await Promise.all([...this.transports.values()].map((t) => t.disconnect()));
+    const transports = [...this.transports.values()];
     this.transports.clear();
     this.mqttReady.clear();
+    const results = await Promise.allSettled(transports.map(async (transport) => transport.disconnect()));
+    const failures = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "multiple MQTT transports failed to close");
   }
 
   /**
    * Close every realtime channel and stop the poll loop.
    *
-   * Safe to run twice: each channel is cleared as it closes. The edge-trigger's memory of announced
-   * states goes with them: it describes what was announced over a connection that no longer exists,
+   * Safe to run twice: owned channels are detached before awaiting disposal. The edge-trigger's memory
+   * of announced states goes with them: it describes what was announced over a connection that no longer exists,
    * and keeping it would suppress the first report after a reconnect as a duplicate â€” leaving nothing
    * announced until the state next physically changes.
    */
   private async teardownRealtime(): Promise<void> {
     this.pollTimer.cancel();
     this.stateRefreshTimer.cancel();
+    for (const entry of this.reportRefreshes.values()) clearTimeout(entry.timer);
+    this.reportRefreshes.clear();
     this.lastStateAnnounced.clear();
-    await this.closeMqttTransports();
-    this.rtc.close();
-    await this.p2p.closeAll();
-    this.pushClient?.close();
+    const push = this.pushClient;
     this.pushClient = undefined;
+    // Independent channels close together, so one failed or hung close cannot skip the others.
+    const results = await Promise.allSettled(
+      [() => this.closeMqttTransports(), () => this.rtc.close(), () => this.p2p.closeAll(), () => push?.close()].map(
+        async (close) => close(),
+      ),
+    );
+    const failures = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "multiple realtime channels failed to close");
   }
 
   /** True if a usable session (restored from store or freshly logged in) is held. */

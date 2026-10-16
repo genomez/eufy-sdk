@@ -129,7 +129,7 @@ function recordSetting(param: number, value: number, ctx: CommandContext): Comma
  * health or a solar harvest.
  *
  * Which reads those are is {@link CELL_PARAMS}, and {@link cellGated} applies this from it. The settings
- * beside them are deliberately NOT gated, and that split is the whole reason the capability stays
+ * for working mode and recording are deliberately NOT gated, and that split is why the capability stays
  * attached.
  *
  * **It FAILS OPEN.** A record carrying no `model` matches no prefix, so every cell read is published —
@@ -179,21 +179,17 @@ const notMainsCamera = (ctx: AvailabilityContext): boolean => {
  *    it, and a mains camera genuinely has them. They are the reason the capability stays attached.
  *  - `cameraInfo` (1103) is a number whose meaning is unevidenced. Gating it would assert it is a
  *    battery fact, which is the kind of claim this guard exists to stop making.
- *  - `powerSource` (1293) is the open one. Both values it names — `Battery` and `External Solar Panel` —
- *    describe how a CELL is fed, so by this list's own rule it arguably belongs here. It is out because
- *    every param above is one a live mains camera was observed to publish and 1293 was not among them,
- *    and because it is `requires`-gated on its own param, so it appears only where the device reports
- *    it. Gating it would also withhold a described WRITE rather than a read, which is a different class
- *    of change. Unresolved rather than decided: see the note in the pull request.
  *
  * The two solar params ARE here: a panel exists to charge a cell, so a device without one has no solar
- * harvest to report either.
+ * harvest to report either. `powerSource` (1293) describes how that cell is charged, so its read and
+ * charge-mode write are withheld together.
  */
 export const CELL_PARAMS: readonly number[] = [
   BATTERY_PARAM.BATTERY,
   BATTERY_PARAM.BATTERY_STATUS,
   BATTERY_PARAM.BATTERY_TEMP,
   BATTERY_PARAM.BATTERY_HEALTH,
+  BATTERY_PARAM.POWER_CHARGE,
   BATTERY_PARAM.SOLAR_INTENSITY,
   BATTERY_PARAM.SOLAR_CONNECT_24H,
   BATTERY_PARAM.BATTERY_POWER_DATAS,

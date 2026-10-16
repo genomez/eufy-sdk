@@ -51,6 +51,8 @@ export interface RtcSessionEvents {
   commandData: [frame: Buffer, linkType: number];
   /** A frame off the live / playback / file path — media, for a per-camera session. */
   mediaData: [frame: Buffer, linkType: number];
+  /** The hub echoed the portal keepalive on the command channel. */
+  keepaliveEcho: [];
 }
 
 const MEDIA_LINK_TYPES: ReadonlySet<number> = new Set([
@@ -146,6 +148,9 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     });
     this.peer.on("error", (e) => {
       if (!this.closed) this.emit("error", e);
+    });
+    this.peer.on("keepaliveEcho", () => {
+      if (!this.closed) this.emit("keepaliveEcho");
     });
     this.peer.on("data", (_label, frame, linkType) => {
       if (this.closed) return;

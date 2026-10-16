@@ -85,6 +85,7 @@ export interface CapabilityFrame {
  *  - `poll` — a cloud param that changed between polls (`paramType` from→to).
  */
 export type InboundSignal =
+  | { source: "command-report"; commandId: number; value: unknown; deviceSn?: string }
   | {
       source: "push";
       eventType?: number;

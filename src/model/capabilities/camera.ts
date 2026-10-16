@@ -473,12 +473,19 @@ function refuseWhenDisabled(ctx: CommandContext, read: (name: string) => { value
   if (read("enabled")?.value === false) throw new CameraDisabledError(ctx.name ?? ctx.serial);
 }
 
-/** Finite signal numbers and decimal strings; other reports remain nonnumeric. */
+/**
+ * Exactly -100 is the hub's "no current reading" placeholder: healthy cameras drop to it for under a
+ * minute at their nightly reconnect, and no real report comes near it.
+ */
+const WIFI_NO_READING = -100;
+
+/** Finite signal numbers and decimal strings; other reports and the placeholder remain nonnumeric. */
 function coerceWifiRssi(raw: unknown): number | "" {
-  if (typeof raw === "number") return Number.isFinite(raw) ? raw : "";
-  if (typeof raw !== "string" || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw.trim())) return "";
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : "";
+  let value: number;
+  if (typeof raw === "number") value = raw;
+  else if (typeof raw !== "string" || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw.trim())) return "";
+  else value = Number(raw);
+  return Number.isFinite(value) && value !== WIFI_NO_READING ? value : "";
 }
 
 /**

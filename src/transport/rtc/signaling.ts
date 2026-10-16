@@ -28,6 +28,7 @@
 import { EventEmitter } from "node:events";
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { noopLogger, type Logger } from "../../core/logger.js";
+import { withoutTokenEcho } from "../token-echo.js";
 
 export type RtcRegionShard = "eu-pr" | "ie-pr" | "us-pr";
 
@@ -277,7 +278,7 @@ export class RtcSignalingClient extends EventEmitter<RtcSignalingEvents> {
       controller.signal.throwIfAborted();
       if (!res.ok || body.code !== 0 || !body.data) {
         throw new RtcSignError(
-          `RTC sign for ${this.opts.stationSn} refused: HTTP ${res.status} ${body.msg ?? ""}`.trim(),
+          `RTC sign for ${this.opts.stationSn} refused: HTTP ${res.status} ${withoutTokenEcho(body.msg ?? "")}`.trim(),
           res.status,
           body.code,
         );

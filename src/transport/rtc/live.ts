@@ -25,6 +25,7 @@ import { EventEmitter } from "node:events";
 import type { LiveVideoFrame, LiveStreamConsumer } from "../../core/contracts.js";
 import type { Logger } from "../../core/logger.js";
 import type { RtcSession } from "./session.js";
+import { PORTAL_KEEPALIVE, PORTAL_KEEPALIVE_MS } from "./portal-keepalive.js";
 import { hasIdr, prefixParamSets, splitAnnexbNals, type ParamSets } from "../p2p/annexb.js";
 import {
   buildPortalPacket,
@@ -50,17 +51,14 @@ export const T9000Live = {
   PLAY_ID: 1,
   /** Portal packet id of the raw keepalive. */
   KEEPALIVE: 1139,
-  KEEPALIVE_MS: 29_000,
+  KEEPALIVE_MS: PORTAL_KEEPALIVE_MS,
   FIRST_FRAME_TIMEOUT_MS: 15_000,
   /** The portal's `streamId` for a live view, carried in the header byte the codec names `isResponse`. */
   STREAM_ID: 1,
 } as const;
 
 /** The portal's 36-byte data-channel keepalive, byte for byte (20-byte prefix + bare `XZYH 1139`). */
-export const T9000_KEEPALIVE = Buffer.from(
-  "0009000010000000000000006300000000000000585a5948730400000000000000000002",
-  "hex",
-);
+export const T9000_KEEPALIVE = PORTAL_KEEPALIVE;
 
 /** The start-live frame for ONE camera, exactly as the portal builds it for a single-camera view. */
 export function buildT9000StartLive(opts: { accountId: string; channel: number; segment: number }): Buffer {

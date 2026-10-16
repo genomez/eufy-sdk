@@ -82,6 +82,24 @@ async function authenticated(s: ReturnType<typeof setup>) {
 const flush = () => new Promise((r) => setImmediate(r));
 
 describe("RtcSession", () => {
+  it("forwards keepalive echoes separately from frames until the session closes", () => {
+    const s = setup();
+    const echo = vi.fn();
+    const commandData = vi.fn();
+    const mediaData = vi.fn();
+    s.session.on("keepaliveEcho", echo);
+    s.session.on("commandData", commandData);
+    s.session.on("mediaData", mediaData);
+    s.peer.emit("commandChannelOpen");
+    s.peer.emit("keepaliveEcho");
+    expect(echo).toHaveBeenCalledTimes(1);
+    expect(commandData).not.toHaveBeenCalled();
+    expect(mediaData).not.toHaveBeenCalled();
+    s.session.close();
+    s.peer.emit("keepaliveEcho");
+    expect(echo).toHaveBeenCalledTimes(1);
+  });
+
   it("signs, connects, waits for auth, then calls", async () => {
     const s = setup();
     const connecting = s.session.connect();

@@ -1,33 +1,40 @@
 {
   "schemaVersion": 1,
-  "releaseDate": "2026-10-15",
-  "version": "0.2.1-s1.experimental.4",
-  "runtimeSourceRelease": "https://github.com/genomez/ha-eufy-sdk-addon/releases/tag/s1-runtime-0.4.1.experimental.4",
+  "releaseDate": "2026-10-16",
+  "version": "0.2.1-s1.experimental.5",
+  "runtimeSourceRelease": "https://github.com/genomez/ha-eufy-sdk-addon/releases/tag/s1-runtime-0.4.1.experimental.5",
   "candidateSourceManifest": "SOURCE_MANIFEST.json",
   "candidatePreparationReceiptsAreHistorical": true,
   "knownLimitations": [
-    "Synthetic verification does not establish physical hardware or live-media acceptance."
+    "The final image passed an in-image smoke test; it has not itself been run on hardware.",
+    "Earlier one-S1 keepalive soak does not establish broad hardware acceptance; live view is excluded."
   ],
   "verification": {
-    "tests": 4983,
-    "passed": 4981,
-    "windowsOnlyDocSnippetFailures": 2
+    "tests": 5076,
+    "passed": 5074,
+    "windowsOnlyDocSnippetFailures": 2,
+    "testFiles": 257,
+    "typecheck": "pass",
+    "build": "pass"
   },
   "npmPublication": false,
-  "changeScope": "Inherited signaling safety, guarded renewal retry (from unpublished experimental.3) and SDK error-origin labels.",
+  "changeScope": "Floodlight write confirmation; complete realtime teardown and empty-refresh backoff; withhold battery charge source on known mains cameras; treat -100 Wi-Fi as no reading; opt-in command-session keepalive; redact echoed tokens from RTC sign refusals.",
   "publicationDocumentationOverrides": {
     "README.md": {
-      "candidateSha256": "220480052b4fb40a4c62877170c9ef60cf5f81e070f8b33352619801c986c883",
-      "publicationSha256": "0994a30c196712c4d8b636b54e7176564a785b92bea053052afcec98c14f7d2a",
+      "candidateSha256": "294c2a03eee342a536a9e70c79176c1baadf7251931e31e4b6c5a40f96d8d60b",
+      "preparedSha256": "abd0df8d72afa6abb4f75253a4f3a936ebd924f0419c346d8b361aeadeb754b3",
+      "publicationSha256": "adb0ef452c0e4ba5c4cc02c97d73072717bce58942e2466c48e8cb07f77531eb",
       "reason": "Replace local-preparation status with the published prerelease link; implementation unchanged."
     },
     "EXPERIMENTAL.md": {
-      "candidateSha256": "3e533688e65869c6f39989184b960a92995d53a4435936c0ec3f25731780d36d",
-      "publicationSha256": "1ddca0b238f1be5fd677ca13ab393f303d83a6a7d426fa190c1c4d09fdb28af4",
+      "candidateSha256": "694f4af9142e52acf04afe494f516f01c3530adaeda791ae233e66d8ff415115",
+      "preparedSha256": "40799422638f08fa702ab4a1b74bba7c8d9425abb7a2f780328c27fea37e52c3",
+      "publicationSha256": "253842566cb2d71047e65b6af835692bbe71de963b8a12e3ddcc7a203792e76d",
       "reason": "Replace local-preparation status with the published prerelease link; implementation unchanged."
     },
     "PUBLICATION.json": {
-      "candidateSha256": "d1b76bb0acba45d68c6aa39b82465e7636a675f03c7b518f45656d8e05e81db7",
+      "candidateSha256": "28511a06dd602f4a2fe78d9535af737df3d4f5722fd88533a20250a5018fdf75",
+      "preparedSha256": "6fd4e07fde92aaf7f8dcf9317cb9a519baeb13fe2316197c3793fdff11e5404d",
       "reason": "Rewritten at publication; records this publication's scope."
     }
   }

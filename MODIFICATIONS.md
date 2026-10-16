@@ -359,3 +359,7 @@ Implementation bytes are identical to the historically verified input. Release q
 ## Error-origin candidate, 2026-10-15
 
 Version `0.2.1-s1.experimental.4` adds SDK error-event `origin` labels, typed event metadata, documentation and synthetic regression coverage. Existing signaling safety and renewal behavior are retained. Packaging metadata and source hashes identify this unpublished local candidate. Original attribution and licenses are preserved.
+
+## Experimental.5 candidate, 2026-10-16
+
+Version `0.2.1-s1.experimental.5`: Floodlight write confirmation; complete realtime teardown and empty-refresh backoff; withhold battery charge source on known mains cameras; treat -100 Wi-Fi as no reading; opt-in command-session keepalive; redact echoed tokens from RTC sign refusals. Local packaging and prior hardware evidence do not establish final image acceptance. Original attribution and licenses are preserved.

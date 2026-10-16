@@ -22,6 +22,8 @@
  * response flag, expected outer command, channel and matching request segment. A control-payload
  * request may instead complete on its correlated JSON result: notify link, notify envelope, inner
  * command, channel and segment must all match. Receipt does not establish physical movement.
+ * A capability-declared passive write may request one information read on a report or missing ACK;
+ * the injected decoder confirms its expected value within the original command deadline.
  */
 import {
   CommandEvidenceRecorder,
@@ -32,10 +34,11 @@ import {
   type PostTimeoutStatus,
 } from "./command-diagnostics.js";
 import { observeTimedOutCommand, selectedTransportSnapshot } from "./command-transport-evidence.js";
-import type { Command } from "../../core/contracts.js";
+import { commandObservation, type Command } from "../../core/contracts.js";
 import type { EufyDevice } from "../../core/types.js";
 import type { Logger } from "../../core/logger.js";
 import { RtcSession, type RtcSessionOptions } from "./session.js";
+import { PORTAL_KEEPALIVE } from "./portal-keepalive.js";
 import { buildPortalPacket, parsePortalPacket, SegmentCounter, type PortalResponse } from "./portal-packet.js";
 import {
   renewalFailure,
@@ -110,9 +113,15 @@ export interface RtcCommandRouterDeps {
   idleCloseMs?: number;
   /** Optional proactive replacement age; permits one health-gated retry. Zero disables replacement (default). */
   sessionRefreshMs?: number;
+  /** Raw command-session keepalive interval; zero or omitted disables it (default), otherwise 1–120 seconds. */
+  commandKeepaliveMs?: number;
   onError?: (e: Error) => void;
   /** Validated inbound frames from the current station session. */
   onFrame?: (stationSn: string, frame: PortalResponse) => void;
+  /** Injected report recognizer requests one information read for the targeted command. */
+  requestsCommandReadback?: (stationSn: string, deviceSn: string, command: Command, frame: PortalResponse) => boolean;
+  /** Injected state decoder confirms only the information read's target parameter. */
+  confirmsCommand?: (stationSn: string, deviceSn: string, command: Command, frame: PortalResponse) => boolean;
   /** ffmpeg for the live still (default `ffmpeg` on PATH). */
   ffmpegPath?: string;
   ffmpegLogLevel?: FfmpegLevel;
@@ -129,6 +138,7 @@ interface StationSession {
   ready: Promise<void>;
   /** Serialises command and information exchanges on the shared station session. */
   queue: Promise<unknown>;
+  pendingExchanges: number;
   idle?: ReturnType<typeof setTimeout>;
   /** Holders (a live view) that keep the session from idle-closing. */
   leases: number;
@@ -138,6 +148,7 @@ interface StationSession {
   /** Finite event category; the original Error is never retained. */
   lastSessionError?: RenewalFailure;
   refreshTimer?: ReturnType<typeof setTimeout>;
+  keepalive?: { timer: ReturnType<typeof setInterval>; onEcho: () => void };
   refreshPending?: boolean;
   refreshAttempts?: number;
   /** Earliest second attempt after an eligible replacement failure. */
@@ -150,6 +161,16 @@ interface StationSession {
   idleWaiters: Set<() => void>;
   diagnosticRetirement: Set<(reason: PostTimeoutStatus) => void>;
   detach: () => void;
+}
+
+/** Count-only command-session keepalive evidence; zero means no echo has been observed. */
+export interface RtcKeepaliveDiagnostics {
+  enabled: boolean;
+  sent: number;
+  echoed: number;
+  missedEchoDrops: number;
+  sendFailureDrops: number;
+  lastEchoAtMs: number;
 }
 
 /** Finite observations of proactive station-session replacements. */
@@ -231,11 +252,32 @@ export class RtcCommandRouter {
   private epoch = 0;
   private nextSessionGeneration = 0;
   private refreshStats: RtcSessionRefreshDiagnostics = this.emptyRefreshStats();
+  private keepaliveStats: RtcKeepaliveDiagnostics;
 
   constructor(private readonly deps: RtcCommandRouterDeps) {
     const interval = deps.sessionRefreshMs ?? 0;
     if (!Number.isSafeInteger(interval) || (interval !== 0 && (interval < 30_000 || interval > 600_000)))
       throw new RangeError("RTC session refresh must be zero or between 30000 and 600000 milliseconds");
+    const keepaliveMs = deps.commandKeepaliveMs ?? 0;
+    if (!Number.isSafeInteger(keepaliveMs) || (keepaliveMs !== 0 && (keepaliveMs < 1_000 || keepaliveMs > 120_000)))
+      throw new RangeError("RTC command keepalive must be zero or between 1000 and 120000 milliseconds");
+    this.keepaliveStats = this.emptyKeepaliveStats();
+  }
+
+  /** Detached counters; reading them creates no connection or timer. */
+  getKeepaliveDiagnostics(): RtcKeepaliveDiagnostics {
+    return { ...this.keepaliveStats };
+  }
+
+  private emptyKeepaliveStats(): RtcKeepaliveDiagnostics {
+    return {
+      enabled: (this.deps.commandKeepaliveMs ?? 0) > 0,
+      sent: 0,
+      echoed: 0,
+      missedEchoDrops: 0,
+      sendFailureDrops: 0,
+      lastEchoAtMs: 0,
+    };
   }
 
   /** Detached counters for bounded session replacement attempts. */
@@ -349,6 +391,7 @@ export class RtcCommandRouter {
       (stationSn !== sn && channel === PORTAL_STATION_CHANNEL)
     )
       throw new RangeError("RTC command requires a valid device channel");
+    const passiveReadback = commandObservation(cmd)?.passiveReadback === true;
     const identity = this.deps.identity();
     if (!identity) throw new Error(`rtc: not logged in, cannot drive ${sn}`);
     const member = ((station.raw ?? {}) as { member?: { admin_user_id?: unknown } }).member;
@@ -366,13 +409,27 @@ export class RtcCommandRouter {
     const timer = setTimeout(
       () =>
         deadline.abort(
-          new Error(sent ? "RTC command timed out after send; outcome unknown" : "RTC command timed out before send"),
+          new Error(
+            sent &&
+              passiveReadback &&
+              evidence.matchedAcks === 0 &&
+              evidence.sendAttemptedAtMs !== null &&
+              Date.now() >= evidence.sendAttemptedAtMs + (this.deps.ackTimeoutMs ?? 8_000)
+              ? "RTC command ACK timed out; outcome unknown"
+              : sent
+                ? "RTC command timed out after send; outcome unknown"
+                : "RTC command timed out before send",
+          ),
         ),
       timeoutMs,
     );
     let st: StationSession | undefined;
+    let acknowledged: { error?: Error } | undefined;
+    let run: Promise<void> | undefined;
+    const successfulAck = Promise.withResolvers<void>();
     try {
       st = await this.stationSession(stationSn, adminUserId, identity, deadline.signal);
+      st.pendingExchanges++;
       this.commandEvidence.markTiming(evidence, "acquiredAtMicros");
       deadline.signal.throwIfAborted();
       evidence.sessionGeneration = st.generation;
@@ -392,7 +449,7 @@ export class RtcCommandRouter {
       });
       const current = st;
       this.commandEvidence.markTiming(evidence, "queuedAtMicros");
-      const run = st.queue.then(() => {
+      run = st.queue.then(() => {
         deadline.signal.throwIfAborted();
         if (Date.now() >= deadlineAtMs) throw new Error("RTC command timed out before send");
         return this.sendAwaitAck(
@@ -407,20 +464,51 @@ export class RtcCommandRouter {
           evidence,
           timerArmedAtMs,
           diagnosticDeadlineAtMs,
+          passiveReadback
+            ? {
+                requested: (frame: PortalResponse) =>
+                  this.deps.requestsCommandReadback?.(stationSn, sn, cmd, frame) === true,
+                acknowledged: (error?: Error) => {
+                  acknowledged = { error };
+                  if (!error) {
+                    evidence.transportAtFinish = selectedTransportSnapshot(current.session);
+                    successfulAck.resolve();
+                  }
+                },
+                read: async (signal: AbortSignal) => {
+                  if (current.informationTainted) return false;
+                  const result = await this.readInformation(current, adminUserId, current.seg.next(), signal);
+                  return this.deps.confirmsCommand?.(stationSn, sn, cmd, result.frame) === true;
+                },
+              }
+            : undefined,
           () => {
             sent = true;
           },
         );
       });
       st.queue = run.catch(() => undefined);
-      await untilAborted(run, deadline.signal);
+      await untilAborted(Promise.race([run, successfulAck.promise]), deadline.signal);
     } catch (error) {
-      outcome = commandOutcome(error);
-      throw error;
+      let failure = error;
+      if (deadline.signal.aborted && acknowledged) {
+        if (!acknowledged.error) return;
+        failure = acknowledged.error;
+      }
+      outcome = commandOutcome(failure);
+      throw failure;
     } finally {
       if (evidenceEpoch === this.epoch) this.commandEvidence.finish(evidence, outcome);
-      clearTimeout(timer);
-      if (st) this.release(stationSn, st);
+      const current = st;
+      const releaseExchange = () => {
+        clearTimeout(timer);
+        if (current) {
+          current.pendingExchanges--;
+          this.release(stationSn, current);
+        }
+      };
+      if (run && acknowledged && !acknowledged.error) void run.then(releaseExchange, releaseExchange);
+      else releaseExchange();
     }
   }
 
@@ -452,6 +540,7 @@ export class RtcCommandRouter {
     const signal = opts.signal ? AbortSignal.any([opts.signal, deadline.signal]) : deadline.signal;
     const timer = setTimeout(() => deadline.abort(new Error("Storage candidate deadline expired")), timeoutMs);
     st.leases++;
+    st.pendingExchanges++;
     if (st.idle) clearTimeout(st.idle);
     let exchangeStarted = false;
     let run: Promise<Awaited<ReturnType<typeof collectStorageCandidate>>> | undefined;
@@ -484,6 +573,7 @@ export class RtcCommandRouter {
       throw error;
     } finally {
       clearTimeout(timer);
+      st.pendingExchanges--;
       this.release(stationSn, st);
     }
   }
@@ -512,6 +602,14 @@ export class RtcCommandRouter {
     return account === st.storageCandidateOwner.accountId;
   }
 
+  /** Automatic reads never acquire an absent, busy or tainted station session. */
+  informationRefreshReady(stationSn: string): boolean {
+    const st = this.sessions.get(stationSn);
+    return (
+      !!st?.session.isConnected && st.connectedAtMs !== undefined && !st.informationTainted && st.pendingExchanges === 0
+    );
+  }
+
   /** Refresh information on a station, preserving the notification's temporal-only correlation. */
   async refreshInformation(stationSn: string, opts: InformationRefreshOptions = {}): Promise<InformationRefreshResult> {
     const timeoutMs = opts.timeoutMs ?? 15_000;
@@ -531,6 +629,7 @@ export class RtcCommandRouter {
     let completed = false;
     const transmission = { attempted: false };
     let observedSession: StationSession | undefined;
+    let exchangeOwner: StationSession | undefined;
     let operationError: unknown;
     let lease: Awaited<ReturnType<RtcCommandRouter["sessionFor"]>> | undefined;
     try {
@@ -541,6 +640,8 @@ export class RtcCommandRouter {
       signal.throwIfAborted();
       const st = this.sessions.get(stationSn);
       if (!st || st.session !== lease.session) throw new Error("RTC information session closed");
+      st.pendingExchanges++;
+      exchangeOwner = st;
       const current = lease;
       const run = st.queue.then(async () => {
         signal.throwIfAborted();
@@ -574,6 +675,7 @@ export class RtcCommandRouter {
         });
       }
       clearTimeout(timer);
+      if (exchangeOwner) exchangeOwner.pendingExchanges--;
       lease?.release();
       if (
         operationError instanceof Error &&
@@ -750,6 +852,7 @@ export class RtcCommandRouter {
     this.commandEvidence = new CommandEvidenceRecorder();
     this.nextSessionGeneration = 0;
     this.refreshStats = this.emptyRefreshStats();
+    this.keepaliveStats = this.emptyKeepaliveStats();
     if (failure !== undefined) throw failure;
   }
 
@@ -765,6 +868,13 @@ export class RtcCommandRouter {
     evidence: CommandEvidence,
     timerArmedAtMs: number,
     diagnosticDeadlineAtMs: number,
+    readback:
+      | {
+          requested: (frame: PortalResponse) => boolean;
+          read: (signal: AbortSignal) => Promise<boolean>;
+          acknowledged: (error?: Error) => void;
+        }
+      | undefined,
     onSend: () => void,
   ): Promise<void> {
     signal.throwIfAborted();
@@ -774,6 +884,37 @@ export class RtcCommandRouter {
     this.commandEvidence.markTiming(evidence, "exchangeStartedAtMicros");
     const timeoutMs = this.deps.ackTimeoutMs ?? 8_000;
     return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let ackTimedOut = false;
+      let reading = false;
+      let readsStarted = 0;
+      let earlyRead = false;
+      let finishAck: (() => void) | undefined;
+      const controller = new AbortController();
+      const readSignal = AbortSignal.any([signal, controller.signal]);
+      const timeoutError = () => new Error("RTC command ACK timed out; outcome unknown");
+      // A report-triggered read may precede the effect, so the missing ACK permits one more.
+      const startReadback = () => {
+        if (!readback || reading || settled || readsStarted >= (ackTimedOut && earlyRead ? 2 : 1)) return;
+        if (!ackTimedOut) earlyRead = true;
+        readsStarted++;
+        reading = true;
+        evidence.readbackAttempts++;
+        const finishReadback = (confirmed: boolean) => {
+          reading = false;
+          if (settled || signal.aborted || !st.session.isConnected || this.sessions.get(sn) !== st) return;
+          if (confirmed) {
+            evidence.confirmedByReadback++;
+            cleanup();
+            resolve();
+          } else if (finishAck && !ackTimedOut) finishAck();
+          else if (ackTimedOut) {
+            startReadback();
+            if (!reading) failAckTimeout();
+          }
+        };
+        void readback.read(readSignal).then(finishReadback, () => finishReadback(false));
+      };
       const onData = (frame: Buffer, linkType: number) => {
         evidence.receivedFrames++;
         const p = parsePortalPacket(frame, linkType);
@@ -785,6 +926,8 @@ export class RtcCommandRouter {
           evidence,
           commandHeaderSample(p, linkType, outerCmd, innerCmd, channel, segment),
         );
+        if (p.channel === channel && readback?.requested(p)) startReadback();
+        if (ackTimedOut || settled || finishAck) return;
         if (p.segment !== segment) {
           evidence.otherSegments++;
           return;
@@ -825,24 +968,45 @@ export class RtcCommandRouter {
         }
         if (acknowledgement) evidence.matchedAcks++;
         else evidence.matchedResults++;
-        cleanup();
-        if (p.errCode && p.errCode !== 0) {
-          evidence.rejectionCode = p.errCode;
-          reject(new Error(`rtc: ${sn} rejected cmd ${innerCmd} (err ${p.errCode})`));
-        } else {
-          this.deps.logger?.debug?.(`[rtc] ${sn} cmd ${innerCmd} acked`);
-          resolve();
-        }
+        const error =
+          p.errCode && p.errCode !== 0
+            ? new Error(`rtc: ${sn} rejected cmd ${innerCmd} (err ${p.errCode})`)
+            : undefined;
+        if (error) evidence.rejectionCode = p.errCode!;
+        readback?.acknowledged(error);
+        finishAck = () => {
+          cleanup();
+          if (error) reject(error);
+          else {
+            this.deps.logger?.debug?.(`[rtc] ${sn} cmd ${innerCmd} acked`);
+            resolve();
+          }
+        };
+        if (!reading) finishAck();
       };
       const onClose = () => {
         cleanup();
         reject(new Error(`rtc: ${sn} session closed while waiting for cmd ${innerCmd} ACK`));
       };
       const onAbort = () => {
-        cleanup();
-        reject(signal.reason ?? new Error("RTC command aborted"));
+        if (finishAck) finishAck();
+        else if (signal.reason instanceof Error && signal.reason.message === timeoutError().message) failAckTimeout();
+        else {
+          cleanup();
+          reject(signal.reason ?? new Error("RTC command aborted"));
+        }
       };
       const timer = setTimeout(() => {
+        if (finishAck) {
+          if (!reading) finishAck();
+          return;
+        }
+        ackTimedOut = true;
+        startReadback();
+        if (reading) return;
+        failAckTimeout();
+      }, timeoutMs);
+      const failAckTimeout = () => {
         cleanup();
         observeTimedOutCommand(
           st.session,
@@ -854,9 +1018,11 @@ export class RtcCommandRouter {
           channel,
           segment,
         );
-        reject(new Error("RTC command ACK timed out; outcome unknown"));
-      }, timeoutMs);
+        reject(timeoutError());
+      };
       const cleanup = () => {
+        settled = true;
+        controller.abort(new Error("RTC command exchange completed"));
         evidence.transportAtFinish = selectedTransportSnapshot(st.session);
         clearTimeout(timer);
         st.session.off("commandData", onData);
@@ -909,6 +1075,7 @@ export class RtcCommandRouter {
       this.armRefresh(sn, st);
       signal?.throwIfAborted();
       if (this.sessions.get(sn) !== st || !st.session.isConnected) throw new Error("RTC session closed while opening");
+      this.armKeepalive(sn, st);
     } catch (e) {
       this.release(sn, st);
       if (st.leases === 0) this.drop(sn, st);
@@ -956,6 +1123,7 @@ export class RtcCommandRouter {
       seg: new SegmentCounter(),
       ready: Promise.resolve(),
       queue: Promise.resolve(),
+      pendingExchanges: 0,
       leases: 0,
       idleWaiters: new Set(),
       diagnosticRetirement: new Set(),
@@ -978,6 +1146,7 @@ export class RtcCommandRouter {
       if (this.sessions.get(sn) === created) this.sessions.delete(sn);
     };
     created.detach = () => {
+      this.stopKeepalive(created);
       session.off("commandData", onData);
       session.off("error", onError);
       session.off("close", onClose);
@@ -1118,6 +1287,7 @@ export class RtcCommandRouter {
         throw new Error("RTC session replacement superseded");
       original.replacement = undefined;
       this.sessions.set(sn, candidate);
+      this.armKeepalive(sn, candidate);
       adoptedAtMs = Date.now();
       adopted = true;
       outcome = "success";
@@ -1431,6 +1601,53 @@ export class RtcCommandRouter {
     st.leases = Math.max(0, st.leases - 1);
     if (st.leases === 0) for (const notify of [...st.idleWaiters]) notify();
     this.touch(sn, st);
+  }
+
+  /**
+   * Watch only the connected current owner, without acquiring a lease or extending its idle deadline.
+   * A failed send or an unechoed previous send retires it; subsequent operations acquire a new session.
+   */
+  private armKeepalive(sn: string, st: StationSession): void {
+    const interval = this.deps.commandKeepaliveMs ?? 0;
+    if (!interval || st.keepalive || this.sessions.get(sn) !== st || !st.session.isConnected) return;
+    let awaitingEcho = false;
+    const onEcho = () => {
+      if (!awaitingEcho || this.sessions.get(sn) !== st || !st.session.isConnected) return;
+      awaitingEcho = false;
+      this.keepaliveStats.echoed++;
+      this.keepaliveStats.lastEchoAtMs = Date.now();
+    };
+    st.session.on("keepaliveEcho", onEcho);
+    const timer = setInterval(() => {
+      if (this.sessions.get(sn) !== st || !st.session.isConnected) {
+        this.stopKeepalive(st);
+        return;
+      }
+      if (awaitingEcho) {
+        this.keepaliveStats.missedEchoDrops++;
+        this.drop(sn, st);
+        return;
+      }
+      awaitingEcho = true;
+      try {
+        if (st.session.sendRaw(PORTAL_KEEPALIVE)) {
+          this.keepaliveStats.sent++;
+          return;
+        }
+      } catch {}
+      this.keepaliveStats.sendFailureDrops++;
+      this.drop(sn, st);
+    }, interval);
+    st.keepalive = { timer, onEcho };
+    timer.unref?.();
+  }
+
+  /** Remove the current generation's timer and echo listener on every retirement path. */
+  private stopKeepalive(st: StationSession): void {
+    if (!st.keepalive) return;
+    clearInterval(st.keepalive.timer);
+    st.session.off("keepaliveEcho", st.keepalive.onEcho);
+    st.keepalive = undefined;
   }
 
   private drop(sn: string, st: StationSession): void {

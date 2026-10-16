@@ -367,6 +367,20 @@ export const LIGHT: CapabilityModule = {
   description: "Floodlight / spotlight manual switch and brightness.",
   members: LIGHT_MEMBERS,
   properties: propertiesOf(LIGHT_MEMBERS),
+  /** Report values identify read triggers; only an information read establishes current state. */
+  decodeState(signal) {
+    if (signal.source !== "command-report" || signal.commandId !== LIGHT_CMD.FLOODLIGHT_SWITCH) return null;
+    let value = signal.value;
+    for (const key of ["payload", "data", "value"]) {
+      if (value && typeof value === "object" && !Array.isArray(value) && key in value)
+        value = (value as Record<string, unknown>)[key];
+    }
+    if (value === "") value = 0;
+    if (value === "\u0001") value = 1;
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return null;
+    const decoded = decodeLightSwitch(value);
+    return typeof decoded === "boolean" ? { params: { [LIGHT_CMD.FLOODLIGHT_SWITCH]: decoded ? "1" : "0" } } : null;
+  },
   // `light` = a real SPOTLIGHT, detected only from genuine spotlight params — NOT 1045 (that's the
   // status LED, on every camera; it belongs to `camera`). Params: floodlight switch 1400, spotlight
   // brightness/enable 1401/1403, indoor-spot enable/bright 6080/6082. Plus explicit light model names.

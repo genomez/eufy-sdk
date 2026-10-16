@@ -89,11 +89,12 @@ describe("captureSnapshotFromShared (V6 snapshot as consumer)", () => {
     const held = source.consumerCount;
 
     const capture = captureSnapshotFromShared(source, { timeoutMs: 1000, ffmpegPath: executable });
+    const rejected = expect(capture).rejects.toBeInstanceOf(Error);
     expect(source.consumerCount).toBe(held + 1);
     await settle(300);
 
     expect(source.consumerCount, "the station is free while the decode is still running").toBe(held);
-    await expect(capture).rejects.toBeInstanceOf(Error);
+    await rejected;
     watcher.detach();
     rmSync(decoder, { force: true, recursive: true });
   });

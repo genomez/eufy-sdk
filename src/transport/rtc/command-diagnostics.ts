@@ -109,6 +109,8 @@ export interface CommandEvidence {
   invalidResultPayloads: number;
   matchedAcks: number;
   matchedResults: number;
+  readbackAttempts: number;
+  confirmedByReadback: number;
 }
 
 /** Copy only the declared numeric header fields and comparisons. */
@@ -286,6 +288,8 @@ export class CommandEvidenceRecorder {
       invalidResultPayloads: 0,
       matchedAcks: 0,
       matchedResults: 0,
+      readbackAttempts: 0,
+      confirmedByReadback: 0,
     };
   }
 

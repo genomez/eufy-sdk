@@ -27,6 +27,7 @@ import {
   type PortalFramerFactory,
 } from "./framer.js";
 import { PortalLinkType } from "./portal-packet.js";
+import { PORTAL_KEEPALIVE } from "./portal-keepalive.js";
 import { PtcsFramer } from "./ptcs-framer.js";
 import {
   TransportEvidenceRecorder,
@@ -131,6 +132,8 @@ export interface RtcPeerEvents {
   /** The command channel went away while the peer itself may still be up. */
   commandChannelClosed: [];
   data: [label: string, frame: Buffer, linkType: number];
+  /** The hub echoed the portal keepalive on the current command channel. */
+  keepaliveEcho: [];
   iceCandidate: [candidate: string];
   iceGatheringComplete: [];
   connectionState: [state: string];
@@ -462,6 +465,10 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
         this.wireTally.set(label, n);
         if (n <= 3 || n % 100 === 0) {
           this.logger.debug(`[rtc] wire ${label} #${n} ${buf.length}B ${buf.subarray(0, 8).toString("hex")}`);
+        }
+        if (current && label === COMMAND_CHANNEL && buf.equals(PORTAL_KEEPALIVE)) {
+          this.emit("keepaliveEcho");
+          return;
         }
         if (this.framer?.isReady()) {
           if (!current) {

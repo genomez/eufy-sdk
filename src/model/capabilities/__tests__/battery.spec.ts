@@ -82,13 +82,13 @@ describe("battery capability module", () => {
     expect(BATTERY.detection?.evidenceParams).toContain(1101);
   });
 
-  it("names exactly seven cell params, pinned independently of the list itself", () => {
+  it("names exactly eight cell params, pinned independently of the list itself", () => {
     // The one place duplication is right. Every other assertion here iterates CELL_PARAMS, so dropping
     // an entry drops its own check with it — and since `cellGated` applies the gate FROM that list, a
     // deletion would silently un-gate a read and stay green. A test that takes its expectation from the
     // thing under test proves nothing about it, so the expected set is written out.
     expect([...CELL_PARAMS].sort((a, b) => a - b)).toEqual(
-      [1101, 1138, 1198, 2111, 3100, 6482, 1309].sort((a, b) => a - b),
+      [1101, 1138, 1198, 1293, 2111, 3100, 6482, 1309].sort((a, b) => a - b),
     );
   });
 
@@ -104,8 +104,7 @@ describe("battery capability module", () => {
         propertiesOf(BATTERY.members!, { model, codec: "camera" } as AvailabilityContext).map((p) => p.paramType),
       );
 
-    // T8425 Floodlight, T8419 Indoor, T8410 Indoor Pan & Tilt — all mains-only.
-    for (const model of ["T8425P00", "T8419P00", "T8410P00"]) {
+    for (const model of ["T8425P00", "T8419P00", "T8410P00", "T8416P00", "T8426P00"]) {
       for (const param of CELL_PARAMS) {
         expect(published(model), `${model} still publishes ${param}`).not.toContain(param);
       }
@@ -146,7 +145,7 @@ describe("battery capability module", () => {
 
     // Everything a mains camera binds, pinned whole rather than as absences — so a cell getter that
     // starts installing shows up here even if nobody thought to name it.
-    expect(bound("T8410P00")).toEqual(["powerSource", "setPowerSource", "setWorkingMode", "workingMode"]);
+    expect(bound("T8410P00")).toEqual(["setWorkingMode", "workingMode"]);
     // And the same context on a real battery cam binds the cell reads beside them.
     for (const name of ["level", "charging", "temperature", "health", "solarIntensity", "solarConnected24h"]) {
       expect(bound("T8114P00"), `a battery camera lost ${name}`).toContain(name);
@@ -181,8 +180,7 @@ describe("battery capability module", () => {
     // Kept, not dropped: the graceful-unknown rule says the data survives, under a name claiming nothing.
     const keys = Object.keys(mains.getProperties()).sort();
     for (const param of CELL_PARAMS) expect(keys).toContain(`unknown_${param}`);
-    // And the supply it genuinely reports is still named.
-    expect(mains.getProperty("powerSource")).toBeDefined();
+    expect(mains.getProperty("powerSource")).toBeUndefined();
 
     // A real battery camera is untouched, under the member's name.
     const cell = of("T8114");
@@ -191,7 +189,61 @@ describe("battery capability module", () => {
     expect(Object.keys(cell.getProperties())).not.toContain("unknown_1101");
   });
 
-  it("gates the READS only — detection and the cell alerts are untouched, deliberately", () => {
+  it.each(["T8425", "T8419", "T8410", "T8416", "T8426", "t8425p00"])(
+    "%s withholds the battery charge-source read and write even when 1293 is reported",
+    (model) => {
+      const ctx = evidenced({ model });
+      expect(propertiesOf(BATTERY.members!, ctx).map((p) => p.name)).not.toContain("powerSource");
+      const { acts, sent } = bind<BatteryActions>("battery", ctx);
+      expect(acts).not.toHaveProperty("powerSource");
+      expect(acts).not.toHaveProperty("setPowerSource");
+      for (const source of [0, 1, PowerSource.Battery, PowerSource.ExternalSolarPanel]) {
+        expect(buildCommand("powerSource", source, ctx)).toBeUndefined();
+      }
+      expect(sent).toEqual([]);
+
+      const dev = Device.fromRecord("T8000P0000000000", {
+        deviceType: 30,
+        model,
+        category: "eufy_security",
+        params: { 1101: "0", 1293: "0", 1246: "1" },
+      } as never);
+      expect(dev.capabilities).toContain("battery");
+      expect(dev.properties.map((p) => p.name)).not.toContain("powerSource");
+      expect(dev.getProperty("powerSource")).toBeUndefined();
+      expect(dev.getProperties()).toHaveProperty("unknown_1293");
+      expect(dev.getProperty("workingMode")?.value).toBe(1);
+    },
+  );
+
+  it.each([
+    ["0", 0, "Battery"],
+    ["1", 1, "External Solar Panel"],
+    ["5", 5, undefined],
+    ["42", 42, undefined],
+    ['{"power_source":0}', 0, "Battery"],
+    ['{"power_source":1}', 1, "External Solar Panel"],
+    ['{"power_source":5}', 5, undefined],
+  ])("T8124R keeps power source %s as %s with label %s", (raw, value, label) => {
+    const dev = Device.fromRecord("T8000P0000000000", {
+      deviceType: 30,
+      model: "T8124R",
+      category: "eufy_security",
+      params: { 1101: "88", 1293: raw },
+    } as never);
+    const spec = dev.properties.find((p) => p.name === "powerSource");
+    expect(spec?.writable).toBe(true);
+    expect(spec?.enumValues).toEqual({ 0: "Battery", 1: "External Solar Panel" });
+    expect(dev.getProperty("powerSource")?.value).toBe(value);
+    expect(spec?.enumValues?.[Number(value)]).toBe(label);
+    const { acts } = bind<BatteryActions>("battery", evidenced({ model: "T8124R" }), {
+      read: (name) => dev.getProperty(name),
+    });
+    expect(acts.powerSource).toBe(value);
+    expect(acts).toHaveProperty("setPowerSource");
+  });
+
+  it("keeps detection and the cell alerts while gating cell reads and charge-mode writes", () => {
     // The claim this guard makes is about what a device REPORTS, and it stops there. `evidenceParams`
     // still names 1101, so a mains camera reporting that sentinel still resolves as `battery` — which is
     // load-bearing: the capability owns the working-mode and recording settings it genuinely has, and

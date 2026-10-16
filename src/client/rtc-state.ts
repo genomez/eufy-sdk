@@ -1,4 +1,6 @@
 import { isUtf8 } from "node:buffer";
+import { commandObservation, type Command } from "../core/contracts.js";
+import { decodeState } from "../model/capabilities/index.js";
 import { stationOf } from "../transport/p2p/station-channels.js";
 import { RtcCommandRouter } from "../transport/rtc/command-router.js";
 import { informationPayload } from "../transport/rtc/camera-info.js";
@@ -53,22 +55,22 @@ function statePayload(frame: PortalResponse): Record<string, unknown> | undefine
 }
 
 /**
- * Qualified RTC information parameters grouped by known owner. The payload's station channel markers
+ * Qualified RTC information parameters grouped by known owner. The information payload's station channel markers
  * are 255 and 1000; a packet header's channel never supplies ownership for an entry. Every supplied
  * ownership alias must agree, and a channel shared by attached devices has no inferred owner.
  */
 export function rtcStateParameters(
   stationSn: string,
   frame: PortalResponse,
-  registry: Pick<DeviceRegistry, "list" | "serialForFrame">,
+  registry: Pick<DeviceRegistry, "list" | "serialForFrame" | "capabilitiesForDevice">,
 ): Map<string, Record<number, string>> {
   const updates = new Map<string, Record<number, string>>();
-  const payload = statePayload(frame);
-  if (!payload) return updates;
   const devices = registry.list();
   const station = devices.find((device) => device.sn === stationSn);
   if (!station || !RtcCommandRouter.claimsDevice(station)) return updates;
   const owners = new Set(devices.filter((device) => stationOf(device) === stationSn).map((device) => device.sn));
+  const payload = statePayload(frame);
+  if (!payload) return updates;
   for (const key of ["params", "db_bypass_str"] as const) {
     if (!Array.isArray(payload[key])) continue;
     for (const entry of payload[key]) {
@@ -99,4 +101,61 @@ export function rtcStateParameters(
     }
   }
   return updates;
+}
+
+/** Recognize scoped command reports as read triggers, never as authoritative parameter updates. */
+export function rtcReportParameters(
+  stationSn: string,
+  frame: PortalResponse,
+  registry: Pick<DeviceRegistry, "list" | "serialForFrame" | "capabilitiesForDevice">,
+): Map<string, Record<number, string>> {
+  const updates = new Map<string, Record<number, string>>();
+  if (frame.channel >= 255 || (frame.linkType !== PortalLinkType.NOTIFY && frame.linkType !== PortalLinkType.COMMAND))
+    return updates;
+  const owner = registry.serialForFrame(stationSn, frame.channel);
+  if (!owner || owner === stationSn) return updates;
+  const caps = registry.capabilitiesForDevice(owner);
+  if (!caps) return updates;
+  let commandId = frame.commandId;
+  let value = frame.data;
+  if (commandId === 1700) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return updates;
+    const reply = value as Record<string, unknown>;
+    commandId = Number(reply.commandType ?? reply.cmd);
+  } else if (frame.linkType !== PortalLinkType.NOTIFY || frame.isResponse !== 0 || frame.segment !== 0) {
+    return updates;
+  }
+  const states = decodeState({ source: "command-report", commandId, value }, caps);
+  if (states.length) updates.set(owner, Object.assign({}, ...states.map((state) => state.params)));
+  return updates;
+}
+
+/** A report of the target parameter requests a read regardless of the reported value. */
+export function rtcCommandReadbackRequested(
+  stationSn: string,
+  deviceSn: string,
+  command: Command,
+  frame: PortalResponse,
+  registry: Pick<DeviceRegistry, "list" | "serialForFrame" | "capabilitiesForDevice">,
+): boolean {
+  const observation = commandObservation(command);
+  return (
+    !!observation?.passiveReadback &&
+    Object.hasOwn(rtcReportParameters(stationSn, frame, registry).get(deviceSn) ?? {}, observation.param)
+  );
+}
+
+/** Only the target's qualified information parameter can confirm its declared expected value. */
+export function rtcCommandConfirmed(
+  stationSn: string,
+  deviceSn: string,
+  command: Command,
+  frame: PortalResponse,
+  registry: Pick<DeviceRegistry, "list" | "serialForFrame" | "capabilitiesForDevice">,
+): boolean {
+  const observation = commandObservation(command);
+  return (
+    !!observation?.passiveReadback &&
+    rtcStateParameters(stationSn, frame, registry).get(deviceSn)?.[observation.param] === String(observation.expected)
+  );
 }

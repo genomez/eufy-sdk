@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PassthroughFramer, type FramingDiagnostics, type PortalFramer } from "../framer.js";
 import { PortalLinkType } from "../portal-packet.js";
+import { PORTAL_KEEPALIVE } from "../portal-keepalive.js";
 import { packetize, PtcsChannel, PtcsFramer } from "../ptcs-framer.js";
 import {
   COMMAND_CHANNEL,
@@ -152,6 +153,59 @@ function setup(
 }
 
 describe("RtcPeer", () => {
+  it("recognizes only the exact command-channel keepalive echo without framing it", async () => {
+    const framer = new PassthroughFramer();
+    const recvPacket = vi.spyOn(framer, "recvPacket");
+    const { peer, pc } = setup("host-only", () => framer);
+    await peer.init();
+    pc().local = { type: "answer", sdp: ANSWER };
+    await peer.handleRemoteOffer(OFFER);
+    const command = pc().channels[0]!;
+    command.fireOpen();
+    await vi.waitFor(() => expect(peer.isCommandChannelReady).toBe(true));
+    const echo = vi.fn();
+    const data = vi.fn();
+    peer.on("keepaliveEcho", echo);
+    peer.on("data", data);
+    command.fireMessage(Buffer.from(PORTAL_KEEPALIVE));
+    expect(echo).toHaveBeenCalledTimes(1);
+    expect(recvPacket).not.toHaveBeenCalled();
+    expect(data).not.toHaveBeenCalled();
+    const nearMatch = Buffer.from(PORTAL_KEEPALIVE);
+    nearMatch[nearMatch.length - 1] = nearMatch[nearMatch.length - 1]! ^ 1;
+    const short = PORTAL_KEEPALIVE.subarray(0, -1);
+    command.fireMessage(short);
+    command.fireMessage(nearMatch);
+    pc()
+      .channels.find((channel) => channel.label === "notify")!
+      .fireMessage(PORTAL_KEEPALIVE);
+    expect(echo).toHaveBeenCalledTimes(1);
+    expect(recvPacket.mock.calls).toEqual([[short], [nearMatch], [PORTAL_KEEPALIVE]]);
+    expect(peer.getTransportDiagnostics().inbound.command.packets).toBe(3);
+    peer.close();
+  });
+
+  it("ignores keepalive echoes from a retired command channel across peer epochs", async () => {
+    const { peer, pc } = setup();
+    await peer.init();
+    pc().local = { type: "answer", sdp: ANSWER };
+    await peer.handleRemoteOffer(OFFER);
+    const retired = pc().channels[0]!;
+    const echo = vi.fn();
+    peer.on("keepaliveEcho", echo);
+    peer.close();
+    retired.fireMessage(PORTAL_KEEPALIVE);
+    expect(echo).not.toHaveBeenCalled();
+    await peer.init();
+    pc().local = { type: "answer", sdp: ANSWER };
+    await peer.handleRemoteOffer(OFFER);
+    retired.fireMessage(PORTAL_KEEPALIVE);
+    expect(echo).not.toHaveBeenCalled();
+    pc().channels[0]!.fireMessage(PORTAL_KEEPALIVE);
+    expect(echo).toHaveBeenCalledTimes(1);
+    peer.close();
+  });
+
   it("builds a host-only peer with no ICE servers and the hub's max message size", async () => {
     const { peer, config } = setup();
     await peer.init({ turn_addr: "t", turn_port: 3478, turn_user: "u", turn_password: "p" });

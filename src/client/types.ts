@@ -104,6 +104,8 @@ export interface EufyMegaOptions extends MegaClientConfig {
     idleCloseMs?: number;
     /** Optional age-based replacement; zero disables it (default), otherwise 30–600 seconds. */
     sessionRefreshMs?: number;
+    /** Raw command-session keepalive interval; zero or omitted disables it (default), otherwise 1–120 seconds. */
+    commandKeepaliveMs?: number;
     /**
      * Optional interval between completed station-state sweeps, independently of cloud polling.
      * Zero disables it (default); otherwise an integer from 30,000 to 600,000 milliseconds.
