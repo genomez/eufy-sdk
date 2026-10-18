@@ -1,6 +1,7 @@
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 import { DeviceType } from "../device-types.js";
 import { coerceEnumValue, enumLabels } from "../../core/util.js";
-import { HOMEBASE_TYPES, isHomeBase } from "../device-family.js";
+import { HOMEBASE_TYPES, isHomeBase, isStation9000 } from "../device-family.js";
 import { hasReportedEasSwitch } from "./camera.js";
 import { setPayload, setStationScalar } from "./access.js";
 import { method, propertiesOf, type Members, type Surface } from "./members.js";
@@ -89,9 +90,30 @@ function isEvidencedStationAlarm(ctx: CommandContext): boolean {
   return isStationAlarmOutput(ctx) && HUB_ALARM_EVIDENCE.some((param) => ctx.paramIds.has(param));
 }
 
-/** Whether an attached camera reports the EAS slot verified with its own manual alarm output. */
+/** Exact models with upstream evidence of individually sounding and stopping behind a T9000. */
+const S1_PRO_ALARM_MODELS: ReadonlySet<string> = new Set([
+  "T8134",
+  "T814X",
+  "T8214",
+  "T8790",
+  "T8122",
+  "T8113-Z",
+  "T8400",
+]);
+
+/** Whether the parent station uses the S1 portal command family, by reported type or model. */
+function isS1Attached(ctx: AvailabilityContext): boolean {
+  return isStation9000({ deviceType: ctx.stationDeviceType, model: ctx.stationModel });
+}
+
+/** Attached EAS evidence plus the exact S1 model gate admits a manual camera alarm. */
 function isEvidencedAttachedCamera(ctx: CommandContext): boolean {
-  return ctx.codec === "camera" && ctx.homeBaseAttached === true && hasReportedEasSwitch(ctx);
+  return (
+    ctx.codec === "camera" &&
+    ctx.homeBaseAttached === true &&
+    hasReportedEasSwitch(ctx) &&
+    (!isS1Attached(ctx) || S1_PRO_ALARM_MODELS.has(ctx.model ?? ""))
+  );
 }
 
 /** Whether a model-side record or bound context reports a specific parameter. */
@@ -135,8 +157,16 @@ function homeBaseAlarm(seconds: number, ctx: CommandContext): Command {
   );
 }
 
-/** Build the attached-camera int-plus-string duration command for its own bound device channel. */
+/** Build the evidenced S1 portal or classic int-plus-string duration command on the camera channel. */
 function cameraAlarm(seconds: number, ctx: CommandContext): Command {
+  if (isS1Attached(ctx)) {
+    if (!ctx.accountName) throw new Error("a camera alarm behind a HomeBase S1 Pro requires the acting account name");
+    return setPayload(
+      SIREN_CMD.CAMERA_TONE,
+      { time_out: seconds, type: 10, channel: ctx.channel, username: ctx.accountName },
+      ctx,
+    );
+  }
   return {
     kind: "p2p-int-string",
     cmd: SIREN_CMD.CAMERA_TONE,

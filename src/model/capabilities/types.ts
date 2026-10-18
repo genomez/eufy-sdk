@@ -1,3 +1,4 @@
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 import type { DpCatalog } from "./dp-catalog.js";
 
 /**
@@ -258,6 +259,10 @@ export interface AvailabilityContext {
    * cannot do what its name promises there.
    */
   homeBaseAttached?: boolean;
+  /** Vendor DeviceType of the covering station, absent for the station itself. */
+  stationDeviceType?: number;
+  /** Covering station model, including when its cloud device_type is absent. */
+  stationModel?: string;
 }
 
 export interface CommandContext extends AvailabilityContext {

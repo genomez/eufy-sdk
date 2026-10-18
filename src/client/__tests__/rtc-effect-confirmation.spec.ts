@@ -1,3 +1,4 @@
+/** Modified for genomez S1 experimental source preview, 2026-10-17. */
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Device } from "../../model/device.js";
@@ -224,6 +225,8 @@ describe("RTC information readback confirmation", () => {
         f.session.report({ params: [] }, { command: 1103, channel: 255 });
       } else f.session.information(1);
       await vi.advanceTimersByTimeAsync(0);
+      expect(c.settled).toEqual([]);
+      await vi.advanceTimersByTimeAsync(4000);
       expect(c.settled).toEqual(["failure"]);
       expect(f.client.rtc.getCommandDiagnostics().lastFailure).toMatchObject({
         outcome: "ack_timeout",
@@ -258,6 +261,7 @@ describe("RTC information readback confirmation", () => {
       await vi.advanceTimersByTimeAsync(0);
       f.session.binary(0);
       await vi.advanceTimersByTimeAsync(0);
+      if (outcome === "failure") await vi.advanceTimersByTimeAsync(4000);
       expect(c.settled).toEqual([outcome]);
       expect(informationPackets(f.session)).toHaveLength(2);
       expect(f.client.rtc.getCommandDiagnostics().recent.at(-1)).toMatchObject({ readbackAttempts: 2 });
@@ -340,7 +344,7 @@ describe("RTC information readback confirmation", () => {
     }
   });
 
-  it.each([0, -108])("preserves timely ACK code %i if an overlapping read reaches the deadline", async (code) => {
+  it.each([0, -108, -17])("preserves timely ACK code %i if an overlapping read reaches the deadline", async (code) => {
     vi.useFakeTimers();
     const f = fixture();
     const c = command(f);
@@ -350,11 +354,11 @@ describe("RTC information readback confirmation", () => {
       await vi.advanceTimersByTimeAsync(500);
       f.session.ack(f.session.sent[0]!, code);
       await vi.advanceTimersByTimeAsync(0);
-      expect(c.settled).toEqual(code === 0 ? ["success"] : []);
+      expect(c.settled).toEqual([code === 0 || code === -108 ? "success" : "failure"]);
       await vi.advanceTimersByTimeAsync(6999);
-      expect(c.settled).toEqual(code === 0 ? ["success"] : []);
+      expect(c.settled).toEqual([code === 0 || code === -108 ? "success" : "failure"]);
       await vi.advanceTimersByTimeAsync(1);
-      expect(c.settled).toEqual([code === 0 ? "success" : "failure"]);
+      expect(c.settled).toEqual([code === 0 || code === -108 ? "success" : "failure"]);
       expect(f.client.rtc.getCommandDiagnostics().recent[0]).toMatchObject({
         outcome: code === 0 ? "success" : "rejected",
         confirmedByReadback: 0,
@@ -478,30 +482,33 @@ describe("RTC information readback confirmation", () => {
     },
   );
 
-  it.each([0, -108])("retains the first ACK %i when a conflicting duplicate arrives during readback", async (code) => {
-    vi.useFakeTimers();
-    const f = fixture();
-    const c = command(f);
-    try {
-      await vi.advanceTimersByTimeAsync(5500);
-      f.session.binary(0);
-      await vi.advanceTimersByTimeAsync(500);
-      f.session.ack(f.session.sent[0]!, code);
-      await vi.advanceTimersByTimeAsync(3000);
-      f.session.ack(f.session.sent[0]!, code === 0 ? -108 : 0);
-      await vi.advanceTimersByTimeAsync(4000);
-      expect(c.settled).toEqual([code === 0 ? "success" : "failure"]);
-      expect(f.client.rtc.getCommandDiagnostics().recent[0]).toMatchObject({
-        outcome: code === 0 ? "success" : "rejected",
-        matchedAcks: 1,
-      });
-    } finally {
-      await f.eufy.disconnect();
-      await c.run;
-    }
-  });
+  it.each([0, -108, -17])(
+    "retains the first ACK %i when a conflicting duplicate arrives during readback",
+    async (code) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      const c = command(f);
+      try {
+        await vi.advanceTimersByTimeAsync(5500);
+        f.session.binary(0);
+        await vi.advanceTimersByTimeAsync(500);
+        f.session.ack(f.session.sent[0]!, code);
+        await vi.advanceTimersByTimeAsync(3000);
+        f.session.ack(f.session.sent[0]!, code === 0 ? -108 : 0);
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(c.settled).toEqual([code === 0 || code === -108 ? "success" : "failure"]);
+        expect(f.client.rtc.getCommandDiagnostics().recent[0]).toMatchObject({
+          outcome: code === 0 ? "success" : "rejected",
+          matchedAcks: 1,
+        });
+      } finally {
+        await f.eufy.disconnect();
+        await c.run;
+      }
+    },
+  );
 
-  it.each([0, -108])("preserves a timely ACK with code %i", async (code) => {
+  it.each([0, -108, -17])("preserves a timely ACK with code %i", async (code) => {
     vi.useFakeTimers();
     const f = fixture();
     const c = command(f);
@@ -509,7 +516,7 @@ describe("RTC information readback confirmation", () => {
       await vi.advanceTimersByTimeAsync(100);
       f.session.ack(f.session.sent[0]!, code);
       await vi.advanceTimersByTimeAsync(0);
-      expect(c.settled).toEqual([code === 0 ? "success" : "failure"]);
+      expect(c.settled).toEqual([code === 0 || code === -108 ? "success" : "failure"]);
       expect(informationPackets(f.session)).toHaveLength(0);
       expect(f.device.light!()!.isOn).toBe(true);
     } finally {
@@ -675,5 +682,263 @@ describe("unsolicited RTC report refresh", () => {
     await f.eufy.disconnect();
     await vi.advanceTimersByTimeAsync(2000);
     expect(f.session.sent).toHaveLength(0);
+  });
+});
+/** Accept pending at +10.2 seconds after an authoritative early read still shows the old value. */
+async function pendingIntent(f: ReturnType<typeof fixture>) {
+  automatic(f);
+  const c = command(f);
+  await vi.advanceTimersByTimeAsync(8000);
+  f.session.information(1);
+  await vi.advanceTimersByTimeAsync(2200);
+  f.session.ack(f.session.sent[0]!, -108);
+  await c.run;
+  expect(c.settled).toEqual(["success"]);
+  expect(f.eufy.getRtcCommandDiagnostics()).toMatchObject({
+    recent: [{ outcome: "rejected", rejectionCode: -108 }],
+    lateEffect: { scheduled: 1, pendingAccepted: 1 },
+  });
+  return c;
+}
+
+describe("pending acceptance scope", () => {
+  it.each([-108, -17])("rejects non-eligible reply %i without acquiring a job", async (code) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const settled: string[] = [];
+    const run = f.client.routeCommand(CAMERA, { kind: "set-json", param: 1400, data: { value: 0 }, channel: 11 }).then(
+      () => settled.push("success"),
+      () => settled.push("failure"),
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(100);
+      f.session.ack(f.session.sent[0]!, code);
+      await run;
+      expect(settled).toEqual(["failure"]);
+      expect(f.eufy.getRtcCommandDiagnostics()).toMatchObject({
+        recent: [{ outcome: "rejected", rejectionCode: code }],
+        lateEffect: { scheduled: 0, pendingAccepted: 0 },
+      });
+    } finally {
+      await f.eufy.disconnect();
+    }
+  });
+
+  it("rejects another negative code on an eligible command", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const c = command(f);
+    try {
+      await vi.advanceTimersByTimeAsync(100);
+      f.session.ack(f.session.sent[0]!, -17);
+      await c.run;
+      expect(c.settled).toEqual(["failure"]);
+      expect(f.eufy.getRtcCommandDiagnostics()).toMatchObject({
+        recent: [{ outcome: "rejected", rejectionCode: -17 }],
+        lateEffect: { scheduled: 1, pendingAccepted: 0 },
+      });
+    } finally {
+      await f.eufy.disconnect();
+    }
+  });
+});
+
+describe("bounded RTC late effect reconciliation", () => {
+  it("retains an ACK-timeout intent after mismatching readback and confirms it through a later read", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    automatic(f);
+    const c = command(f);
+    try {
+      await vi.advanceTimersByTimeAsync(8000);
+      f.session.information(1);
+      await vi.advanceTimersByTimeAsync(4000);
+      await c.run;
+      expect(c.settled).toEqual(["failure"]);
+      expect(f.eufy.getRtcCommandDiagnostics()).toMatchObject({
+        lastFailure: { outcome: "ack_timeout" },
+        lateEffect: { scheduled: 1 },
+      });
+      await vi.advanceTimersByTimeAsync(3000);
+      f.session.information(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.device.light!()!.isOn).toBe(false);
+      expect(f.eufy.getRtcCommandDiagnostics().lateEffect.confirmed).toBe(1);
+      expect(c.settled).toEqual(["failure"]);
+      expect(f.session.sent.filter((p) => parsePortalHeader(p)?.commandId === 1700)).toHaveLength(1);
+    } finally {
+      await f.eufy.disconnect();
+      await c.run;
+    }
+  });
+  it("drains an in-flight read before sending a superseding opposite command", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    try {
+      await pendingIntent(f);
+      await vi.advanceTimersByTimeAsync(4800);
+      const reads = informationPackets(f.session).length;
+      const newer = command(f, true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.eufy.getRtcCommandDiagnostics().lateEffect.superseded).toBe(1);
+      expect(f.session.sent.filter((p) => parsePortalHeader(p)?.commandId === 1700)).toHaveLength(1);
+      f.session.information(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.session.sent.filter((p) => parsePortalHeader(p)?.commandId === 1700)).toHaveLength(2);
+      f.session.ack(f.session.sent.at(-1)!);
+      await newer.run;
+      await vi.advanceTimersByTimeAsync(45000);
+      expect(newer.settled).toEqual(["success"]);
+      expect(f.device.light!()!.isOn).toBe(true);
+      expect(f.changes).toEqual([]);
+      expect(informationPackets(f.session)).toHaveLength(reads);
+      expect(f.eufy.getRtcCommandDiagnostics().lateEffect.confirmed).toBe(0);
+    } finally {
+      await f.eufy.disconnect();
+    }
+  });
+  it("updates the cache and normal event at +24 seconds from information, preserving pending success", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const events: string[] = [];
+    f.eufy.on("rtcLateEffect", (event) => events.push(event));
+    try {
+      const c = await pendingIntent(f);
+      await vi.advanceTimersByTimeAsync(4800);
+      expect(informationPackets(f.session)).toHaveLength(2);
+      f.session.information(1);
+      await vi.advanceTimersByTimeAsync(7500);
+      f.session.binary(0);
+      expect(f.device.light!()!.isOn).toBe(true);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(informationPackets(f.session)).toHaveLength(3);
+      f.session.information(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.device.light!()!.isOn).toBe(false);
+      expect(f.changes).toEqual([{ deviceSn: CAMERA, property: "light", value: false }]);
+      expect(events).toEqual(["scheduled", "pending_accepted", "confirmed"]);
+      expect(f.eufy.getRtcCommandDiagnostics()).toMatchObject({
+        recent: [{ outcome: "rejected", rejectionCode: -108 }],
+        lateEffect: { scheduled: 1, confirmed: 1, expired: 0, readFailures: 0 },
+      });
+      expect(c.settled).toEqual(["success"]);
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(informationPackets(f.session)).toHaveLength(3);
+      expect(f.session.sent.filter((p) => parsePortalHeader(p)?.commandId === 1700)).toHaveLength(1);
+    } finally {
+      await f.eufy.disconnect();
+    }
+  });
+
+  it("cancels an old intent on an opposite command without applying its desired value or sending it again", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    try {
+      await pendingIntent(f);
+      const newer = command(f, true);
+      await vi.advanceTimersByTimeAsync(0);
+      f.session.ack(f.session.sent.at(-1)!);
+      await newer.run;
+      await vi.advanceTimersByTimeAsync(45000);
+      expect(f.eufy.getRtcCommandDiagnostics().lateEffect).toMatchObject({ scheduled: 1, superseded: 1, confirmed: 0 });
+      expect(f.device.light!()!.isOn).toBe(true);
+      expect(f.changes).toEqual([]);
+      expect(informationPackets(f.session)).toHaveLength(1);
+      expect(f.session.sent.filter((p) => parsePortalHeader(p)?.commandId === 1700)).toHaveLength(2);
+    } finally {
+      await f.eufy.disconnect();
+    }
+  });
+
+  it.each(["session close", "disconnect"])("cancels all late timers on %s", async (reason) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    try {
+      await pendingIntent(f);
+      if (reason === "session close") f.session.close();
+      else await f.eufy.disconnect();
+      await vi.advanceTimersByTimeAsync(50000);
+      expect(informationPackets(f.session)).toHaveLength(1);
+      expect(f.client.lateEffects.has(HUB)).toBe(false);
+      expect(f.session.listenerCount("commandData")).toBe(0);
+    } finally {
+      await f.eufy.disconnect();
+    }
+  });
+
+  it("reads at +15/+25/+40, expires at +45 and never sends another write", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const started = Date.now();
+    try {
+      await pendingIntent(f);
+      for (const offset of [15000, 25000, 40000]) {
+        await vi.advanceTimersByTimeAsync(started + offset - Date.now());
+        f.session.information(1);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      expect(informationPackets(f.session)).toHaveLength(4);
+      expect(f.device.light!()!.isOn).toBe(true);
+      expect(f.changes).toEqual([]);
+      expect(f.receipts).toHaveLength(4);
+      expect(f.receipts.at(-1)).toMatchObject({ source: "rtc", properties: { light: true } });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(f.eufy.getRtcCommandDiagnostics().lateEffect).toMatchObject({ scheduled: 1, confirmed: 0, expired: 1 });
+      expect(f.client.lateEffects.has(HUB)).toBe(false);
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(f.session.sent.filter((p) => parsePortalHeader(p)?.commandId === 1700)).toHaveLength(1);
+      expect(informationPackets(f.session)).toHaveLength(4);
+    } finally {
+      await f.eufy.disconnect();
+    }
+  });
+
+  it("counts a failed late read only as a late-effect failure, leaving refresh health untouched", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const errors: unknown[] = [];
+    f.eufy.on("error", (error: unknown) => errors.push(error));
+    try {
+      await pendingIntent(f);
+      await vi.advanceTimersByTimeAsync(4800);
+      f.session.ack(informationPackets(f.session).at(-1)!, -1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.eufy.getRtcCommandDiagnostics().lateEffect.readFailures).toBe(1);
+      expect(f.client.realtimeGeneration.stateRefreshFailures ?? 0).toBe(0);
+      expect(errors).toEqual([]);
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(informationPackets(f.session)).toHaveLength(2);
+    } finally {
+      await f.eufy.disconnect();
+    }
+  });
+
+  it("defers one busy report refresh and queues its read normally", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    try {
+      await pendingIntent(f);
+      const busy = f.client.rtc.dispatchCommand(HUB, {
+        kind: "set-payload",
+        cmd: 1224,
+        channel: 255,
+        payload: { mode: 1 },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const busyPacket = f.session.sent.at(-1)!;
+      f.session.binary(0);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(informationPackets(f.session)).toHaveLength(1);
+      f.session.ack(busyPacket);
+      await busy;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(informationPackets(f.session)).toHaveLength(2);
+      f.session.information(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.device.light!()!.isOn).toBe(false);
+      expect(f.eufy.getRtcCommandDiagnostics().lateEffect.confirmed).toBe(1);
+    } finally {
+      await f.eufy.disconnect();
+    }
   });
 });

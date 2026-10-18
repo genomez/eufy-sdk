@@ -1,3 +1,4 @@
+/** Modified for genomez S1 experimental source preview, 2026-10-17. */
 import { performance } from "node:perf_hooks";
 import { copyRtcTransportDiagnostics, type RtcTransportDiagnostics } from "./transport-diagnostics.js";
 import type { PortalResponse } from "./portal-packet.js";
@@ -367,6 +368,17 @@ export class CommandEvidenceRecorder {
       recent: this.recent.map(copyEvidence),
       lastFailure: this.lastFailure ? copyEvidence(this.lastFailure) : null,
     };
+  }
+}
+
+/** A strictly correlated command reply carrying the station's signed rejection code. */
+export class RtcCommandRejection extends Error {
+  constructor(
+    station: string,
+    command: number,
+    readonly code: number,
+  ) {
+    super(`rtc: ${station} rejected cmd ${command} (err ${code})`);
   }
 }
 

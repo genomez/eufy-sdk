@@ -1,4 +1,4 @@
-/** Modified for genomez S1 experimental source preview, 2026-10-14. */
+/** Modified for genomez S1 experimental source preview, 2026-10-17. */
 /**
  * RTC command router — drives a **HomeBase Professional S1 (T9000)** over the portal's WebRTC data
  * channel instead of P2P.
@@ -27,6 +27,7 @@
  */
 import {
   CommandEvidenceRecorder,
+  RtcCommandRejection,
   commandHeaderSample,
   commandOutcome,
   type CommandEvidence,
@@ -97,8 +98,10 @@ export interface RtcCommandRouterDeps {
   logger?: Logger;
   /** `relay` (default) or `all`. Never `host-only` — see the module doc. */
   icePolicy?: "relay" | "all";
-  /** How long a sent command waits for its ACK and any required information response (default 8 s). */
+  /** Information/ordinary-command ACK timeout and passive fallback-read trigger (default 8 s). */
   ackTimeoutMs?: number;
+  /** Passive command ACK acceptance window, independent of information reads (default 12 s). */
+  commandAckTimeoutMs?: number;
   /** Whole command deadline, including session acquisition, queueing and ACK (default 20 s; maximum 60 s). */
   commandTimeoutMs?: number;
   /**
@@ -118,6 +121,8 @@ export interface RtcCommandRouterDeps {
   onError?: (e: Error) => void;
   /** Validated inbound frames from the current station session. */
   onFrame?: (stationSn: string, frame: PortalResponse) => void;
+  /** Retirement of the current command session cancels client-owned observations. */
+  onSessionClosed?: (stationSn: string) => void;
   /** Injected report recognizer requests one information read for the targeted command. */
   requestsCommandReadback?: (stationSn: string, deviceSn: string, command: Command, frame: PortalResponse) => boolean;
   /** Injected state decoder confirms only the information read's target parameter. */
@@ -366,7 +371,11 @@ export class RtcCommandRouter {
   }
 
   /** Dispatch within the configured budget and any earlier absolute deadline. */
-  async dispatchCommand(sn: string, cmd: Command, options: { deadlineAtMs?: number } = {}): Promise<void> {
+  async dispatchCommand(
+    sn: string,
+    cmd: Command,
+    options: { deadlineAtMs?: number; onSent?: (sentAtMs: number) => void } = {},
+  ): Promise<void> {
     const budget = this.commandTimeoutMs;
     const deadlineAtMs = options.deadlineAtMs ?? Date.now() + budget;
     if (!Number.isSafeInteger(deadlineAtMs) || deadlineAtMs < 0)
@@ -414,7 +423,7 @@ export class RtcCommandRouter {
               passiveReadback &&
               evidence.matchedAcks === 0 &&
               evidence.sendAttemptedAtMs !== null &&
-              Date.now() >= evidence.sendAttemptedAtMs + (this.deps.ackTimeoutMs ?? 8_000)
+              Date.now() >= evidence.sendAttemptedAtMs + (this.deps.commandAckTimeoutMs ?? 12_000)
               ? "RTC command ACK timed out; outcome unknown"
               : sent
                 ? "RTC command timed out after send; outcome unknown"
@@ -470,8 +479,9 @@ export class RtcCommandRouter {
                   this.deps.requestsCommandReadback?.(stationSn, sn, cmd, frame) === true,
                 acknowledged: (error?: Error) => {
                   acknowledged = { error };
+                  evidence.transportAtFinish = selectedTransportSnapshot(current.session);
+                  if (error) successfulAck.reject(error);
                   if (!error) {
-                    evidence.transportAtFinish = selectedTransportSnapshot(current.session);
                     successfulAck.resolve();
                   }
                 },
@@ -484,6 +494,7 @@ export class RtcCommandRouter {
             : undefined,
           () => {
             sent = true;
+            options.onSent?.(Date.now());
           },
         );
       });
@@ -507,7 +518,7 @@ export class RtcCommandRouter {
           this.release(stationSn, current);
         }
       };
-      if (run && acknowledged && !acknowledged.error) void run.then(releaseExchange, releaseExchange);
+      if (run && acknowledged) void run.then(releaseExchange, releaseExchange);
       else releaseExchange();
     }
   }
@@ -602,11 +613,14 @@ export class RtcCommandRouter {
     return account === st.storageCandidateOwner.accountId;
   }
 
-  /** Automatic reads never acquire an absent, busy or tainted station session. */
-  informationRefreshReady(stationSn: string): boolean {
+  /** Automatic reads require an existing untainted session; selected callers may queue behind active exchanges. */
+  informationRefreshReady(stationSn: string, allowBusy = false): boolean {
     const st = this.sessions.get(stationSn);
     return (
-      !!st?.session.isConnected && st.connectedAtMs !== undefined && !st.informationTainted && st.pendingExchanges === 0
+      !!st?.session.isConnected &&
+      st.connectedAtMs !== undefined &&
+      !st.informationTainted &&
+      (allowBusy || st.pendingExchanges === 0)
     );
   }
 
@@ -883,9 +897,11 @@ export class RtcCommandRouter {
     evidence.phase = "exchange";
     this.commandEvidence.markTiming(evidence, "exchangeStartedAtMicros");
     const timeoutMs = this.deps.ackTimeoutMs ?? 8_000;
+    const acceptanceMs = readback ? Math.max(timeoutMs, this.deps.commandAckTimeoutMs ?? 12_000) : timeoutMs;
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       let ackTimedOut = false;
+      let fallbackTriggered = false;
       let reading = false;
       let readsStarted = 0;
       let earlyRead = false;
@@ -895,8 +911,8 @@ export class RtcCommandRouter {
       const timeoutError = () => new Error("RTC command ACK timed out; outcome unknown");
       // A report-triggered read may precede the effect, so the missing ACK permits one more.
       const startReadback = () => {
-        if (!readback || reading || settled || readsStarted >= (ackTimedOut && earlyRead ? 2 : 1)) return;
-        if (!ackTimedOut) earlyRead = true;
+        if (!readback || reading || settled || readsStarted >= (fallbackTriggered && earlyRead ? 2 : 1)) return;
+        if (!fallbackTriggered) earlyRead = true;
         readsStarted++;
         reading = true;
         evidence.readbackAttempts++;
@@ -907,10 +923,10 @@ export class RtcCommandRouter {
             evidence.confirmedByReadback++;
             cleanup();
             resolve();
-          } else if (finishAck && !ackTimedOut) finishAck();
-          else if (ackTimedOut) {
+          } else if (finishAck) finishAck();
+          else if (fallbackTriggered) {
             startReadback();
-            if (!reading) failAckTimeout();
+            if (ackTimedOut && !reading) failAckTimeout();
           }
         };
         void readback.read(readSignal).then(finishReadback, () => finishReadback(false));
@@ -968,10 +984,7 @@ export class RtcCommandRouter {
         }
         if (acknowledgement) evidence.matchedAcks++;
         else evidence.matchedResults++;
-        const error =
-          p.errCode && p.errCode !== 0
-            ? new Error(`rtc: ${sn} rejected cmd ${innerCmd} (err ${p.errCode})`)
-            : undefined;
+        const error = p.errCode && p.errCode !== 0 ? new RtcCommandRejection(sn, innerCmd, p.errCode) : undefined;
         if (error) evidence.rejectionCode = p.errCode!;
         readback?.acknowledged(error);
         finishAck = () => {
@@ -996,6 +1009,10 @@ export class RtcCommandRouter {
           reject(signal.reason ?? new Error("RTC command aborted"));
         }
       };
+      const fallbackTimer = setTimeout(() => {
+        fallbackTriggered = true;
+        if (!finishAck) startReadback();
+      }, timeoutMs);
       const timer = setTimeout(() => {
         if (finishAck) {
           if (!reading) finishAck();
@@ -1005,7 +1022,7 @@ export class RtcCommandRouter {
         startReadback();
         if (reading) return;
         failAckTimeout();
-      }, timeoutMs);
+      }, acceptanceMs);
       const failAckTimeout = () => {
         cleanup();
         observeTimedOutCommand(
@@ -1024,6 +1041,7 @@ export class RtcCommandRouter {
         settled = true;
         controller.abort(new Error("RTC command exchange completed"));
         evidence.transportAtFinish = selectedTransportSnapshot(st.session);
+        clearTimeout(fallbackTimer);
         clearTimeout(timer);
         st.session.off("commandData", onData);
         st.session.off("close", onClose);
@@ -1143,7 +1161,10 @@ export class RtcCommandRouter {
       if (created.idle) clearTimeout(created.idle);
       this.cancelRefresh(sn, created);
       created.detach();
-      if (this.sessions.get(sn) === created) this.sessions.delete(sn);
+      if (this.sessions.get(sn) === created) {
+        this.sessions.delete(sn);
+        this.deps.onSessionClosed?.(sn);
+      }
     };
     created.detach = () => {
       this.stopKeepalive(created);
@@ -1654,7 +1675,10 @@ export class RtcCommandRouter {
     for (const stop of [...st.diagnosticRetirement]) stop("retired");
     this.cancelRefresh(sn, st);
     if (st.idle) clearTimeout(st.idle);
-    if (this.sessions.get(sn) === st) this.sessions.delete(sn);
+    if (this.sessions.get(sn) === st) {
+      this.sessions.delete(sn);
+      this.deps.onSessionClosed?.(sn);
+    }
     st.detach();
     try {
       st.session.close();

@@ -1,3 +1,4 @@
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 /**
  * Device-model skeleton tests — exercise the data-driven resolver + capability composition.
  * Offline/deterministic (synthetic CloudRecords only), matching the repo's test conventions.
@@ -282,7 +283,7 @@ describe("doorbell — confirmed against real T8214", () => {
 });
 
 describe("Device — state + graceful unknown params", () => {
-  const rec: CloudRecord = { deviceType: 9, model: "T8423", params: {} };
+  const rec: CloudRecord = { deviceType: 9, model: "T8170", params: {} };
 
   it("coerces known params into named, typed properties", () => {
     const dev = Device.fromRecord("T8423CAM001", { ...rec, params: { 1101: "57", 1011: "1" } });

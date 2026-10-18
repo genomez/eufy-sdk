@@ -1,4 +1,4 @@
-/** Modified for genomez S1 experimental source preview, 2026-10-14. */
+/** Modified for genomez S1 experimental source preview, 2026-10-17. */
 /**
  * Public type surface of the {@link EufyMega} facade — options + the typed event map.
  *
@@ -98,6 +98,8 @@ export interface EufyMegaOptions extends MegaClientConfig {
   rtc?: {
     icePolicy?: "relay" | "all";
     ackTimeoutMs?: number;
+    /** ACK acceptance for passive commands, independently of information-read timing; defaults to 12 seconds. */
+    commandAckTimeoutMs?: number;
     /** Whole command deadline, including connection and queue waiting; defaults to 20 seconds. */
     commandTimeoutMs?: number;
     connectTimeoutMs?: number;
@@ -311,6 +313,8 @@ export type AnyDeviceEvent = {
 export type EufyMegaEventMap = {
   [K in keyof DeviceEventMap]: [DeviceEventMap[K]];
 } & {
+  /** Finite lifecycle observations without device identifiers or raw values. */
+  rtcLateEffect: [event: "scheduled" | "confirmed" | "expired" | "superseded" | "read_failed" | "pending_accepted"];
   /** Catch-all: fires for EVERY semantic event, payload tagged with its `eventName`. */
   event: [AnyDeviceEvent];
   /**

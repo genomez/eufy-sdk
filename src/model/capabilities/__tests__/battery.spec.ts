@@ -1,4 +1,4 @@
-/** Modified for genomez S1 experimental source preview, 2026-10-14. */
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 import {
   BATTERY,
   BATTERY_PARAM,
@@ -8,6 +8,7 @@ import {
   WORKING_MODE_MAPS,
   WorkingMode,
   PowerSource,
+  cameraPowerTier,
   type BatteryActions,
   type WorkingModeName,
   type PowerSourceName,
@@ -104,7 +105,17 @@ describe("battery capability module", () => {
         propertiesOf(BATTERY.members!, { model, codec: "camera" } as AvailabilityContext).map((p) => p.paramType),
       );
 
-    for (const model of ["T8425P00", "T8419P00", "T8410P00", "T8416P00", "T8426P00"]) {
+    for (const model of [
+      "T8425P00",
+      "T8419P00",
+      "T8410P00",
+      "T8416P00",
+      "T8426P00",
+      "T84A1P00",
+      "T8423P00",
+      "T8E00P00",
+      "T8P00P00",
+    ]) {
       for (const param of CELL_PARAMS) {
         expect(published(model), `${model} still publishes ${param}`).not.toContain(param);
       }
@@ -250,8 +261,7 @@ describe("battery capability module", () => {
     // detecting it away would take those with it. The push events are the same shape: a station can still
     // deliver a low- or hot-cell alert for one of these models, and nothing here filters that.
     //
-    // So the surface is honest and the plumbing is not yet. Pinned rather than fixed, because detaching
-    // either would need evidence about what these models actually push, which nothing here has.
+    // Capability detection retains the settings; media power is classified separately.
     expect(BATTERY.detection?.evidenceParams).toContain(BATTERY_PARAM.BATTERY);
     expect(BATTERY.events?.length).toBeGreaterThan(0);
   });
@@ -491,3 +501,20 @@ export const _surfaceAssertions = [
   _noPowerStats,
   _noBatteryLow,
 ];
+
+describe("camera power tier", () => {
+  it.each(["T8425", "T8419", "T8410", "T8416", "T8426", "T84A1", "T8423", "T8E00", "T8P00"])(
+    "classifies %s as wired even with battery capability and model suffix",
+    (model) => {
+      expect(cameraPowerTier(`${model.toLowerCase()}P00`, new Set(["camera", "battery"]))).toBe("wired");
+    },
+  );
+
+  it.each(["T8170", "T8124R", "T8ZZZ", undefined])("keeps battery evidence for unlisted model %s", (model) => {
+    expect(cameraPowerTier(model, new Set(["camera", "battery"]))).toBe("battery");
+  });
+
+  it.each(["T8170", "T8425", undefined])("answers wired without battery capability for %s", (model) => {
+    expect(cameraPowerTier(model, new Set(["camera"]))).toBe("wired");
+  });
+});

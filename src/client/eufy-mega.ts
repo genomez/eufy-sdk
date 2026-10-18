@@ -1,4 +1,4 @@
-/** Modified for genomez S1 experimental source preview, 2026-10-14. */
+/** Modified for genomez S1 experimental source preview, 2026-10-17. */
 /**
  * eufy-sdk â€” one client for every eufy device class.
  *
@@ -30,6 +30,8 @@ import { P2PCommandRouter } from "../transport/p2p/command-router.js";
 import { consumeRetiredInformationRead } from "../transport/rtc/retired-information-read.js";
 import { consumeConnectionDeadline } from "../transport/rtc/connection-deadline.js";
 import { RtcCommandRouter } from "../transport/rtc/command-router.js";
+import { commandOutcome, RtcCommandRejection } from "../transport/rtc/command-diagnostics.js";
+import { RtcLateEffectReconciler } from "./rtc-late-effect.js";
 import type { PortalResponse } from "../transport/rtc/portal-packet.js";
 import { stationOf } from "../transport/p2p/station-channels.js";
 import {
@@ -69,6 +71,7 @@ import {
   hasRealtimeReads,
   needsRealtimeInit,
   hasProvidedAction,
+  cameraPowerTier,
 } from "../model/capabilities/index.js";
 import type { DeviceEventMap } from "../model/capabilities/index.js";
 import type { CommandContext } from "../model/capabilities/types.js";
@@ -329,6 +332,8 @@ export class EufyMega extends EventEmitter {
    * meant to release. Comparing generations makes each bring-up responsible for exactly its own epoch.
    */
   private realtimeEpoch = 0;
+  private inventoryScopeKey?: string;
+  private inventoryScope: Readonly<{ epoch: number }> = Object.freeze({ epoch: 0 });
   private storageTelemetryOwners = new Map<string, { fields: readonly unknown[]; owner: StorageTelemetryOwner }>();
   private storageTelemetryReads = new Map<string, Set<AbortController>>();
   /** Shared startup state for the current epoch; caller timeouts never replace or cancel it. */
@@ -349,7 +354,7 @@ export class EufyMega extends EventEmitter {
    * yet, which is the signal to rebuild them (see {@link rebindReads}).
    */
   private readonly boundParamIds = new Map<string, ReadonlySet<number>>();
-  /** Cloud presence and realtime precedence are evidence IDs, never retained raw report values. */
+  /** Cloud presence and report/write-observation precedence are evidence IDs, never retained raw values. */
   private readonly cloudParamIds = new WeakMap<Device, ReadonlySet<number>>();
   private readonly realtimeParamIds = new WeakMap<Device, Map<number, number>>();
   private realtimeReportRevision = 0;
@@ -389,6 +394,11 @@ export class EufyMega extends EventEmitter {
   private readonly pollTimer = new Timer();
   /** Optional station-state schedule, independent of the cloud polling timer. */
   private readonly stateRefreshTimer = new Timer();
+  private readonly lateEffects = new RtcLateEffectReconciler({
+    canRead: (station) => this.automaticInformationAllowed() && this.rtc.informationRefreshReady(station, true),
+    read: (station, signal, timeoutMs) => this.readLateEffect(station, signal, timeoutMs),
+    event: (event) => this.emit("rtcLateEffect", event),
+  });
   private readonly reportRefreshes = new Map<
     string,
     {
@@ -472,6 +482,7 @@ export class EufyMega extends EventEmitter {
       logger: opts.logger,
       icePolicy: opts.rtc?.icePolicy,
       ackTimeoutMs: opts.rtc?.ackTimeoutMs,
+      commandAckTimeoutMs: opts.rtc?.commandAckTimeoutMs,
       commandTimeoutMs: opts.rtc?.commandTimeoutMs,
       connectTimeoutMs: opts.rtc?.connectTimeoutMs,
       idleCloseMs: opts.rtc?.idleCloseMs,
@@ -479,6 +490,7 @@ export class EufyMega extends EventEmitter {
       commandKeepaliveMs: opts.rtc?.commandKeepaliveMs,
       maxCallRetries: opts.rtc?.maxCallRetries,
       onFrame: (stationSn, frame) => this.onRtcFrame(stationSn, frame),
+      onSessionClosed: (stationSn) => this.lateEffects.closeStation(stationSn),
       requestsCommandReadback: (stationSn, deviceSn, command, frame) =>
         rtcCommandReadbackRequested(stationSn, deviceSn, command, frame, this.registry),
       confirmsCommand: (stationSn, deviceSn, command, frame) =>
@@ -739,6 +751,7 @@ export class EufyMega extends EventEmitter {
     if (rtcReportParameters(stationSn, frame, this.registry).size) this.scheduleReportRefresh(stationSn);
     for (const [sn, params] of rtcStateParameters(stationSn, frame, this.registry)) {
       this.applyRealtimeState(sn, params);
+      this.lateEffects.observe(sn, params);
       const device = this.liveDevices.get(sn)?.deref();
       const properties = Object.fromEntries(
         (device?.observedProperties(params) ?? []).flatMap(({ property, value }) =>
@@ -882,8 +895,45 @@ export class EufyMega extends EventEmitter {
     }
   }
 
-  /** Debounce report triggers on ready sessions without pending exchanges; scheduled recovery owns any refresh backoff. */
-  private scheduleReportRefresh(stationSn: string): void {
+  /** Background reads share the current realtime generation's authentication and failure holds. */
+  private automaticInformationAllowed(): boolean {
+    const generation = this.realtimeGeneration;
+    return (
+      this.opts.autoRealtime !== false &&
+      !!generation &&
+      generation.epoch === this.realtimeEpoch &&
+      !generation.abort.signal.aborted &&
+      (generation.stateRefreshFailures ?? 0) === 0
+    );
+  }
+
+  /**
+   * Late reads use the normal station queue and share any report refresh already in flight. A failed
+   * late read is counted only by the reconciler: it never charges the scheduled refresh backoff, delays
+   * the scheduled timer or suppresses report refreshes, which remain the connection-health signal.
+   */
+  private async readLateEffect(station: string, signal: AbortSignal, timeoutMs: number): Promise<unknown> {
+    const generation = this.realtimeGeneration;
+    if (!generation || !this.automaticInformationAllowed()) return;
+    const existing = this.reportRefreshes.get(station)?.promise;
+    if (existing) return existing;
+    if (this.stateRefreshSweep) return this.stateRefreshSweep.promise;
+    const entry = this.reportRefreshes.get(station) ?? {};
+    clearTimeout(entry.timer);
+    entry.timer = undefined;
+    this.reportRefreshes.set(station, entry);
+    const combined = AbortSignal.any([signal, generation.abort.signal]);
+    const promise = this.refreshDeviceState(station, { signal: combined, timeoutMs });
+    entry.promise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.reportRefreshes.get(station) === entry) this.reportRefreshes.delete(station);
+    }
+  }
+
+  /** Debounce reports; an active late-effect intent permits one bounded deferral onto the station queue. */
+  private scheduleReportRefresh(stationSn: string, deferred = false): void {
     const generation = this.realtimeGeneration;
     if (
       this.opts.autoRealtime === false ||
@@ -891,8 +941,8 @@ export class EufyMega extends EventEmitter {
       generation.epoch !== this.realtimeEpoch ||
       generation.abort.signal.aborted ||
       (generation.stateRefreshFailures ?? 0) > 0 ||
-      this.stateRefreshSweep ||
-      !this.rtc.informationRefreshReady(stationSn)
+      ((this.stateRefreshSweep || !this.rtc.informationRefreshReady(stationSn)) &&
+        !(this.lateEffects.has(stationSn) && this.rtc.informationRefreshReady(stationSn, true)))
     )
       return;
     const pending = this.reportRefreshes.get(stationSn);
@@ -906,9 +956,20 @@ export class EufyMega extends EventEmitter {
         generation.epoch !== this.realtimeEpoch ||
         generation.abort.signal.aborted ||
         (generation.stateRefreshFailures ?? 0) > 0 ||
-        this.stateRefreshSweep ||
-        !this.rtc.informationRefreshReady(stationSn)
+        ((this.stateRefreshSweep || !this.rtc.informationRefreshReady(stationSn)) &&
+          !(deferred && this.lateEffects.has(stationSn) && this.rtc.informationRefreshReady(stationSn, true)))
       ) {
+        if (this.reportRefreshes.get(stationSn) === entry) this.reportRefreshes.delete(stationSn);
+        if (
+          !deferred &&
+          this.lateEffects.has(stationSn) &&
+          this.automaticInformationAllowed() &&
+          this.rtc.informationRefreshReady(stationSn, true)
+        )
+          this.scheduleReportRefresh(stationSn, true);
+        return;
+      }
+      if (this.stateRefreshSweep) {
         if (this.reportRefreshes.get(stationSn) === entry) this.reportRefreshes.delete(stationSn);
         return;
       }
@@ -1153,6 +1214,9 @@ export class EufyMega extends EventEmitter {
         if (!converged) return false;
         if (!device) return true;
         if (rawValue === undefined) return false;
+        const revisions = this.realtimeParamIds.get(device) ?? new Map<number, number>();
+        revisions.set(refresh.param, ++this.realtimeReportRevision);
+        this.realtimeParamIds.set(device, revisions);
         device.applyParams({ [refresh.param]: rawValue });
         return this.matchesObservation(device.getProperty(refresh.property)?.value, refresh, before);
       };
@@ -1615,14 +1679,34 @@ export class EufyMega extends EventEmitter {
     if (target) {
       return {
         passiveReadback: true,
-        dispatch: (deadlineAtMs) => {
+        dispatch: async (deadlineAtMs) => {
           if (
             target.stationSn &&
             target.stationSn !== sn &&
             this.registry.serialForFrame(target.stationSn, cmd.channel) !== sn
           )
             return Promise.reject(new Error("RTC command requires an unambiguous attached-device channel"));
-          return this.rtc.dispatchCommand(sn, cmd, { deadlineAtMs });
+          const intent =
+            target.stationSn && target.stationSn !== sn ? this.lateEffects.begin(target.stationSn, sn, cmd) : undefined;
+          try {
+            await this.rtc.dispatchCommand(sn, cmd, {
+              deadlineAtMs,
+              ...(intent ? { onSent: (sentAt: number) => this.lateEffects.sent(intent, sentAt) } : {}),
+            });
+            this.lateEffects.finish(intent, false);
+          } catch (error) {
+            if (
+              error instanceof RtcCommandRejection &&
+              error.code === -108 &&
+              this.lateEffects.finish(intent, true, true)
+            )
+              return;
+            this.lateEffects.finish(
+              intent,
+              ["ack_timeout", "expired_after_send", "rejected"].includes(commandOutcome(error)),
+            );
+            throw error;
+          }
         },
       };
     }
@@ -1676,6 +1760,42 @@ export class EufyMega extends EventEmitter {
       parentLink: target ? (parentSn === device.stationSn ? "consistent" : "conflict") : "unknown",
       ...(target ? this.cachedRtcClaims(target, devices) : { rtcDevice: false, rtcMedia: false }),
     };
+  }
+
+  /**
+   * Cache-only topology generation. Parameter updates and row order do not change its identity;
+   * account, connection lifecycle, parent/channel/family changes and duplicate conflicts do.
+   * The epoch identifies the connection lifecycle independently of a roster refresh. No inventory
+   * or media work starts here, and this value does not hold a feed or station-session lease.
+   */
+  getInventoryScope(): Readonly<{ epoch: number }> {
+    const rows = this.registry.list().map((dev) => {
+      const raw = dev.raw as Record<string, unknown> | undefined;
+      return JSON.stringify([
+        dev.sn,
+        dev.stationSn ?? null,
+        dev.model ?? null,
+        dev.category ?? null,
+        raw?.device_type ?? null,
+        raw?.device_channel ?? null,
+      ]);
+    });
+    const key = JSON.stringify([
+      this.realtimeEpoch,
+      this.mega.auth?.userId ?? null,
+      rows.sort(),
+      this.registry.conflicts(),
+    ]);
+    if (key !== this.inventoryScopeKey) {
+      this.inventoryScopeKey = key;
+      this.inventoryScope = Object.freeze({ epoch: this.realtimeEpoch });
+    }
+    return this.inventoryScope;
+  }
+
+  /** Cache-only conflicting serials for admission validation; not a diagnostics payload. */
+  getInventoryConflicts(): readonly string[] {
+    return this.registry.conflicts();
   }
 
   /**
@@ -1799,7 +1919,7 @@ export class EufyMega extends EventEmitter {
     const cloudParams = this.registry.list().find((record) => record.sn === sn)?.params ?? rec.params;
     this.cloudParamIds.set(dev, new Set(Object.keys(cloudParams ?? {}).map(Number)));
     this.realtimeParamIds.set(dev, new Map(Object.keys(rec.dpParams ?? {}).map((id) => [Number(id), 0])));
-    const ctx = await this.commandContext(sn);
+    const ctx = await this.commandContext(sn, rec);
     dev.bindActions(
       ctx,
       this.commandSinkFor(sn),
@@ -1813,8 +1933,23 @@ export class EufyMega extends EventEmitter {
       dev.setFreshnessPolicy({
         staleAfterMs: this.opts.cacheTtlMs ?? 15_000,
         refresh: async () => {
-          const fresh = await this.registry.record(sn);
-          this.applyAndAnnounce(dev, { ...fresh.params, ...fresh.dpParams });
+          const epoch = this.realtimeEpoch;
+          // A poll may supersede a useful per-device result without changing this value.
+          // Retry once from the new baseline; never adopt the rejected snapshot itself.
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const polled = this.polledReads.get(dev);
+            const revisions = new Map(this.realtimeParamIds.get(dev));
+            const fresh = await this.registry.record(sn);
+            if (epoch !== this.realtimeEpoch) return;
+            if (polled !== this.polledReads.get(dev)) continue;
+            const params: RawParams = {};
+            for (const [key, value] of Object.entries({ ...fresh.params, ...fresh.dpParams })) {
+              const id = Number(key);
+              if (revisions.get(id) === this.realtimeParamIds.get(dev)?.get(id)) params[id] = value;
+            }
+            this.applyAndAnnounce(dev, params);
+            return;
+          }
         },
       });
     }
@@ -2001,7 +2136,7 @@ export class EufyMega extends EventEmitter {
 
   /** Passive bounded control-operation observations. */
   getRtcCommandDiagnostics() {
-    return this.rtc.getCommandDiagnostics();
+    return { ...this.rtc.getCommandDiagnostics(), lateEffect: this.lateEffects.diagnostics() };
   }
 
   /** Passive bounded information-exchange observations. */
@@ -2248,19 +2383,24 @@ export class EufyMega extends EventEmitter {
    * {@link deviceState} answers an initial reading.
    */
   private async pollOnce(epoch = this.realtimeEpoch): Promise<void> {
+    const revision = this.realtimeReportRevision;
     try {
       const diff = await this.registry.pollChanges();
       this.reconcileStorageTelemetryOwners();
       if (epoch !== this.realtimeEpoch) return;
-      const reconciled = this.reconcilePolledReads(diff.params);
+      const params = diff.params.filter((change) => {
+        const device = this.liveDevices.get(change.deviceSn)?.deref();
+        return !device || (this.realtimeParamIds.get(device)?.get(change.paramType) ?? 0) <= revision;
+      });
+      const reconciled = this.reconcilePolledReads(params);
       for (const dev of diff.added) this.emit("deviceAdded", dev);
       for (const dev of diff.removed) this.emit("deviceRemoved", dev);
-      this.applyPolledParams(diff.params);
-      for (const change of diff.params)
+      this.applyPolledParams(params);
+      for (const change of params)
         for (const out of decodeCapabilityEvent({ source: "poll", ...change }, this.capsForEvent(change.deviceSn)))
           this.emitSemantic(out.event, out.payload, { refresh: out.refresh });
       for (const dev of diff.reported) this.emit("deviceState", this.stateOf(dev));
-      for (const sn of new Set(diff.params.map((change) => change.deviceSn)))
+      for (const sn of new Set(params.map((change) => change.deviceSn)))
         if (!reconciled.has(sn)) await this.widenCapabilities(sn);
       const generation = this.realtimeGeneration;
       if (generation?.epoch === epoch && (await this.refreshRealtimeStates(generation, "cloud_poll")).refreshed)
@@ -2547,7 +2687,7 @@ export class EufyMega extends EventEmitter {
 
   /**
    * A station's power tier for the P2P lifecycle: a HomeBase/station is `"wired"` (persistent); a
-   * standalone device is `"battery"` iff its resolved capabilities include `battery`, else `"wired"`.
+   * standalone device uses {@link cameraPowerTier}, including its mains-only model evidence.
    * Keyed on the STATION's own power, never a child's (a battery cam attached to a wired HomeBase draws
    * from the base's persistent session). Reads capabilities on the client side â€” no model type leaks to
    * transport (the router only ever sees the `"wired"|"battery"` string).
@@ -2563,7 +2703,7 @@ export class EufyMega extends EventEmitter {
       category: d.category,
       params: d.params ?? {},
     }).capabilities;
-    return caps.includes("battery") ? "battery" : "wired";
+    return cameraPowerTier(d.model, new Set(caps));
   }
 
   /**
@@ -2943,6 +3083,13 @@ export class EufyMega extends EventEmitter {
     return this.contextForRecord(sn, rec, dpCatalog);
   }
 
+  /** Parent family facts from the same cached station link used by command routing; no I/O. */
+  private parentStationContext(dev: EufyDevice): Pick<CommandContext, "stationDeviceType" | "stationModel"> {
+    const stationSn = dev.stationSn || dev.sn;
+    const station = stationSn !== dev.sn ? this.registry.list().find((entry) => entry.sn === stationSn) : undefined;
+    return { stationDeviceType: cachedDeviceType(station), stationModel: station?.model };
+  }
+
   /** The same context derivation for fetched records and cached polls; this half performs no I/O. */
   private contextForRecord(sn: string, rec: DeviceRecord, dpCatalog?: DpCatalog): ReadContext {
     // Resolve the record synchronously from the registry (already loaded by `record()`) â€” the same
@@ -2982,6 +3129,7 @@ export class EufyMega extends EventEmitter {
       hasP2p: P2PCommandRouter.claimsDevice(dev),
       // Topology as the record states it: a parent that isn't the device itself means HomeBase-attached.
       homeBaseAttached: !!rec.parentSn && rec.parentSn !== sn,
+      ...this.parentStationContext(dev),
       dpCatalog: resolved.codec === "vacuum" || resolved.codec === "mower" ? dpCatalog : undefined,
     };
   }
@@ -3147,6 +3295,7 @@ export class EufyMega extends EventEmitter {
    */
   async disconnect(): Promise<void> {
     this.realtimeEpoch++;
+    this.lateEffects.close();
     for (const sn of [...this.storageTelemetryOwners.keys()]) this.invalidateStorageTelemetryOwner(sn);
     this.stateRefreshEvidence = emptyStateRefreshEvidence();
     this.eventRoutingRecorder = new EventRoutingRecorder();

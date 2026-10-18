@@ -1,7 +1,7 @@
-/** Modified for genomez S1 experimental source preview, 2026-10-14. */
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 import { asBool, clamp } from "../../core/util.js";
 import { DeviceType } from "../device-types.js";
-import { WALL_LIGHT_TYPES } from "../device-family.js";
+import { isFloodLight, WALL_LIGHT_TYPES } from "../device-family.js";
 import { setScalar, setJson, setPayload, describeDevice } from "./access.js";
 import type { CapabilityModule, CapabilityActions, CommandContext } from "./types.js";
 import { memberWrite, propertiesOf, type Members, type Surface, type MemberDeps } from "./members.js";
@@ -291,7 +291,12 @@ export const LIGHT_MEMBERS = {
       passiveReadback: true,
       reflects: (value, ctx) =>
         ctx.paramIds.has(LIGHT_CMD.FLOODLIGHT_SWITCH)
-          ? { param: LIGHT_CMD.FLOODLIGHT_SWITCH, expected: asBool(value) ? 1 : 0, observed: asBool(value) }
+          ? {
+              param: LIGHT_CMD.FLOODLIGHT_SWITCH,
+              expected: asBool(value) ? 1 : 0,
+              observed: asBool(value),
+              lateEffectReadback: isFloodLight(ctx),
+            }
           : undefined,
       timeoutMs: 20_000,
     },

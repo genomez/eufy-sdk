@@ -1,3 +1,4 @@
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 /**
  * Device-family **classification** — the single home for the one question "what product family is
  * this device?" (indoor cam, mini, S350 pan/tilt, outdoor pan/tilt, floodlight, wired doorbell, …),
@@ -14,10 +15,10 @@
  *
  * ## Detection is mega-only — no legacy fallback
  * The legacy cloud backend is frozen (a stub) and cannot identify equipment. Classification here
- * keys **exclusively** off the mega-resolved record: the vendor `deviceType` that
+ * keys off the mega-resolved record: the vendor `deviceType` that
  * {@link module:model/capabilities.CommandContext} already carries from the mega `algo_ecdh` device
- * list. When `deviceType` is absent/unknown we DO NOT guess: predicates return `false`, so a
- * capability composing on them falls back to its safe default rather than mis-classifying the device.
+ * list. Most predicates return `false` for an unknown type. The S1 predicate also accepts the
+ * explicit T9000 model family used by the station command route when the type is absent.
  *
  * @module model/device-family
  */
@@ -123,6 +124,9 @@ export const isOutdoorPanTilt = (ctx: FamilyContext): boolean => has(OUTDOOR_PT_
 export const isFloodLight = (ctx: FamilyContext): boolean => has(FLOODLIGHT_TYPES, ctx.deviceType);
 /** HomeBase-family hub (has a speaker/alarm) — a station EXCLUDING the NVRs, per `HOMEBASE_TYPES`. */
 export const isHomeBase = (ctx: FamilyContext): boolean => has(HOMEBASE_TYPES, ctx.deviceType);
+/** HomeBase S1, identified by its vendor type or the explicit T9000 station model family. */
+export const isStation9000 = (ctx: FamilyContext): boolean =>
+  ctx.deviceType === DeviceType.STATION_9000 || /^T9000/i.test(ctx.model ?? "");
 /** Wired doorbell (DeviceType.DOORBELL). */
 export const isWiredDoorbell = (ctx: FamilyContext): boolean => ctx.deviceType === DeviceType.DOORBELL;
 

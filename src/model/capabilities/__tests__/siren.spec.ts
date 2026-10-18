@@ -1,3 +1,4 @@
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 import { SIREN, SIREN_PARAM, SIREN_CMD, SirenVolume, HubAlarmTone, type SirenActions } from "../siren.js";
 import { DeviceType } from "../../device-types.js";
 import { bind } from "./bind.js";
@@ -322,6 +323,109 @@ describe("siren capability module", () => {
       expect((acts as unknown as Record<string, unknown>).setAlarmTone).toBeUndefined();
       expect((acts as unknown as Record<string, unknown>).active).toBeUndefined();
       expect((acts as unknown as Record<string, unknown>).test).toBeUndefined();
+    });
+
+    it.each(["T8134", "T814X", "T8214", "T8790", "T8122", "T8113-Z", "T8400"])(
+      "installs the alarm on a %s behind a HomeBase S1 Pro and sends it the portal's form",
+      async (model) => {
+        const { acts, sent } = sirenOf({
+          channel: 3,
+          codec: "camera",
+          deviceType: DeviceType.CAMERA2,
+          model,
+          homeBaseAttached: true,
+          stationDeviceType: DeviceType.STATION_9000,
+          accountName: "Synthetic Home",
+          capabilities: new Set(["siren"]),
+          paramIds: new Set([1015, 61008, 1825, 61006]),
+        });
+        const alarm = acts as unknown as { trigger?: (s: number) => Promise<void>; stop?: () => Promise<void> };
+
+        await alarm.trigger!(5);
+        await alarm.stop!();
+        expect(sent).toEqual([
+          {
+            kind: "set-payload",
+            cmd: 1202,
+            payload: { time_out: 5, type: 10, channel: 3, username: "Synthetic Home" },
+            channel: 3,
+            mValue3: undefined,
+            form: undefined,
+          },
+          {
+            kind: "set-payload",
+            cmd: 1202,
+            payload: { time_out: 0, type: 10, channel: 3, username: "Synthetic Home" },
+            channel: 3,
+            mValue3: undefined,
+            form: undefined,
+          },
+        ]);
+      },
+    );
+
+    it("installs no alarm action on a camera behind a HomeBase S1 Pro for a model with no evidence for the portal form", () => {
+      const { acts } = sirenOf({
+        channel: 2,
+        codec: "camera",
+        deviceType: DeviceType.CAMERA2,
+        model: "T8114",
+        homeBaseAttached: true,
+        stationDeviceType: DeviceType.STATION_9000,
+        accountName: "Synthetic Home",
+        capabilities: new Set(["siren"]),
+        paramIds: new Set([1015, 61008, 1825, 61006]),
+      });
+      const alarm = acts as unknown as Record<string, unknown>;
+
+      expect(alarm.trigger).toBeUndefined();
+      expect(alarm.stop).toBeUndefined();
+    });
+
+    it.each(["T8425", "T8426", "T8416", "T8170", "T8171", "T8161", "T8134-extra", undefined])(
+      "withholds unroutable S1 alarm methods for unevidenced model %s even with EAS",
+      (model) => {
+        const { acts, sent } = sirenOf({
+          channel: 3,
+          codec: "camera",
+          model,
+          homeBaseAttached: true,
+          stationModel: "T9000",
+          capabilities: new Set(["siren"]),
+          paramIds: new Set([1015]),
+        });
+        expect(acts.trigger).toBeUndefined();
+        expect(acts.stop).toBeUndefined();
+        expect(acts.active).toBeUndefined();
+        expect(sent).toEqual([]);
+      },
+    );
+
+    it("requires EAS even for an evidenced S1 camera model", () => {
+      const { acts } = sirenOf({
+        channel: 3,
+        codec: "camera",
+        model: "T8134",
+        homeBaseAttached: true,
+        stationModel: "T9000",
+        paramIds: new Set(),
+      });
+      expect(acts.trigger).toBeUndefined();
+      expect(acts.stop).toBeUndefined();
+    });
+
+    it("refuses both S1 commands without an acting account name before dispatch", async () => {
+      const { acts, sent } = sirenOf({
+        channel: 3,
+        codec: "camera",
+        model: "T8134",
+        homeBaseAttached: true,
+        stationModel: "T9000",
+        paramIds: new Set([1015]),
+      });
+      await expect(acts.trigger!(5)).rejects.toThrow(/acting account name/);
+      expect(() => acts.stop!()).toThrow(/acting account name/);
+      expect(sent).toEqual([]);
     });
 
     it.each([

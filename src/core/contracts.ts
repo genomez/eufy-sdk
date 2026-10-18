@@ -1,4 +1,4 @@
-/** Modified for genomez S1 experimental source preview, 2026-10-14. */
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 /**
  * Transport boundary contract — the shared vocabulary between the capability layer (which emits
  * intent) and the transport layer (which puts bytes on a wire). It belongs to NEITHER: capabilities
@@ -335,6 +335,8 @@ export interface CommandObservation {
   resetStandaloneSession?: boolean;
   /** A route with independent state reports may acknowledge this write without active readback. */
   passiveReadback?: boolean;
+  /** A mains-powered target permits bounded authoritative reads after an unconfirmed write. */
+  lateEffectReadback?: boolean;
   timeoutMs: number;
 }
 

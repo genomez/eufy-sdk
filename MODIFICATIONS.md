@@ -1,5 +1,13 @@
 # Source modification index
 
+Modified for genomez S1 experimental source preview, 2026-10-17.
+
+## Validated live-view inventory scope, 2026-10-17
+
+- `src/client/eufy-mega.ts`: expose an opaque cache-only inventory scope and detached conflicting serials for validated media admission; reuse the already fetched device record when binding command context.
+- `src/client/device-registry.ts`: retain differing duplicate parent, channel, model or type bindings across the house roster merge; partial refreshes cannot clear an unresolved conflict.
+- `src/client/__tests__/inventory-scope.spec.ts`: exercise stable no-I/O scopes, topology/account/lifecycle invalidation, conflict retention and single-record model binding.
+
 This is a modified experimental source distribution maintained by genomez.
 Public comparison anchor: `7040a5b08f076fe784e37ce5b669f9bb6e546fdd`. This anchor is a comparison
 reference, not a claim that the composite preview was produced by one upstream commit.
@@ -363,3 +371,81 @@ Version `0.2.1-s1.experimental.4` adds SDK error-event `origin` labels, typed ev
 ## Experimental.5 candidate, 2026-10-16
 
 Version `0.2.1-s1.experimental.5`: Floodlight write confirmation; complete realtime teardown and empty-refresh backoff; withhold battery charge source on known mains cameras; treat -100 Wi-Fi as no reading; opt-in command-session keepalive; redact echoed tokens from RTC sign refusals. Local packaging and prior hardware evidence do not establish final image acceptance. Original attribution and licenses are preserved.
+
+## Experimental.6 preparation, 2026-10-16
+
+Version `0.2.1-s1.experimental.6` is prepared locally and has not been published. Packaging-only version update; SDK implementation and tests are unchanged from experimental.5, including token redaction and opt-in command-session keepalive.
+
+The live-view changes are confined to the paired bridge; no SDK implementation or test files changed for this candidate. Existing licenses and attribution are preserved.
+
+## Experimental.6 release candidate refresh, 2026-10-16
+
+The earlier packaging-only .6 preparation above is historical. This candidate includes two SDK fixes: a slower state refresh cannot overwrite a newer parameter update, and a freshness read can retry when an unchanged background poll supersedes it. The SDK bundle, source inventory and local package are rebuilt from implementation input `980f9a1`, including `a408a51`. Version remains `0.2.1-s1.experimental.6`. Original licenses and attribution are preserved; final runtime qualification and publication remain pending.
+
+## Experimental.6 upstream ports, 2026-10-16
+
+One authoritative mains-model list retains T8425/T8419/T8410/T8416/T8426 and adds T84A1/T8423/T8E00/T8P00. Case-insensitive prefix matching classifies these as wired even with battery capability; other cameras with that capability remain battery, regardless of level or solar charging. Cameras without battery capability are wired. The classifier drives every powered media egress and standalone session tier; HomeBase sessions remain wired. Cell-read suppression and charge-mode gating use the same list. State-freshness guards, command keepalive and RTC transport are retained.
+
+Narrow adaptations from upstream commits:
+
+- `45d2e5ac3cbc78efc20d1e1c5abc41f0aae3086d`: Public cameraPowerTier classifier and media/session routing.
+- `7ab7fa555c740fd8763a6d136f10ca7ebbf7d39d`: T84A1 hardwired wall-light model.
+- `ad98abfca39426c1a7f12d8d6bac02086bf7dc7c`: T8423 mains floodlight model.
+- `57e28338944c005f387102d3b4bee431e0f682b9`: Merged T8E00/T8P00 PoE classification; includes 3e8274f262ef1a9e17844a769158b9146c36d80e and evidence clarification d3273ceb391207e66def90ac3bb077bb1d918537.
+
+The prior packaging and implementation statements above are historical. Version remains unchanged. These local source ports do not establish final-image or hardware qualification. Apache-2.0 licenses, copyright, contributor attribution and existing notices are preserved; changed source/test files carry dated modification headers.
+
+Files modified or added for this port:
+
+- `src/client/__tests__/prewarm.spec.ts`
+- `src/client/eufy-mega.ts`
+- `src/model/__tests__/model.spec.ts`
+- `src/model/capabilities/__tests__/battery.spec.ts`
+- `src/model/capabilities/__tests__/camera.spec.ts`
+- `src/model/capabilities/battery.ts`
+- `src/model/capabilities/camera.ts`
+- `src/model/capabilities/index.ts`
+
+## Experimental.6 upstream-port package refresh, 2026-10-16
+
+This local package is rebuilt from implementation `02afeda1846e01e07ba154c48fd8401564eb1fb5`, including the upstream power-policy adaptations and retained `a408a51`/`980f9a1` freshness fixes. Earlier package statements above describe historical inputs. SDK version remains `0.2.1-s1.experimental.6`, private with npm publication disabled. The rebuilt bundle, complete source manifest and offline tarball identify the exact local input. Original licenses, attribution and notices remain intact; final-image and hardware qualification remain pending.
+
+## Bounded late-effect reconciliation, 2026-10-16
+
+Passive command ACK acceptance defaults to 12 seconds independently of the 8-second fallback information-read trigger. Correlated rejection codes remain explicit. Attached mains floodlight 1400 writes that end unconfirmed receive coalesced authoritative information reads at approximately send +15/+25/+40 seconds, bounded by a 45-second intent lifetime. New target operations and session closure cancel the intent; no write is replayed. Normal cache and property events convey later information without rewriting the original result. Background reads retain refresh failure holds and queue normally. A failed late read is counted only in the late-effect diagnostics; it does not charge the scheduled refresh backoff, delay the scheduled timer, suppress report refreshes or emit a state-refresh error.
+
+## S1 attached-camera siren port, 2026-10-16
+
+Adapted upstream mega-yfue/eufy-sdk #364 (Daniele Messi / danymexi;
+merge `2adf08595ff0bcb8f9c5c56588ce6ce812a1cfa3`, final feature head
+`70e48103daefbe1acf0af67f4e12c42f0ef4c74a`) and #401 final model gate
+(`024d9d4eed3ad3ead5df2c2540f6cfb7981ded17`). Original attribution and licenses remain intact.
+
+Modified files with dated source headers:
+
+- `src/model/capabilities/siren.ts`: exact evidenced S1 model gate and portal duration start/stop.
+- `src/model/capabilities/types.ts`: cached parent station type and model context.
+- `src/model/device-family.ts`: S1 family predicate, including explicit station model identification.
+- `src/client/eufy-mega.ts`: inject parent facts using the existing cached station link.
+- `src/model/capabilities/__tests__/siren.spec.ts`: adapted upstream tests and negative model/evidence checks.
+- `src/client/__tests__/rtc-command-routing.spec.ts`: adapted parent-context tests and real-router start/stop envelope coverage.
+
+The local RTC command router, keepalive, watchdog and state-freshness code is retained. A successful
+command acknowledgement never supplies sounding state. This is a local source change only; release
+packaging manifests and provenance have not been refreshed.
+
+## 2026-10-17 — Pending acceptance for bounded late-effect writes
+
+A strictly correlated station wait-timeout reply (-108) on a transmitted, current
+late-effect-eligible attached mains switch now resolves the facade command as
+accepted pending authoritative confirmation. Other negative codes and commands
+without the bounded job retain rejection behavior. No send-only acceptance or
+write replay is added. The existing +15/+25/+40-second information reads and
+45-second expiry remain unchanged. Unchanged real observations still emit
+propertiesObserved independently of propertyChanged. Count-only pendingAccepted
+and a finite pending_accepted event distinguish this facade acceptance from the
+retained signed station rejection evidence. Local synthetic verification only.
+
+## Experimental.6 package refresh, 2026-10-17
+
+This replaces the earlier review.7 candidate with review.9 input `681efd9` (implementation `d4335b9`, on review.8 `f6a59d9`). Runtime source is unchanged. Includes bounded pending acceptance for eligible correlated floodlight late replies with authoritative correction, supported S1 camera sirens, standard doorbell ring events and faster demand-only live-view admission, alongside the battery stream fix and native relay. The add-on relay option defaults to false; command keepalive remains 29000 independently. Package versions are SDK `0.2.1-s1.experimental.6` and bridge `0.3.1-s1.experimental.6`. Earlier candidate status statements above are historical. Original licenses and attribution remain. This is local packaging; publication and final device/soak qualification are pending.

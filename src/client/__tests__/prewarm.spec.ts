@@ -1,3 +1,4 @@
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EufyMega } from "../eufy-mega.js";
 import { PushClient } from "../../transport/push/push-client.js";
@@ -118,6 +119,21 @@ describe("event pre-warm policy", () => {
 
     expect(c.prewarm).toHaveBeenCalledWith(SOLO_WIRED_SN, undefined);
   });
+
+  it.each(["T8425", "T8419", "T8410", "T8416", "T8426", "T84A1", "T8423", "T8E00", "T8P00"])(
+    "uses wired session policy for %s despite a reported battery sentinel",
+    (model) => {
+      const devices = fleet().map((device) =>
+        device.sn === SOLO_WIRED_SN ? { ...device, model, params: { [BATTERY_LEVEL_PARAM]: "0" } } : device,
+      );
+      const wired = makeClient({ prewarmEvents: ["personDetected"], prewarmTiers: ["wired"] }, devices);
+      wired.fire("personDetected", SOLO_WIRED_SN);
+      expect(wired.prewarm).toHaveBeenCalledWith(SOLO_WIRED_SN, undefined);
+      const battery = makeClient({ prewarmEvents: ["personDetected"], prewarmTiers: ["battery"] }, devices);
+      battery.fire("personDetected", SOLO_WIRED_SN);
+      expect(battery.prewarm).not.toHaveBeenCalled();
+    },
+  );
 
   /** An empty tier list is an off switch of its own, so a caller can disable without losing their list. */
   it("pre-warms nothing when no tier is allowed", () => {

@@ -1,4 +1,4 @@
-/** Modified for genomez S1 experimental source preview, 2026-10-14. */
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 import { LIGHT, LIGHT_CMD, type LightActions } from "../light.js";
 import { unobservableMembers } from "../members.js";
 import { buildCommand } from "../index.js";
@@ -115,6 +115,20 @@ describe("light capability module", () => {
   });
 
   describe("buildCommand — variant resolution", () => {
+    it.each([
+      [47, true],
+      [87, true],
+      [19, false],
+      [31, false],
+      [46, false],
+    ])("late-effect read eligibility for device type %i is %s", (deviceType, eligible) => {
+      const command = intent("light", true, {
+        ...jsonCtx(3),
+        deviceType: deviceType as number,
+        paramIds: new Set([1400]),
+      })!;
+      expect(commandObservation(command)?.lateEffectReadback).toBe(eligible);
+    });
     it("on/off on a JSON-switch family (T8425) → set-json floodlight switch", () => {
       expect(intent("on", true, jsonCtx(3))).toEqual({
         kind: "set-json",

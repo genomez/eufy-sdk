@@ -1,4 +1,4 @@
-/** Modified for genomez S1 experimental source preview, 2026-10-14. */
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 /**
  * A capability's surface, declared once per feature.
  *
@@ -83,7 +83,14 @@ export interface ValueMember {
     reflects(
       value: boolean | number | string,
       ctx: CommandContext,
-    ): { param: number; expected: boolean | number | string; observed?: boolean | number | string } | undefined;
+    ):
+      | {
+          param: number;
+          expected: boolean | number | string;
+          observed?: boolean | number | string;
+          lateEffectReadback?: boolean;
+        }
+      | undefined;
     resetStandaloneSession?: boolean;
     /** Eligibility for route-owned passive state reporting instead of an active readback transaction. */
     passiveReadback?: boolean;
@@ -673,6 +680,7 @@ export function memberWrite(
         property: m.property ?? name,
         resetStandaloneSession: m.observation.resetStandaloneSession,
         passiveReadback: m.observation.passiveReadback,
+        lateEffectReadback: reflected.lateEffectReadback,
         timeoutMs: m.observation.timeoutMs,
       })
     : cmd;

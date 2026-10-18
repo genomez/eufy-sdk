@@ -1,7 +1,8 @@
-/** Modified for genomez S1 experimental source preview, 2026-10-14. */
+/** Modified for genomez S1 experimental source preview, 2026-10-17. */
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import type { EufyDevice } from "../../../core/types.js";
+import { observeCommand } from "../../../core/contracts.js";
 import { RtcCommandRouter, type RtcCommandRouterDeps } from "../command-router.js";
 import type { RtcSession, RtcSessionOptions } from "../session.js";
 import { buildPortalHeader, parsePortalHeader, PORTAL_HEADER_LENGTH } from "../portal-packet.js";
@@ -117,6 +118,26 @@ const arming = (mode: number) => ({
   channel: 0,
   mValue3: 0,
 });
+
+const passiveLight = () =>
+  observeCommand(
+    { kind: "set-json", param: 1400, data: { value: 1 }, channel: 2 },
+    {
+      event: "property changed",
+      expected: 1,
+      param: 1400,
+      property: "enabled",
+      passiveReadback: true,
+      timeoutMs: 14_000,
+    },
+  );
+
+function answerInformation(session: FakeSession): void {
+  const request = parsePortalHeader(session.sent.at(-1)!)!;
+  session.ackSegment(request.segment, 1103, 255);
+  const body = Buffer.from(JSON.stringify({ params: [] }));
+  session.emit("commandData", Buffer.concat([buildPortalHeader(1103, body.length, 255, 0, 0), body]), 3);
+}
 
 describe("RtcCommandRouter", () => {
   it("claims a T9000 station itself, not other hubs nor cameras attached to it", () => {
@@ -582,6 +603,156 @@ describe("five target deadline contention", () => {
 });
 
 describe("passive control operation evidence", () => {
+  it.each([
+    { code: -108, at: 10_200, outcome: "rejected" },
+    { code: 0, at: 10_000, outcome: "success" },
+  ])("accepts a correlated $code reply at $at ms after fallback readback misses", async ({ code, at, outcome }) => {
+    vi.useFakeTimers();
+    const { router, sessions } = makeRouter({ ackTimeoutMs: 8_000, commandTimeoutMs: 14_000 });
+    try {
+      const lease = await router.sessionFor(SN);
+      lease.release();
+      const session = sessions[0]!;
+      session.behaviour = "silent";
+      const operation = router.dispatchCommand(CAMERA, passiveLight());
+      const result = operation.then(
+        () => "success",
+        (error: Error) => {
+          if (code !== 0) expect(error).toHaveProperty("code", code);
+          return error.message;
+        },
+      );
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(session.sent.map((packet) => parsePortalHeader(packet)!.commandId)).toEqual([1700, 1103]);
+      answerInformation(session);
+      await vi.advanceTimersByTimeAsync(at - 8_000);
+      const request = sent(session.sent[0]!);
+      const body = Buffer.alloc(4);
+      body.writeInt32LE(code);
+      session.emit("commandData", Buffer.concat([buildPortalHeader(1700, 4, 2, request.segment, 1), body]), 1);
+      expect(await result).toBe(code === 0 ? "success" : `rtc: ${SN} rejected cmd 1400 (err -108)`);
+      expect(router.getCommandDiagnostics().recent.at(-1)).toMatchObject({
+        outcome,
+        matchedAcks: 1,
+        rejectionCode: code || null,
+        readbackAttempts: 1,
+      });
+      expect(session.sent.filter((packet) => parsePortalHeader(packet)!.commandId === 1700)).toHaveLength(1);
+    } finally {
+      router.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the ACK window open until 12 seconds when no reply follows mismatching readback", async () => {
+    vi.useFakeTimers();
+    const { router, sessions } = makeRouter({ ackTimeoutMs: 8_000, commandTimeoutMs: 14_000 });
+    try {
+      const lease = await router.sessionFor(SN);
+      lease.release();
+      const session = sessions[0]!;
+      session.behaviour = "silent";
+      const operation = router.dispatchCommand(CAMERA, passiveLight());
+      const rejected = expect(operation).rejects.toThrow("ACK timed out; outcome unknown");
+      await vi.advanceTimersByTimeAsync(8_000);
+      answerInformation(session);
+      await vi.advanceTimersByTimeAsync(3_999);
+      expect(router.getCommandDiagnostics().completed).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      expect(router.getCommandDiagnostics().lastFailure).toMatchObject({ outcome: "ack_timeout", elapsedMs: 12_000 });
+      expect(session.sent.map((packet) => parsePortalHeader(packet)!.commandId)).toEqual([1700, 1103]);
+    } finally {
+      router.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns a late negative reply while its information read drains without aborting that read", async () => {
+    vi.useFakeTimers();
+    const { router, sessions } = makeRouter({ ackTimeoutMs: 8_000, commandTimeoutMs: 14_000 });
+    try {
+      const lease = await router.sessionFor(SN);
+      lease.release();
+      const session = sessions[0]!;
+      session.behaviour = "silent";
+      const operation = router.dispatchCommand(CAMERA, passiveLight());
+      const rejected = expect(operation).rejects.toThrow("(err -108)");
+      await vi.advanceTimersByTimeAsync(10_200);
+      const request = sent(session.sent[0]!);
+      const body = Buffer.alloc(4);
+      body.writeInt32LE(-108);
+      session.emit("commandData", Buffer.concat([buildPortalHeader(1700, 4, 2, request.segment, 1), body]), 1);
+      await rejected;
+      expect(router.getCommandDiagnostics().lastFailure).toMatchObject({
+        outcome: "rejected",
+        rejectionCode: -108,
+        elapsedMs: 10_200,
+      });
+      expect(session.closed).toBe(false);
+      answerInformation(session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(router.informationRefreshReady(SN)).toBe(true);
+      expect(session.sent.map((packet) => parsePortalHeader(packet)!.commandId)).toEqual([1700, 1103]);
+    } finally {
+      router.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds both a silent ACK and a stalled fallback read by the original command deadline", async () => {
+    vi.useFakeTimers();
+    const { router, sessions } = makeRouter({ ackTimeoutMs: 8_000, commandTimeoutMs: 14_000 });
+    try {
+      const lease = await router.sessionFor(SN);
+      lease.release();
+      const session = sessions[0]!;
+      session.behaviour = "silent";
+      const operation = router.dispatchCommand(CAMERA, passiveLight());
+      const rejected = expect(operation).rejects.toThrow("ACK timed out; outcome unknown");
+      await vi.advanceTimersByTimeAsync(14_000);
+      await rejected;
+      expect(router.getCommandDiagnostics().lastFailure).toMatchObject({ outcome: "ack_timeout", elapsedMs: 14_000 });
+      expect(session.sent.map((packet) => parsePortalHeader(packet)!.commandId)).toEqual([1700, 1103]);
+    } finally {
+      router.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets authoritative readback confirmation finish before a late rejection", async () => {
+    vi.useFakeTimers();
+    const { router, sessions } = makeRouter({
+      ackTimeoutMs: 8_000,
+      commandTimeoutMs: 14_000,
+      confirmsCommand: () => true,
+    });
+    try {
+      const lease = await router.sessionFor(SN);
+      lease.release();
+      const session = sessions[0]!;
+      session.behaviour = "silent";
+      const operation = router.dispatchCommand(CAMERA, passiveLight());
+      await vi.advanceTimersByTimeAsync(8_000);
+      answerInformation(session);
+      await operation;
+      await vi.advanceTimersByTimeAsync(2_200);
+      const request = sent(session.sent[0]!);
+      const body = Buffer.alloc(4);
+      body.writeInt32LE(-108);
+      session.emit("commandData", Buffer.concat([buildPortalHeader(1700, 4, 2, request.segment, 1), body]), 1);
+      expect(router.getCommandDiagnostics().recent.at(-1)).toMatchObject({
+        outcome: "success",
+        matchedAcks: 0,
+        confirmedByReadback: 1,
+      });
+      expect(session.sent.map((packet) => parsePortalHeader(packet)!.commandId)).toEqual([1700, 1103]);
+    } finally {
+      router.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("records first mismatches and signed rejection codes without changing ACK admission", async () => {
     const { router, sessions } = makeRouter({ ackTimeoutMs: 200 });
     try {

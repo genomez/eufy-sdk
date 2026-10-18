@@ -1,4 +1,4 @@
-/** Modified for genomez S1 experimental source preview, 2026-10-14. */
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 import { CusPushEvent } from "../push-events.js";
 import { asBool } from "../../core/util.js";
 import { isCameraCodec, setStationScalar, setPayload, setScalar } from "./access.js";
@@ -140,7 +140,7 @@ function recordSetting(param: number, value: number, ctx: CommandContext): Comma
  *
  * It is also a STATIC fact about a model, not a live reading of what is powering the device. Nothing
  * here handles a unit whose supply can change — a camera moved onto a battery base, say. Moot for these
- * three, which have no cell to charge, and stated because the shape of the guard does not say so.
+ * models, which have no cell to charge, and stated because the shape of the guard does not say so.
  *
  * An explicit list, NOT a `device-family.ts` predicate (`isFloodLight`/`isIndoorCamera`): composing
  * those would over-reach — not every floodlight or indoor cam is mains-only, and this must assert mains
@@ -150,12 +150,22 @@ function recordSetting(param: number, value: number, ctx: CommandContext): Comma
  * (Indoor Cam Pan & Tilt) is confirmed mains-only by the maintainer, reported after a live unit showed
  * a battery level, a cell temperature and both solar reads it cannot have.
  *
- * KNOWN, ACCEPTED trade: because the capability stays, `poweredOf` (camera.ts) still resolves these as
- * `battery`, so a live stream is budgeted as if cell-powered. An unnecessary power budget is cheap; a
- * phantom battery icon is a support ticket — so the visible entity is fixed here and the budget is
- * left as-is (a `poweredOf` refinement would be a separate change).
+ * T84A1 is a hardwired wall-light fixture. T8423 requires constant 110-240 V power;
+ * its exact sentinels are unverified. T8E00 (PoE S4) and T8P00 (PoE E40) are powered
+ * by a T8N00 with no cell; upstream hardware evidence reports the S4 stream hitting
+ * the inherited battery budget 55 seconds after its first video frame.
+ *
+ * The same list determines live-media and standalone-session power through {@link cameraPowerTier}.
  */
-const MAINS_CAMERA_MODELS = ["T8425", "T8419", "T8410", "T8416", "T8426"] as const;
+const MAINS_CAMERA_MODELS = ["T8425", "T8419", "T8410", "T8416", "T8426", "T84A1", "T8423", "T8E00", "T8P00"] as const;
+
+/**
+ * Camera power tier: `"battery"` only with the resolved battery capability and no
+ * mains-only model match; otherwise `"wired"`. Battery percentage is not a power tier.
+ */
+export function cameraPowerTier(model: string | undefined, capabilities: ReadonlySet<string>): "wired" | "battery" {
+  return capabilities.has("battery") && notMainsCamera({ model }) ? "battery" : "wired";
+}
 
 /** False for a mains camera whose battery params are sentinels — gates every physical-cell read. */
 const notMainsCamera = (ctx: AvailabilityContext): boolean => {
@@ -232,8 +242,8 @@ function cellGated<T extends Members>(members: T): T {
  */
 export const BATTERY_MEMBERS = cellGated({
   /**
-   * The headline percentage, and this capability's detection evidence: reporting 1101 is what proves a
-   * device is battery-powered, which is also the fact `MediaProvider` reads to decide a stream needs a
+   * The headline percentage, and this capability's detection evidence: reporting 1101 resolves the
+   * capability even on a mains model with sentinels. {@link cameraPowerTier} determines the media
    * power budget. Published flat as `battery` — `level` alone is claimed by `suction` too.
    */
   level: {
@@ -495,7 +505,7 @@ export const BATTERY: CapabilityModule = {
   description: "Battery level, charging, health, temperature, and solar input.",
   members: BATTERY_MEMBERS,
   properties: propertiesOf(BATTERY_MEMBERS),
-  /** A reported battery-level param (1101) is the verified proof the device is battery-powered. */
+  /** A reported battery-level param (1101) resolves the battery/settings capability. */
   detection: { evidenceParams: [BATTERY_PARAM.BATTERY] },
   /**
    * `batteryAlert` is an FCM threshold push (`CusPushEvent` 6 LOW / 7 HOT / 11 FULL) — a STATE with no

@@ -930,3 +930,47 @@ describe("camera enablement — observed write", () => {
     });
   });
 });
+
+describe("camera media power classification", () => {
+  it.each([
+    ["T8425", "wired"],
+    ["T8419", "wired"],
+    ["T8410", "wired"],
+    ["T8416", "wired"],
+    ["T8426", "wired"],
+    ["T84A1", "wired"],
+    ["T8423", "wired"],
+    ["T8E00", "wired"],
+    ["T8P00", "wired"],
+    ["T8170", "battery"],
+    [undefined, "battery"],
+  ] as const)("routes every media egress for %s through the %s tier", async (model, powered) => {
+    const seen: string[] = [];
+    const recording = { on: () => recording, stop: () => undefined, async *[Symbol.asyncIterator]() {} };
+    const media: MediaProvider = {
+      snapshotLive: async (opts) => (
+        seen.push(`snapshot:${opts?.powered}`),
+        { jpeg: Buffer.alloc(0), width: 1, height: 1 }
+      ),
+      live: async (opts) => (seen.push(`live:${opts?.powered}`), {}) as never,
+      record: async () => Buffer.alloc(0),
+      openReadable: async (opts) => (seen.push(`readable:${opts?.powered}`), {}) as never,
+      recordFragments: (opts) => (seen.push(`record:${opts?.powered}`), recording),
+      talkback: async (opts) => (seen.push(`talkback:${opts?.powered}`), {}) as never,
+    };
+    const { acts } = camera(
+      ctx(0, {
+        model,
+        capabilities: new Set(["camera", "battery"]),
+        paramIds: new Set([1241]),
+      }),
+      media,
+    );
+    await acts.snapshotLive!();
+    await acts.live!();
+    await acts.openReadable!();
+    acts.recordFragments!();
+    await acts.talkback!();
+    expect(seen).toEqual(["snapshot", "live", "readable", "record", "talkback"].map((kind) => `${kind}:${powered}`));
+  });
+});

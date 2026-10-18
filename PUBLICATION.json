@@ -1,41 +1,45 @@
 {
   "schemaVersion": 1,
-  "releaseDate": "2026-10-16",
-  "version": "0.2.1-s1.experimental.5",
-  "runtimeSourceRelease": "https://github.com/genomez/ha-eufy-sdk-addon/releases/tag/s1-runtime-0.4.1.experimental.5",
+  "preparationDate": "2026-10-18",
+  "version": "0.2.1-s1.experimental.6",
+  "status": "prepared_locally_not_published",
+  "published": false,
+  "npmPublication": false,
+  "runtimeSourceRelease": "__RUNTIME_RELEASE_URL__",
   "candidateSourceManifest": "SOURCE_MANIFEST.json",
   "candidatePreparationReceiptsAreHistorical": true,
+  "acceptedMonorepoCommit": "c254aac11d4ad8e599cd14fa89e5e47e33264516",
+  "integrationVersion": "0.3.1-s1.experimental.6",
+  "addonVersion": "0.4.1-s1.experimental.6",
+  "relayDefault": false,
+  "keepaliveMs": 29000,
   "knownLimitations": [
-    "The final image passed an in-image smoke test; it has not itself been run on hardware.",
-    "Earlier one-S1 keepalive soak does not establish broad hardware acceptance; live view is excluded."
+    "Accepted Linux amd64 image passed isolated smoke checks; this exact release has no claimed physical-device, live HA/HACS installation or overnight soak acceptance.",
+    "Earlier dated dev3 companion references are preserved as historical source records."
   ],
   "verification": {
-    "tests": 5076,
-    "passed": 5074,
-    "windowsOnlyDocSnippetFailures": 2,
-    "testFiles": 257,
     "typecheck": "pass",
-    "build": "pass"
+    "build": "pass",
+    "tests": 5208,
+    "passed": 5206,
+    "inheritedWindowsDocSnippetFailures": 2,
+    "testFiles": 260
   },
-  "npmPublication": false,
-  "changeScope": "Floodlight write confirmation; complete realtime teardown and empty-refresh backoff; withhold battery charge source on known mains cameras; treat -100 Wi-Fi as no reading; opt-in command-session keepalive; redact echoed tokens from RTC sign refusals.",
   "publicationDocumentationOverrides": {
     "README.md": {
-      "candidateSha256": "294c2a03eee342a536a9e70c79176c1baadf7251931e31e4b6c5a40f96d8d60b",
-      "preparedSha256": "abd0df8d72afa6abb4f75253a4f3a936ebd924f0419c346d8b361aeadeb754b3",
-      "publicationSha256": "adb0ef452c0e4ba5c4cc02c97d73072717bce58942e2466c48e8cb07f77531eb",
-      "reason": "Replace local-preparation status with the published prerelease link; implementation unchanged."
+      "candidateSha256": "b4eeef7a2949c1984f6c14162449b2b88a0dc1993a52cd7e9061abb704000b56",
+      "preparedSha256": "c21adbd3b0cd85716abd426277bb249dc261d66c4e2daa4a768e6a0c05229221",
+      "reason": "Add current unpublished preparation and intended corresponding-source location; preserve dated records and implementation bytes."
     },
     "EXPERIMENTAL.md": {
-      "candidateSha256": "694f4af9142e52acf04afe494f516f01c3530adaeda791ae233e66d8ff415115",
-      "preparedSha256": "40799422638f08fa702ab4a1b74bba7c8d9425abb7a2f780328c27fea37e52c3",
-      "publicationSha256": "253842566cb2d71047e65b6af835692bbe71de963b8a12e3ddcc7a203792e76d",
-      "reason": "Replace local-preparation status with the published prerelease link; implementation unchanged."
+      "candidateSha256": "a74d402ec66e21d3ab5c74d50caafa6cf5e8d638ea3a71611fa5cc43a768e681",
+      "preparedSha256": "152dcf8835357465a9b0be96fe876dc5eb386817b5aa1cdd33c14d77cb7a5945",
+      "reason": "Add current unpublished preparation and intended corresponding-source location; preserve dated records and implementation bytes."
     },
     "PUBLICATION.json": {
-      "candidateSha256": "28511a06dd602f4a2fe78d9535af737df3d4f5722fd88533a20250a5018fdf75",
-      "preparedSha256": "6fd4e07fde92aaf7f8dcf9317cb9a519baeb13fe2316197c3793fdff11e5404d",
-      "reason": "Rewritten at publication; records this publication's scope."
+      "candidateSha256": "85a99a6f426b3d3f1cd762aaa41b38fe7b0857bbce987c7d2d2195f19205a804",
+      "reason": "Replace historical candidate preparation summary with current unpublished publication preparation and documented source exceptions."
     }
-  }
+  },
+  "correspondingSourceArchive": "eufy-sdk-0.2.1-s1.experimental.6-source.tar.gz"
 }

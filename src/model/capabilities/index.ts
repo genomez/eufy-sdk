@@ -1,3 +1,4 @@
+/** Modified for genomez S1 experimental source preview, 2026-10-16. */
 /** Modified for genomez S1 experimental source preview, 2026-10-14. */
 /**
  * Capability-module barrel — collects every `capabilities/<cap>.ts` module and exposes the
@@ -68,6 +69,7 @@ export {
 export {
   WorkingMode,
   PowerSource,
+  cameraPowerTier,
   resolveWorkingMode,
   resolveWorkingModeValue,
   WORKING_MODE_MAPS,

@@ -1,4 +1,4 @@
-/** Modified for genomez S1 experimental source preview, 2026-10-14. */
+/** Modified for genomez S1 experimental source preview, 2026-10-17. */
 /**
  * DeviceRegistry — the device list/record/capability-resolution collaborator behind {@link EufyMega}.
  *
@@ -183,6 +183,8 @@ export class DeviceRegistry {
   private readonly onError: (e: unknown) => void;
   private readonly logger: Logger;
   private devices: EufyDevice[] = [];
+  /** Conflicting duplicate topology cannot be made safe by the ordinary last-row merge. */
+  private inventoryConflicts = new Set<string>();
   /** Per-(station, channel) capability cache for {@link capabilitiesForFrame}; `null` = negative hit. */
   private readonly frameCapsCache = new Map<string, ReadonlySet<Capability> | null>();
   /** {@link stationChannels} of {@link channelMapFor}, the roster it was computed over. */
@@ -244,6 +246,11 @@ export class DeviceRegistry {
     return this.devices;
   }
 
+  /** Detached, cache-only serials with conflicting bindings in the last roster refresh. */
+  conflicts(): readonly string[] {
+    return [...this.inventoryConflicts].sort();
+  }
+
   /**
    * List + classify devices across all houses (mega API). Each device is tagged
    * with its API backend + realtime transport (see classifyDevice). Camera/
@@ -280,6 +287,8 @@ export class DeviceRegistry {
     }
 
     const seen = new Map<string, EufyDevice>();
+    const bindings = new Map<string, string>();
+    const conflicts = new Set<string>();
     for (const body of bodies) {
       let res: { devices?: any[] };
       try {
@@ -292,6 +301,15 @@ export class DeviceRegistry {
       }
       for (const raw of res.devices ?? []) {
         if (!raw?.device_sn) continue;
+        const binding = JSON.stringify([
+          resolvedStationSn(raw, raw.device_sn),
+          raw.device_channel ?? null,
+          raw.device_model ?? null,
+          raw.device_type ?? null,
+        ]);
+        const priorBinding = bindings.get(raw.device_sn);
+        if (priorBinding !== undefined && priorBinding !== binding) conflicts.add(raw.device_sn);
+        bindings.set(raw.device_sn, binding);
         const c = classifyDevice(raw);
         const params: Record<number, string> = {};
         const paramUpdatedAt: Record<number, number> = {};
@@ -318,6 +336,8 @@ export class DeviceRegistry {
       }
     }
     this.lastRefreshPartial = partial;
+    if (partial) for (const sn of this.inventoryConflicts) conflicts.add(sn);
+    this.inventoryConflicts = conflicts;
     if (partial) for (const prev of this.devices) if (!seen.has(prev.sn)) seen.set(prev.sn, prev);
     this.devices = [...seen.values()];
     // Device list changed → drop stale (station,channel)→caps and serial→caps entries. Params feed
