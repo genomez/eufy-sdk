@@ -61,6 +61,8 @@ import { noopLogger, type Logger } from "../../core/logger.js";
 
 const LOCAL_LOOKUP_PORT = 32108;
 const HEARTBEAT_MS = 5_000;
+/** Maximum local END-send drain wait; completion does not establish a peer ACK or remote release. */
+const END_SEND_DRAIN_MS = 250;
 /**
  * How long a path may go without answering a heartbeat before it stops being committed to.
  *
@@ -326,6 +328,8 @@ export class P2PSession extends EventEmitter {
   private connected = false;
   private connecting = false;
   private closed = false;
+  /** Completion shared by repeated close calls until the captured socket has been disposed. */
+  private closePromise?: Promise<void>;
   private connectAddress?: Address;
   private seqNumber = 0;
   /**
@@ -658,9 +662,15 @@ export class P2PSession extends EventEmitter {
     }
 
     const socket = dgram.createSocket("udp4");
+    const generation = this.connectionGeneration;
+    const ownsConnection = () => !this.closed && this.socket === socket && this.connectionGeneration === generation;
     this.socket = socket;
-    socket.on("message", (msg, rinfo) => this.onMessage(msg, rinfo));
-    socket.on("error", (e) => this.emit("error", e));
+    socket.on("message", (msg, rinfo) => {
+      if (ownsConnection()) this.onMessage(msg, rinfo);
+    });
+    socket.on("error", (e) => {
+      if (ownsConnection()) this.emit("error", e);
+    });
 
     await new Promise<void>((resolve) => {
       socket.bind(() => {
@@ -673,6 +683,8 @@ export class P2PSession extends EventEmitter {
       });
     });
 
+    if (!ownsConnection()) return;
+
     // Best-effort self-IP detection for the LOOKUP_WITH_KEY self-report, kicked off in the
     // BACKGROUND — deliberately not awaited here. Awaiting it used to (a) let a hung/never-settling
     // probe block connect() forever with no timeout protection (connectTimer was only armed after
@@ -684,7 +696,7 @@ export class P2PSession extends EventEmitter {
     // LOOKUP_WITH_KEY variant (falls back to LOOKUP_WITH_KEY2) until it resolves, if ever.
     const boundPort = socket.address().port;
     void P2PSession.detectLocalIp().then((host) => {
-      if (host && !this.closed) this.selfAddress = { host, port: boundPort };
+      if (host && ownsConnection()) this.selfAddress = { host, port: boundPort };
     });
 
     this.trace({
@@ -1848,17 +1860,57 @@ export class P2PSession extends EventEmitter {
     this.emit("data", frame);
   }
 
-  private send(addr: Address, type: Buffer, payload?: Buffer): void {
-    if (!this.socket) return;
+  private send(addr: Address, type: Buffer, payload?: Buffer, socket = this.socket, done?: () => void): void {
+    if (!socket) return;
     const packet = frameMessage(type, payload);
-    this.socket.send(packet, addr.port, addr.host, (err) => {
-      if (err) this.logger.warn(`[p2p] send err ${addr.host}:${addr.port}`, err.message);
+    socket.send(packet, addr.port, addr.host, (err) => {
+      try {
+        if (err) this.logger.warn(`[p2p] send err ${addr.host}:${addr.port}`, err.message);
+      } finally {
+        done?.();
+      }
     });
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
+  /** Drain END for at most 250 ms, then dispose only the captured socket and announce close once. */
+  private async finishClose(socket?: dgram.Socket, address?: Address): Promise<void> {
+    if (socket && address) {
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(finish, END_SEND_DRAIN_MS);
+        try {
+          this.send(address, RequestMessageType.END, undefined, socket, finish);
+        } catch {
+          finish();
+        }
+      });
+    }
+    await new Promise<void>((resolve) => {
+      if (!socket) return resolve();
+      try {
+        socket.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+    this.emit("close");
+  }
+
+  /**
+   * Invalidate the connection immediately and share its captured socket's bounded END-send drain.
+   * Send completion is local, not a peer ACK; a replacement socket retains its ownership.
+   */
+  close(): Promise<void> {
+    if (this.closed) return this.closePromise ?? Promise.resolve();
     this.closed = true;
+    const socket = this.socket;
+    const address = this.connectAddress;
+    this.socket = undefined;
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    this.closePromise = promise;
     this.connectionGeneration += 1;
     this.level2Key = undefined;
     this.level2Seq = 0;
@@ -1876,12 +1928,7 @@ export class P2PSession extends EventEmitter {
     this.liveStartRetransmitTimer = undefined;
     this.unackedLiveStarts.clear();
     this.resetInboundSequencing();
-    if (this.connectAddress) this.send(this.connectAddress, RequestMessageType.END);
-    await new Promise<void>((resolve) => {
-      if (!this.socket) return resolve();
-      this.socket.close(() => resolve());
-    });
-    this.socket = undefined;
-    this.emit("close");
+    void this.finishClose(socket, address).then(resolve, reject);
+    return promise;
   }
 }

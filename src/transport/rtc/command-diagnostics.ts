@@ -1,5 +1,6 @@
 /** Modified for genomez S1 experimental source preview, 2026-10-17. */
 import { performance } from "node:perf_hooks";
+import { StationWorkError } from "./station-work-scheduler.js";
 import { copyRtcTransportDiagnostics, type RtcTransportDiagnostics } from "./transport-diagnostics.js";
 import type { PortalResponse } from "./portal-packet.js";
 
@@ -13,7 +14,13 @@ export type CommandOutcome =
   | "closed"
   | "not_sent"
   | "connect_timeout"
-  | "other";
+  | "other"
+  | "queue_full"
+  | "superseded_before_send"
+  | "cancelled_before_send"
+  | "cancelled_after_send"
+  | "closed_before_send"
+  | "closed_after_send";
 
 /** Parsed numeric headers and independent comparisons; no payload or connection identity is retained. */
 export interface CommandHeaderSample {
@@ -75,6 +82,30 @@ type CommandTimingStage =
 
 /** Numeric timings and first-mismatch counts, without packets or connection identities. */
 export interface CommandEvidence {
+  profileVersion: "bounded-state-v1" | null;
+  intent: number | null;
+  parentAttempt: number | null;
+  authorizingRead: number | null;
+  readStartedAgeMs: number | null;
+  readFinishedAgeMs: number | null;
+  originalRelativeSendAgeMs: number | null;
+  origin: "caller" | "retry" | "correction";
+  preparationWaitMs: number | null;
+  acquisitionWaitMs: number | null;
+  queueWaitMs: number | null;
+  admissionElapsedMs: number | null;
+  activeExchangeMs: number | null;
+  queueDepthAtEnqueue: number | null;
+  targetsAheadAtEnqueue: number | null;
+  admissionBudgetMs: number | null;
+  activeBudgetMs: number | null;
+  totalBudgetMs: number | null;
+  admissionRemainingAtSendMs: number | null;
+  totalRemainingAtSendMs: number | null;
+  sendAttempted: boolean;
+  channelAccepted: boolean;
+  terminalReason: string | null;
+  effect: "unconfirmed" | "unknown" | "confirmed_report";
   attempt: number;
   target: number;
   scope: "station" | "attached";
@@ -181,8 +212,23 @@ export function commandHeaderSample(
   };
 }
 
+/** Queue-only terminal durations in fixed, mutually exclusive histogram bins. */
+export interface QueueWaitDiagnostics {
+  observations: number;
+  totalMs: number;
+  maxMs: number;
+  lastMs: number | null;
+  le100: number;
+  le1000: number;
+  le5000: number;
+  le15000: number;
+  le60000: number;
+  gt60000: number;
+}
+
 /** Completed control observations since the recorder lifecycle began. */
 export interface RtcCommandDiagnostics {
+  queueWait: QueueWaitDiagnostics;
   attempts: number;
   completed: number;
   failures: number;
@@ -193,6 +239,18 @@ export interface RtcCommandDiagnostics {
 
 /** Thirty-two completed operations and thirty-two private target associations, with detached snapshots. */
 export class CommandEvidenceRecorder {
+  private readonly queueWait: QueueWaitDiagnostics = {
+    observations: 0,
+    totalMs: 0,
+    maxMs: 0,
+    lastMs: null,
+    le100: 0,
+    le1000: 0,
+    le5000: 0,
+    le15000: 0,
+    le60000: 0,
+    gt60000: 0,
+  };
   private targets = new Map<string, CommandTargetContext>();
   private nextTarget = 0;
   private attempts = 0;
@@ -241,6 +299,30 @@ export class CommandEvidenceRecorder {
     if (this.targets.size > 32) this.targets.delete(this.targets.keys().next().value!);
     const startedAtMicros = this.micros();
     return {
+      profileVersion: null,
+      intent: null,
+      parentAttempt: null,
+      authorizingRead: null,
+      readStartedAgeMs: null,
+      readFinishedAgeMs: null,
+      originalRelativeSendAgeMs: null,
+      origin: "caller",
+      preparationWaitMs: null,
+      acquisitionWaitMs: null,
+      queueWaitMs: null,
+      admissionElapsedMs: null,
+      activeExchangeMs: null,
+      queueDepthAtEnqueue: null,
+      targetsAheadAtEnqueue: null,
+      admissionBudgetMs: null,
+      activeBudgetMs: null,
+      totalBudgetMs: null,
+      admissionRemainingAtSendMs: null,
+      totalRemainingAtSendMs: null,
+      sendAttempted: false,
+      channelAccepted: false,
+      terminalReason: null,
+      effect: "unconfirmed",
       attempt,
       target: ordinal,
       scope,
@@ -334,6 +416,7 @@ export class CommandEvidenceRecorder {
   }
 
   finish(row: CommandEvidence, outcome: CommandOutcome): void {
+    if (row.finishedAtMs !== null) return;
     this.markTiming(row, "finishedAtMicros");
     if (row.stageTiming) {
       const t = row.stageTiming;
@@ -342,6 +425,41 @@ export class CommandEvidenceRecorder {
       t.acquisitionElapsedMicros = duration(t.startedAtMicros, t.acquiredAtMicros ?? t.finishedAtMicros);
       t.queueElapsedMicros = duration(t.queuedAtMicros, t.exchangeStartedAtMicros ?? t.finishedAtMicros);
       t.exchangeElapsedMicros = duration(t.exchangeStartedAtMicros, t.finishedAtMicros);
+    }
+    row.queueWaitMs ??=
+      row.stageTiming?.queueElapsedMicros === null || row.stageTiming?.queueElapsedMicros === undefined
+        ? null
+        : row.stageTiming.queueElapsedMicros / 1000;
+    row.acquisitionWaitMs ??=
+      row.stageTiming?.acquisitionElapsedMicros === null || row.stageTiming?.acquisitionElapsedMicros === undefined
+        ? null
+        : row.stageTiming.acquisitionElapsedMicros / 1000;
+    row.activeExchangeMs ??=
+      row.stageTiming?.exchangeElapsedMicros === null || row.stageTiming?.exchangeElapsedMicros === undefined
+        ? null
+        : row.stageTiming.exchangeElapsedMicros / 1000;
+    row.sendAttempted = row.sendAttemptedAtMs !== null;
+    row.terminalReason ??= outcome;
+    if (row.queueWaitMs !== null) {
+      const value = row.queueWaitMs;
+      const q = this.queueWait;
+      q.observations++;
+      q.totalMs += value;
+      q.maxMs = Math.max(q.maxMs, value);
+      q.lastMs = value;
+      const bin =
+        value <= 100
+          ? "le100"
+          : value <= 1000
+            ? "le1000"
+            : value <= 5000
+              ? "le5000"
+              : value <= 15000
+                ? "le15000"
+                : value <= 60000
+                  ? "le60000"
+                  : "gt60000";
+      q[bin]++;
     }
     row.finishedAtMs = Date.now();
     row.elapsedMs = Math.max(0, row.finishedAtMs - row.startedAtMs);
@@ -361,6 +479,7 @@ export class CommandEvidenceRecorder {
 
   snapshot(): RtcCommandDiagnostics {
     return {
+      queueWait: { ...this.queueWait },
       attempts: this.attempts,
       completed: this.completed,
       failures: this.failures,
@@ -384,6 +503,7 @@ export class RtcCommandRejection extends Error {
 
 /** Known transport errors mapped to fixed categories; exception text is never retained. */
 export function commandOutcome(error: unknown): CommandOutcome {
+  if (error instanceof StationWorkError) return error.reason;
   const message = error instanceof Error ? error.message : "";
   if (message === "RTC command ACK timed out; outcome unknown") return "ack_timeout";
   if (message === "RTC command timed out before send") return "expired_before_send";

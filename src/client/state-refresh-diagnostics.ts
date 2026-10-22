@@ -36,8 +36,18 @@ export interface StateRefreshScheduleEvidence {
   reset: boolean;
 }
 
+/** Actual current-generation cloud poll timer and execution metadata. */
+export interface CloudPollDiagnostics {
+  enabled: boolean;
+  intervalMs: number | null;
+  scheduledAtMs: number | null;
+  nextDueAtMs: number | null;
+  inFlight: boolean;
+}
+
 /** Aggregate background station-read evidence for one realtime generation. Times are Unix milliseconds. */
 export interface StateRefreshDiagnostics {
+  cloudPoll: CloudPollDiagnostics;
   recent: StateRefreshSweepEvidence[];
   operations: StateRefreshOperationEvidence[];
   lastOperationFailure: StateRefreshOperationEvidence | null;

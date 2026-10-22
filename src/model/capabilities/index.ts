@@ -665,7 +665,10 @@ export interface DeviceEventMap {
     person_name?: string;
   };
   /** Doorbell button pressed. */
-  doorbellPress: PushSemanticEvent;
+  doorbellPress: PushSemanticEvent & {
+    /** Opaque source event identity, falling back to a transport delivery identity when supplied. */
+    eventId?: string;
+  };
   /** Pet detected. */
   petDetection: PushSemanticEvent;
   /** A package was delivered (drop/porch). */
@@ -1140,7 +1143,9 @@ export function scalarPropertySpec(
   ctx: AvailabilityContext,
 ): PropertySpec {
   const entry = propertyMember(capabilities, spec, ctx);
-  return entry ? scalarSpec(spec, entry.member) : { ...spec, unexposed: true };
+  if (!entry) return { ...spec, unexposed: true };
+  const projected = scalarSpec(spec, entry.member);
+  return entry.member.boundedStateWrites?.(ctx) ? { ...projected, boundedStateWrites: true } : projected;
 }
 
 /** Read a declared member from cached state, without invoking any freshness policy. @internal */

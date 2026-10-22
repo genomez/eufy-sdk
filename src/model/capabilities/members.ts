@@ -63,6 +63,8 @@ export interface ValueMember {
   description: string;
   /** The wire, or absent for read-only. `undefined` from it = this value is not one we accept. */
   write?: (value: boolean | number | string, ctx: CommandContext) => Command | undefined;
+  /** Eligibility for a bounded absolute-state execution contract on this member. */
+  boundedStateWrites?: (ctx: AvailabilityContext) => boolean;
   /** @internal Policy for confirming this write through bounded readback before emitting its transition event. */
   observation?: {
     event: string;
@@ -89,6 +91,7 @@ export interface ValueMember {
           expected: boolean | number | string;
           observed?: boolean | number | string;
           lateEffectReadback?: boolean;
+          replaceableState?: boolean;
         }
       | undefined;
     resetStandaloneSession?: boolean;
@@ -643,6 +646,7 @@ export function propertiesOf(members: Members, ctx?: AvailabilityContext): Prope
         unexposed: m.unexposed,
         readAliases: aliases?.slice(promoted ? 1 : 0).map(({ paramType, invert }) => ({ paramType, invert })),
         writable: m.write !== undefined || m.writtenElsewhere === true,
+        ...(ctx && m.boundedStateWrites?.(ctx) ? { boundedStateWrites: true as const } : {}),
         description: m.description,
       },
     ];
@@ -681,6 +685,7 @@ export function memberWrite(
         resetStandaloneSession: m.observation.resetStandaloneSession,
         passiveReadback: m.observation.passiveReadback,
         lateEffectReadback: reflected.lateEffectReadback,
+        replaceableState: reflected.replaceableState,
         timeoutMs: m.observation.timeoutMs,
       })
     : cmd;

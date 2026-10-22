@@ -861,16 +861,10 @@ export class P2PCommandRouter {
         mayOpenOwnSession && homeBaseAttached && this.stationSessionInUse(parentSn, key)
           ? P2PCommandRouter.mediaSessionKey(parentSn, channel)
           : parentSn;
+      const held: HeldSession = {
+        session: sessionKey === parentSn ? session : await this.openMediaSession(parentSn, channel, opts.signal),
+      };
       this.liveSessionKeys.set(key, sessionKey);
-      let held: HeldSession;
-      try {
-        held = {
-          session: sessionKey === parentSn ? session : await this.openMediaSession(parentSn, channel, opts.signal),
-        };
-      } catch (error) {
-        this.liveSessionKeys.delete(key);
-        throw error;
-      }
       source = new SharedLiveSource({
         makeStream: (ctx) =>
           new LiveStream(held.session, {
@@ -1101,9 +1095,9 @@ export class P2PCommandRouter {
    * instance with a new socket, a new RSA keypair offered as `encryptkey`, and fresh sequence windows.
    *
    * The close is issued BEFORE the source is dropped, because discarding the manager entry is synchronous:
-   * from that moment a concurrent acquisition resolves a fresh session rather than the doomed one. It would
-   * find the not-yet-dropped source in that window, which is exactly why a stopped source is replaced
-   * regardless of what is attached to it.
+   * from that moment a concurrent acquisition resolves a fresh session rather than the doomed one. The
+   * source, options and session claim are dropped synchronously too, before close completion can outlive
+   * them and reach a successor cached under the same key.
    *
    * Only a **standalone** device's session is recycled, resolved through {@link stationKeyOf} so this and
    * {@link resetStandaloneSession} cannot disagree about what standalone means. An attached camera shares
@@ -1120,8 +1114,8 @@ export class P2PCommandRouter {
     }
     void this.manager
       .close(station)
-      .catch((error) => this.reportError(error instanceof Error ? error : new Error(String(error))))
-      .finally(() => this.dropLiveSource(key));
+      .catch((error) => this.reportError(error instanceof Error ? error : new Error(String(error))));
+    this.dropLiveSource(key);
   }
 
   /**
@@ -1138,13 +1132,16 @@ export class P2PCommandRouter {
   private replaceUnreachableSession(sn: string, key: string, held: HeldSession): void {
     const station = this.stationKeyOf(sn);
     if (station !== sn) return;
+    const source = this.liveSources.get(key);
+    if (!source) return;
     void (async () => {
       try {
         await this.manager.close(station);
+        if (this.liveSources.get(key) !== source) return;
         const { session } = await this.resolveSession(sn);
-        if (this.liveSources.get(key) !== undefined) {
+        if (this.liveSources.get(key) === source) {
           held.session = session;
-          this.liveSources.get(key)?.rewarm();
+          source.rewarm();
         }
       } catch (error) {
         this.reportError(error instanceof Error ? error : new Error(String(error)));
@@ -1188,7 +1185,8 @@ export class P2PCommandRouter {
   /**
    * **Generic P2P request/reply query.** Sends a `SET_PAYLOAD` (1350) wrapper carrying `subCmd` on the
    * device channel, then resolves with the reply frame's `payload` — the `NOTIFY_PAYLOAD` (1351)
-   * whose JSON `cmd` echoes `subCmd` — decoded off the session `data` event. Needs the level-2 key.
+   * on the resolved device channel whose JSON `cmd` echoes `subCmd` — decoded off the session `data`
+   * event. Needs the level-2 key.
    */
   async p2pQuery(sn: string, subCmd: number, opts: { timeoutMs?: number } = {}): Promise<Record<string, unknown>> {
     const { session, channel, accountId } = await this.resolveSession(sn, { waitLevel2: true });
@@ -1200,7 +1198,13 @@ export class P2PCommandRouter {
       }, timeoutMs);
       const onData = (f: P2PFrame): void => {
         const j = f.json as { cmd?: number; payload?: unknown } | undefined;
-        if (j?.cmd === subCmd && j.payload && typeof j.payload === "object") {
+        if (
+          f.channel === channel &&
+          f.commandId === CommandType.CMD_NOTIFY_PAYLOAD &&
+          j?.cmd === subCmd &&
+          j.payload &&
+          typeof j.payload === "object"
+        ) {
           cleanup();
           resolve(j.payload as Record<string, unknown>);
         }

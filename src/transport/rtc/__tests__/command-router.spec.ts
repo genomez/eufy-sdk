@@ -982,3 +982,350 @@ describe("passive control operation evidence", () => {
     }
   });
 });
+
+describe("bounded state profile", () => {
+  it.each([0, 1, 2, 3, 4])("serves five distinct targets when target %i never acknowledges", async (slow) => {
+    vi.useFakeTimers();
+    const { performance } = await import("node:perf_hooks");
+    const wall = Date.now();
+    const monotonic = vi.spyOn(performance, "now").mockImplementation(() => Date.now() - wall);
+    try {
+      const devices = Array.from(
+        { length: 5 },
+        (_, index) => ({ ...camera, sn: `T8425P000000000${index + 1}`, raw: { device_channel: index } }) as EufyDevice,
+      );
+      const { router, sessions } = makeRouter({
+        findDevice: (sn) => (sn === SN ? station : devices.find((device) => device.sn === sn)),
+      });
+      const lease = await router.sessionFor(SN);
+      lease.release();
+      const session = sessions[0]!;
+      const sendTimes: number[] = [];
+      session.sendCommand = (packet: Buffer) => {
+        session.sent.push(packet);
+        const header = parsePortalHeader(packet)!;
+        sendTimes.push(performance.now());
+        if (header.channel !== slow)
+          setTimeout(() => session.ackSegment(header.segment, header.commandId, header.channel), 4000);
+        return true;
+      };
+      const calls = devices.map((device, index) =>
+        router.dispatchCommandWithReceipt(
+          device.sn,
+          observeCommand(
+            { kind: "set-json", param: 1400, data: { value: 1 }, channel: index },
+            {
+              event: "property changed",
+              expected: 1,
+              param: 1400,
+              property: "enabled",
+              passiveReadback: true,
+              replaceableState: true,
+              timeoutMs: 14000,
+            },
+          ),
+          {
+            execution: {
+              profile: "bounded-state-v1",
+              bornAtMs: 0,
+              sendByMs: 60000,
+              totalByMs: 72000,
+              intent: index + 1,
+            },
+          },
+        ),
+      );
+      const result = Promise.all(calls);
+      await vi.advanceTimersByTimeAsync(28001);
+      const receipts = await result;
+      expect(receipts.filter((receipt) => receipt.status === "acknowledged")).toHaveLength(4);
+      expect(receipts[slow]).toMatchObject({ status: "ack_timeout", sendAttempted: true, effect: "unknown" });
+      expect(session.sent).toHaveLength(5);
+      expect(session.sent.map((packet) => parsePortalHeader(packet)!.channel)).toEqual([0, 1, 2, 3, 4]);
+      expect(new Set(session.sent.map((packet) => parsePortalHeader(packet)!.segment)).size).toBe(5);
+      expect(sendTimes.at(-1)).toBeLessThanOrEqual(24000);
+      expect(router.getCommandDiagnostics().queueWait.observations).toBe(5);
+      expect(router.getCommandDiagnostics().scheduler[0]).toMatchObject({ active: 0, queued: 0 });
+      router.close();
+    } finally {
+      monotonic.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains a 10.8-second ACK and sends no inline information request", async () => {
+    vi.useFakeTimers();
+    const { performance } = await import("node:perf_hooks");
+    const wall = Date.now();
+    const monotonic = vi.spyOn(performance, "now").mockImplementation(() => Date.now() - wall);
+    try {
+      const { router, sessions } = makeRouter({ requestsCommandReadback: () => true });
+      const lease = await router.sessionFor(SN);
+      lease.release();
+      const session = sessions[0]!;
+      session.behaviour = "silent";
+      const command = passiveLight();
+      const observation = {
+        event: "property changed",
+        expected: 1,
+        param: 1400,
+        property: "enabled",
+        passiveReadback: true,
+        replaceableState: true,
+        timeoutMs: 14000,
+      };
+      const result = router.dispatchCommandWithReceipt(CAMERA, observeCommand(command, observation), {
+        execution: { profile: "bounded-state-v1", bornAtMs: 0, sendByMs: 60000, totalByMs: 72000 },
+      });
+      await vi.advanceTimersByTimeAsync(10800);
+      expect(session.sent).toHaveLength(1);
+      const header = parsePortalHeader(session.sent[0]!)!;
+      session.ackSegment(header.segment, header.commandId, header.channel);
+      expect(await result).toMatchObject({ status: "acknowledged", effect: "unconfirmed", sendAttempted: true });
+      expect(session.sent).toHaveLength(1);
+      router.close();
+    } finally {
+      monotonic.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("removes cancelled queued work and freezes unsent receipt evidence", async () => {
+    const { performance } = await import("node:perf_hooks");
+    const { router, sessions } = makeRouter();
+    const lease = await router.sessionFor(SN);
+    lease.release();
+    const session = sessions[0]!;
+    session.behaviour = "silent";
+    const born = performance.now();
+    const command = () =>
+      observeCommand(passiveLight(), {
+        event: "property changed",
+        expected: 1,
+        param: 1400,
+        property: "enabled",
+        passiveReadback: true,
+        replaceableState: true,
+        timeoutMs: 14000,
+      });
+    const controller = new AbortController();
+    const firstController = new AbortController();
+    const context = {
+      profile: "bounded-state-v1" as const,
+      bornAtMs: born,
+      sendByMs: born + 60000,
+      totalByMs: born + 72000,
+    };
+    const first = router.dispatchCommandWithReceipt(CAMERA, command(), {
+      execution: { ...context, signal: firstController.signal },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const queued = router.dispatchCommandWithReceipt(CAMERA, command(), {
+      execution: { ...context, signal: controller.signal },
+    });
+    controller.abort();
+    const receipt = await queued;
+    expect(receipt).toMatchObject({ status: "cancelled_before_send", sendAttempted: false });
+    expect(Object.isFrozen(receipt)).toBe(true);
+    expect(session.sent).toHaveLength(1);
+    firstController.abort();
+    expect(await first).toMatchObject({ status: "cancelled_after_send", effect: "unknown" });
+    await new Promise((resolve) => setImmediate(resolve));
+    session.close();
+    expect(router.getCommandDiagnostics().scheduler).toHaveLength(0);
+    expect(router.getCommandDiagnostics().schedulerTotals).toMatchObject({
+      cancelledBeforeSend: 1,
+      cancelledAfterSend: 1,
+      active: 0,
+      queued: 0,
+    });
+    router.close();
+    expect(router.getCommandDiagnostics().schedulerTotals.cancelledBeforeSend).toBe(0);
+  });
+});
+
+describe("bounded acquisition ownership", () => {
+  it("keeps shared acquisition alive when one subscriber cancels", async () => {
+    const { performance } = await import("node:perf_hooks");
+    FakeSession.connectMode = "never";
+    const { router, sessions } = makeRouter();
+    try {
+      const born = performance.now();
+      const context = {
+        profile: "bounded-state-v1" as const,
+        bornAtMs: born,
+        sendByMs: born + 60000,
+        totalByMs: born + 72000,
+      };
+      const command = () =>
+        observeCommand(passiveLight(), {
+          event: "property changed",
+          expected: 1,
+          param: 1400,
+          property: "enabled",
+          passiveReadback: true,
+          replaceableState: true,
+          timeoutMs: 14000,
+        });
+      const controller = new AbortController();
+      const first = router.dispatchCommandWithReceipt(CAMERA, command(), {
+        execution: { ...context, signal: controller.signal },
+      });
+      const survivor = router.dispatchCommandWithReceipt(CAMERA, command(), { execution: context });
+      await new Promise((resolve) => setImmediate(resolve));
+      controller.abort();
+      expect(await first).toMatchObject({ status: "cancelled_before_send", sendAttempted: false });
+      const session = sessions[0]!;
+      expect(session.closed).toBe(false);
+      session.connected = true;
+      session.emit("connected");
+      expect(await survivor).toMatchObject({ status: "acknowledged", sendAttempted: true });
+      expect(sessions).toHaveLength(1);
+      expect(session.sent).toHaveLength(1);
+    } finally {
+      FakeSession.connectMode = "up";
+      router.close();
+    }
+  });
+});
+
+describe("bounded terminal race", () => {
+  it("keeps a correlated ACK that wins before cancellation", async () => {
+    const { performance } = await import("node:perf_hooks");
+    const { router, sessions } = makeRouter();
+    const lease = await router.sessionFor(SN);
+    lease.release();
+    const session = sessions[0]!;
+    session.behaviour = "silent";
+    const born = performance.now();
+    const controller = new AbortController();
+    const command = observeCommand(passiveLight(), {
+      event: "property changed",
+      expected: 1,
+      param: 1400,
+      property: "enabled",
+      passiveReadback: true,
+      replaceableState: true,
+      timeoutMs: 14000,
+    });
+    const result = router.dispatchCommandWithReceipt(CAMERA, command, {
+      execution: {
+        profile: "bounded-state-v1",
+        bornAtMs: born,
+        sendByMs: born + 60000,
+        totalByMs: born + 72000,
+        signal: controller.signal,
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const header = parsePortalHeader(session.sent[0]!)!;
+    session.ackSegment(header.segment, header.commandId, header.channel);
+    controller.abort();
+    expect(await result).toMatchObject({ status: "acknowledged", sendAttempted: true, effect: "unconfirmed" });
+    expect(session.listenerCount("commandData")).toBe(1);
+    router.close();
+  });
+});
+
+describe("bounded ACK deadline ordering", () => {
+  it.each([11999, 12000])("settles the ACK/deadline race once at %i milliseconds", async (ackAt) => {
+    vi.useFakeTimers();
+    const { performance } = await import("node:perf_hooks");
+    const wall = Date.now();
+    const monotonic = vi.spyOn(performance, "now").mockImplementation(() => Date.now() - wall);
+    try {
+      const { router, sessions } = makeRouter();
+      const lease = await router.sessionFor(SN);
+      lease.release();
+      const session = sessions[0]!;
+      session.sendCommand = (packet) => {
+        session.sent.push(packet);
+        const header = parsePortalHeader(packet)!;
+        setTimeout(() => session.ackSegment(header.segment, header.commandId, header.channel), ackAt);
+        return true;
+      };
+      const command = observeCommand(passiveLight(), {
+        event: "property changed",
+        expected: 1,
+        param: 1400,
+        property: "enabled",
+        passiveReadback: true,
+        replaceableState: true,
+        timeoutMs: 14000,
+      });
+      const result = router.dispatchCommandWithReceipt(CAMERA, command, {
+        execution: { profile: "bounded-state-v1", bornAtMs: 0, sendByMs: 60000, totalByMs: 72000 },
+      });
+      await vi.advanceTimersByTimeAsync(12001);
+      const receipt = await result;
+      expect(receipt.status).toBe(ackAt < 12000 ? "acknowledged" : "ack_timeout");
+      const header = parsePortalHeader(session.sent[0]!)!;
+      session.ackSegment(header.segment, header.commandId, header.channel);
+      expect(router.getCommandDiagnostics().completed).toBe(1);
+      expect(router.getCommandDiagnostics().recent[0]!.terminalReason).toBe(receipt.status);
+      expect(session.sent).toHaveLength(1);
+      router.close();
+      expect(session.listenerCount("commandData")).toBe(0);
+      expect(session.listenerCount("close")).toBe(0);
+    } finally {
+      monotonic.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("mixed profile intent replacement", () => {
+  it("replaces an older queued legacy state write with a newer bounded state write", async () => {
+    const { performance } = await import("node:perf_hooks");
+    const { router, sessions } = makeRouter();
+    const lease = await router.sessionFor(SN);
+    lease.release();
+    const session = sessions[0]!;
+    session.behaviour = "silent";
+    const active = router.dispatchCommand(SN, arming(0));
+    await new Promise((resolve) => setImmediate(resolve));
+    let current = true;
+    const old = router
+      .dispatchCommand(CAMERA, passiveLight(), {
+        intent: { replacementKey: "synthetic-state", isCurrent: () => current },
+      })
+      .catch((error) => error.reason);
+    await new Promise((resolve) => setImmediate(resolve));
+    current = false;
+    const born = performance.now();
+    const command = observeCommand(
+      { kind: "set-json", param: 1400, data: { value: 0 }, channel: 2 },
+      {
+        event: "property changed",
+        expected: 0,
+        param: 1400,
+        property: "enabled",
+        passiveReadback: true,
+        replaceableState: true,
+        timeoutMs: 14000,
+      },
+    );
+    const latest = router.dispatchCommandWithReceipt(CAMERA, command, {
+      execution: {
+        profile: "bounded-state-v1",
+        bornAtMs: born,
+        sendByMs: born + 60000,
+        totalByMs: born + 72000,
+        replacementKey: "synthetic-state",
+        isCurrent: () => true,
+      },
+    });
+    expect(await old).toBe("superseded_before_send");
+    session.behaviour = "ack";
+    const first = parsePortalHeader(session.sent[0]!)!;
+    session.ackSegment(first.segment, first.commandId, first.channel);
+    await active;
+    expect(await latest).toMatchObject({ status: "acknowledged", sendAttempted: true });
+    expect(session.sent).toHaveLength(2);
+    expect(sent(session.sent[1]!).body.data).toEqual({ value: 0 });
+    expect(router.getCommandDiagnostics().recent.find((row) => row.outcome === "superseded_before_send")).toMatchObject(
+      { sendAttempted: false, sendAttemptedAtMs: null },
+    );
+    router.close();
+  });
+});

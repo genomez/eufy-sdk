@@ -361,6 +361,23 @@ export function decodeAiDetectType(value: number): AiDetectFlags {
 }
 
 /**
+ * Read a numerically coerced 1298 scalar, or an integer `ai_detect_type` from a JSON object string.
+ * Non-numeric primitive reports remain strings and answer `undefined` unless they carry that object.
+ */
+function decodeAiDetectTypeParam(raw: unknown): number | undefined {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : undefined;
+  if (typeof raw !== "string") return undefined;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+    const mask = (value as Record<string, unknown>).ai_detect_type;
+    return typeof mask === "number" && Number.isInteger(mask) ? mask : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Build the `SET_SNOOZE_TIME` (1271) JSON body (see `MOTION_CMD.SNOOZE_TIME` for the capture
  * citation). `seconds<=0` sends the bare captured "clear" shape (`{snooze_time:0}`, no extra fields —
  * matches the real clear/cancel frame byte-for-byte). A positive duration sends the exact
@@ -539,6 +556,7 @@ export const MOTION_MEMBERS = {
     param: MOTION_CMD.AI_DETECT_TYPE,
     type: "number",
     kind: "bitfield",
+    decode: decodeAiDetectTypeParam,
     provenance: "verified",
     description:
       "AI detection type bitmask — which classes trigger detection. ✅ Bits decoded live + confirmed " +

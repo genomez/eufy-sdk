@@ -72,6 +72,48 @@ describe("RTC notification ownership", () => {
 });
 
 describe("RTC notification dispatch through the SDK", () => {
+  it("preserves matching doorbell identities across RTC and cloud plus transport redeliveries", async () => {
+    const eufy = new EufyMega({
+      email: "test@example.com",
+      password: "synthetic",
+      autoRealtime: false,
+      pollMs: 0,
+      storedSnapshotCache: false,
+    });
+    const internal = eufy as any;
+    internal.registry.devices = roster();
+    const press = vi.fn();
+    eufy.on("doorbellPress", press);
+    try {
+      internal.rtc.deps.onFrame(HUB, frame({ event_type: 3103, unique_id: "press-one" }));
+      internal.onCloudPush(
+        normalizePushEvent({
+          persistentId: "delivery-one",
+          payload: { device_sn: CAMERA, station_sn: HUB, event_type: 3103, unique_id: "press-one" },
+        }),
+      );
+      internal.onCloudPush(
+        normalizePushEvent({
+          persistentId: "delivery-two",
+          payload: { device_sn: CAMERA, station_sn: HUB, event_type: 3103 },
+        }),
+      );
+      internal.onCloudPush(
+        normalizePushEvent({
+          persistentId: "delivery-two",
+          payload: { device_sn: CAMERA, station_sn: HUB, event_type: 3103 },
+        }),
+      );
+      expect(press.mock.calls.map(([payload]) => payload.eventId)).toEqual([
+        "unique:press-one",
+        "unique:press-one",
+        "delivery:delivery-two",
+        "delivery:delivery-two",
+      ]);
+    } finally {
+      await eufy.disconnect();
+    }
+  });
   it("delivers names, ID-only and stranger results without a query or login", async () => {
     const eufy = new EufyMega({
       email: "test@example.com",

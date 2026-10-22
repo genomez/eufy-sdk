@@ -8,6 +8,49 @@ import { commandObservation, type Command } from "../../../core/contracts.js";
 import { Device } from "../../device.js";
 
 describe("light switch scalar reports", () => {
+  it("re-projects retained reported evidence when parent identity arrives or changes", () => {
+    const dev = Device.fromRecord("T8000P0000000000", {
+      model: "T8425",
+      deviceType: 47,
+      parentSn: "T9000P0000000000",
+      params: { 1400: "0" },
+    });
+    const manifest = () => dev.properties.find((spec) => spec.name === "light")?.boundedStateWrites;
+    expect(manifest()).toBeUndefined();
+    dev.setStationContext({ stationModel: "T9000" });
+    expect(manifest()).toBe(true);
+    dev.reresolve({ name: "Synthetic floodlight" });
+    expect(manifest()).toBe(true);
+    expect(dev.getProperty("light")?.value).toBe(false);
+    dev.setStationContext({ stationModel: "T8030" });
+    expect(manifest()).toBeUndefined();
+    expect(dev.getPropertySpecs().find((spec) => spec.name === "light")?.boundedStateWrites).toBeUndefined();
+    dev.setStationContext({ stationDeviceType: undefined, stationModel: undefined });
+    expect(manifest()).toBeUndefined();
+  });
+
+  it.each([true, false])("advertises bounded state writes only with verified station coverage (%s)", (supported) => {
+    const dev = Device.fromRecord("T8000P0000000000", {
+      model: "T8425",
+      deviceType: 47,
+      category: "eufy_security",
+      params: { 1400: "0" },
+    });
+    dev.bindActions(
+      {
+        channel: 1,
+        codec: "camera",
+        deviceType: 47,
+        paramIds: new Set([1400]),
+        stationModel: supported ? "T9000" : "T8030",
+      },
+      { dispatch: async () => undefined },
+    );
+    expect(dev.getPropertySpecs().find((spec) => spec.name === "light")?.boundedStateWrites).toBe(
+      supported ? true : undefined,
+    );
+  });
+
   function device(value: string | number | boolean) {
     const dev = Device.fromRecord("T8000P0000000000", {
       model: "T8425",

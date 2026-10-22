@@ -94,6 +94,8 @@ export type InboundSignal =
       deviceSn?: string;
       stationSn?: string;
       thumbnailUrl?: string;
+      /** Stable transport delivery identity when the envelope supplies one. */
+      deliveryId?: string;
       payload: Record<string, unknown>;
     }
   | ({ source: "p2p-frame" } & CapabilityFrame)

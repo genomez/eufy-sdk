@@ -13,3 +13,10 @@ export * from "./peer.js";
 export * from "./session.js";
 export * from "./command-router.js";
 export * from "./live.js";
+export type {
+  RtcConnectionDiagnostics,
+  RtcConnectionRow,
+  RtcConnectionStage,
+  RtcConnectionStageEvent,
+  RtcConnectionStageEvidence,
+} from "./connection-diagnostics.js";

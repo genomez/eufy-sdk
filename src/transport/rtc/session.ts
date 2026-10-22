@@ -18,6 +18,12 @@
  */
 
 import { EventEmitter } from "node:events";
+import {
+  ConnectionStageRecorder,
+  type RtcConnectionStage,
+  type RtcConnectionStageEvidence,
+  type RtcConnectionStageEvent,
+} from "./connection-diagnostics.js";
 import { noopLogger, type Logger } from "../../core/logger.js";
 import { RtcPeer, type RtcPeerOptions, type TurnConfig } from "./peer.js";
 import { PortalLinkType } from "./portal-packet.js";
@@ -45,7 +51,7 @@ export interface RtcSessionOptions extends RtcSignalingOptions {
 export interface RtcSessionEvents {
   connected: [];
   turn: [turn: TurnConfig];
-  close: [];
+  close: [error?: Error];
   error: [err: Error];
   /** A frame off the command/notify path: portal packet bytes + the link type it arrived on. */
   commandData: [frame: Buffer, linkType: number];
@@ -76,6 +82,7 @@ interface InfoPayload {
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export class RtcSession extends EventEmitter<RtcSessionEvents> {
+  private connectionEvidence = new ConnectionStageRecorder();
   private readonly signaling: RtcSignalingClient;
   private readonly peer: RtcPeer;
   private readonly channelId: number;
@@ -86,6 +93,8 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
   private connected = false;
   private closed = false;
   private closure: RtcSessionCloseOrigin | null = null;
+  /** Transient failure context survives synchronous error observers entering close(). */
+  private peerInitFailure?: Error;
   private sdpHandled = false;
   private callRetries = 0;
   private chain: Promise<void> = Promise.resolve();
@@ -100,7 +109,11 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
 
     this.signaling.on("message", (inner) => {
       if (this.closed) return;
-      if (inner.action === 1 && inner.code === 200) this.authOk = true;
+      if (inner.action === 1 && inner.code === 200) {
+        this.note("signaling_auth", "succeeded");
+        this.authOk = true;
+      }
+      if (inner.action === 1 && inner.code !== undefined && inner.code !== 200) this.note("signaling_auth", "failed");
       this.chain = this.chain
         .then(() => this.onSignaling(inner))
         .catch((e: unknown) => {
@@ -112,7 +125,10 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
       this.closeWithOrigin("signaling_closed");
     });
     this.signaling.on("error", (e) => {
-      if (!this.closed) this.emit("error", e);
+      if (!this.closed) {
+        this.note("signaling", "failed");
+        this.emit("error", e);
+      }
     });
 
     // The portal answers on channel 0 and trickles ICE on channel 1.
@@ -130,6 +146,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     });
     this.peer.on("commandChannelOpen", () => {
       if (this.connected || this.closed) return;
+      this.note("command_channel", "observed");
       this.connected = true;
       this.logger.debug(`[rtc] ${this.opts.stationSn} command channel open`);
       this.emit("connected");
@@ -147,7 +164,10 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
       }
     });
     this.peer.on("error", (e) => {
-      if (!this.closed) this.emit("error", e);
+      if (!this.closed) {
+        this.note("peer", "failed");
+        this.emit("error", e);
+      }
     });
     this.peer.on("keepaliveEcho", () => {
       if (!this.closed) this.emit("keepaliveEcho");
@@ -157,6 +177,23 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
       if (MEDIA_LINK_TYPES.has(linkType)) this.emit("mediaData", frame, linkType);
       else this.emit("commandData", frame, linkType);
     });
+  }
+
+  /** @internal Share finite storage without adding operational callbacks or events. */
+  attachConnectionEvidence(recorder: ConnectionStageRecorder): void {
+    this.connectionEvidence = recorder;
+  }
+
+  /** Detached actual session execution evidence, without inspecting the peer or signaling client. */
+  getConnectionDiagnostics(): RtcConnectionStageEvidence {
+    return this.connectionEvidence.snapshot();
+  }
+
+  /** Recording failures cannot propagate into session execution. */
+  private note(stage: RtcConnectionStage, status: RtcConnectionStageEvent["status"]): void {
+    try {
+      this.connectionEvidence.record(stage, status);
+    } catch {}
   }
 
   get isConnected(): boolean {
@@ -179,15 +216,42 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
   /** Start the sequence; resolves once `scall` is sent. `connected` fires when the channel opens. */
   async connect(): Promise<void> {
     this.assertOpen();
-    await this.signaling.fetchSign();
+    this.note("sign", "started");
+    try {
+      await this.signaling.fetchSign();
+      this.note("sign", "succeeded");
+    } catch (error) {
+      this.note("sign", "failed");
+      throw error;
+    }
     this.assertOpen();
-    await this.signaling.connect();
+    this.note("signaling_transport", "started");
+    try {
+      await this.signaling.connect();
+      this.note("signaling_transport", "succeeded");
+    } catch (error) {
+      this.note("signaling_transport", "failed");
+      throw error;
+    }
     if (this.closed) this.signaling.close();
     this.assertOpen();
-    await this.waitForAuth();
+    this.note("signaling_auth", "started");
+    try {
+      await this.waitForAuth();
+    } catch (error) {
+      this.note("signaling_auth", "failed");
+      throw error;
+    }
     this.assertOpen();
     this.logger.debug(`[rtc] ${this.opts.stationSn} authenticated — scall`);
-    this.signaling.sendCall(this.channelId);
+    this.note("call", "started");
+    try {
+      this.signaling.sendCall(this.channelId);
+      this.note("call", "succeeded");
+    } catch (error) {
+      this.note("call", "failed");
+      throw error;
+    }
   }
 
   /** Send one portal packet; false when the command channel isn't open. */
@@ -212,7 +276,8 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
   /** Records the first close origin while preserving idempotent resource disposal. */
   private closeWithOrigin(origin: RtcSessionCloseOrigin): void {
     if (this.closed) return;
-    this.closure = origin;
+    const failure = this.peerInitFailure;
+    this.closure = failure ? "peer_failed" : origin;
     this.closed = true;
     this.connected = false;
     try {
@@ -226,7 +291,8 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
       try {
         this.peer.close();
       } finally {
-        this.emit("close");
+        if (failure) this.emit("close", failure);
+        else this.emit("close");
       }
     }
   }
@@ -295,10 +361,29 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     if (this.closed) return;
     const status = payload.status;
     if (status === 100 && payload.turn) {
+      this.note("grant", "observed");
       this.callRetries = 0;
       this.turn = payload.turn;
       this.emit("turn", payload.turn);
-      await this.peer.init(payload.turn);
+      this.note("peer_init", "started");
+      try {
+        await this.peer.init(payload.turn);
+        this.note("peer_init", "succeeded");
+      } catch (error) {
+        this.note("peer_init", "failed");
+        if (this.closed) return;
+        this.peerInitFailure = error instanceof Error ? error : new Error(String(error));
+        try {
+          this.emit("error", this.peerInitFailure);
+        } finally {
+          try {
+            this.closeWithOrigin("peer_failed");
+          } finally {
+            this.peerInitFailure = undefined;
+          }
+        }
+        return;
+      }
       if (this.closed) this.peer.close();
       return;
     }
@@ -307,6 +392,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
       return;
     }
     if (status === 486 || status === 408) {
+      this.note("call_retry", "observed");
       this.callRetries++;
       this.logger.warn(`[rtc] ${this.opts.stationSn} scall ${status}, retry ${this.callRetries}`);
       try {
@@ -319,11 +405,21 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
       this.turn = undefined;
       this.connected = false;
       if (this.callRetries > (this.opts.maxCallRetries ?? 3)) {
+        this.note("call_retry", "failed");
         this.emit("error", new Error(`RTC scall ${status} after ${this.callRetries - 1} retries`));
         return;
       }
       await this.sleep(Math.min(5_000 + this.callRetries * 5_000, 30_000));
-      if (!this.closed) this.signaling.sendCall(this.channelId);
+      if (!this.closed) {
+        this.note("call", "started");
+        try {
+          this.signaling.sendCall(this.channelId);
+          this.note("call", "succeeded");
+        } catch (error) {
+          this.note("call", "failed");
+          throw error;
+        }
+      }
     }
   }
 
@@ -341,11 +437,19 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     const sdpText = payload.value ?? payload.sdp;
     if (!sdpText || (payload.format !== "SDP" && !payload.sdp)) return;
     if (this.sdpHandled) return;
+    this.note("offer", "observed");
     this.sdpHandled = true;
     if (!this.turn) {
       // The hub normally grants (scall 100) before it offers; the peer initialises without TURN
       // under host-only ICE anyway, so an offer-first hub is not fatal.
-      await this.peer.init();
+      this.note("peer_init", "started");
+      try {
+        await this.peer.init();
+        this.note("peer_init", "succeeded");
+      } catch (error) {
+        this.note("peer_init", "failed");
+        throw error;
+      }
       if (this.closed) {
         this.peer.close();
         return;
@@ -357,12 +461,27 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     } catch {
       offer = sdpText;
     }
-    const answer = await this.peer.handleRemoteOffer(offer);
+    this.note("offer", "started");
+    let answer: string;
+    try {
+      answer = await this.peer.handleRemoteOffer(offer);
+      this.note("offer", "succeeded");
+    } catch (error) {
+      this.note("offer", "failed");
+      throw error;
+    }
     if (this.closed) {
       this.peer.close();
       return;
     }
-    this.signaling.sendInfoSdp(this.peer.answerAsScallJson(answer), this.channelId);
+    this.note("answer", "started");
+    try {
+      this.signaling.sendInfoSdp(this.peer.answerAsScallJson(answer), this.channelId);
+      this.note("answer", "succeeded");
+    } catch (error) {
+      this.note("answer", "failed");
+      throw error;
+    }
     this.logger.debug(`[rtc] ${this.opts.stationSn} answered the hub's offer`);
   }
 }

@@ -35,10 +35,12 @@ _current_ zoom level at rest; observe changes via the `ptzNotify` event instead.
 ## Presets
 
 A **preset** is a stored camera position (a slot the camera can snap back to). All preset operations
-live under the `preset()` sub-API:
+live under the `preset()` sub-API. Like `zoom`, it is present only where a preset wire is confirmed for the
+model (it is `undefined` on a T8426, for example), so call it with `?.`:
 
 ```ts
-const preset = ptz.preset();
+const preset = ptz.preset?.();
+if (!preset) throw new Error("no presets on this camera");
 
 await preset.goto(3); // move to stored preset 3
 await preset.preview(3); // move to it transiently (preview before committing)
@@ -73,10 +75,10 @@ error surfaces. If the id might not exist, check `list?()` first.
 to a live client** — call them with `?.`:
 
 ```ts
-const presets = (await ptz.preset().list?.()) ?? []; // [{ id, raw }, …]
+const presets = (await ptz.preset?.().list?.()) ?? []; // [{ id, raw }, …]
 console.log(presets.map((p) => p.id)); // e.g. [0, 1, 3]
 
-const thumb = await ptz.preset().image?.(3); // { index, data } — data is a base64 JPEG
+const thumb = await ptz.preset?.().image?.(3); // { index, data } — data is a base64 JPEG
 if (thumb) console.log(`${thumb.data.length} bytes`);
 ```
 

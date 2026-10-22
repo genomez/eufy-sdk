@@ -3,7 +3,7 @@ import { asBool, coerceEnumValue, enumLabels } from "../../core/util.js";
 import { DoorbellPushEvent } from "../push-events.js";
 import { setPayload, setScalar } from "./access.js";
 import { method, propertiesOf, provided, type Members, type Surface } from "./members.js";
-import type { CapabilityModule } from "./types.js";
+import type { CapabilityModule, InboundSignal } from "./types.js";
 import type { MediaProvider } from "../../core/contracts.js";
 
 /**
@@ -480,6 +480,20 @@ export const DOORBELL_MEMBERS = {
   ),
 } as const satisfies Members;
 
+/** Source event identities take precedence over transport delivery identities; receipt time is never an identity. */
+function pressIdentity(signal: InboundSignal): Record<string, unknown> {
+  if (signal.source !== "push") return {};
+  for (const [kind, value] of [
+    ["unique", signal.payload.unique_id],
+    ["session", signal.payload.session_id],
+    ["delivery", signal.deliveryId],
+  ]) {
+    if (typeof value === "string" && value.trim().length > 0 && value.length <= 512)
+      return { eventId: `${kind}:${value}` };
+  }
+  return { eventId: undefined };
+}
+
 export const DOORBELL: CapabilityModule = {
   capability: "doorbell",
   description: "Doorbell chime / ringtone configuration (ring press is an event, not a param).",
@@ -496,7 +510,7 @@ export const DOORBELL: CapabilityModule = {
    * matches twice, emitting one push as two events.
    */
   events: [
-    { source: "push", match: DoorbellPushEvent.PRESS_DOORBELL, emit: "doorbellPress" },
+    { source: "push", match: DoorbellPushEvent.PRESS_DOORBELL, emit: "doorbellPress", derive: pressIdentity },
     { source: "push", match: DoorbellPushEvent.PACKAGE_DELIVERED, emit: "packageDelivered" },
     { source: "push", match: DoorbellPushEvent.PACKAGE_TAKEN, emit: "packageTaken" },
     { source: "push", match: DoorbellPushEvent.PACKAGE_STRANDED, emit: "packageStranded" },

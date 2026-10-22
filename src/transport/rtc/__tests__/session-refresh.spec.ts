@@ -102,6 +102,228 @@ async function prepareLeaseBlockedReplacement(options: Parameters<typeof setup>[
   return { ...state, lease };
 }
 
+function busySetup(outcomes: string[] = [], options: Parameters<typeof setup>[0] = {}) {
+  return setup({
+    idle: 100_000_000,
+    ...options,
+    configure: (session, index) => {
+      if (index && outcomes[index - 1] !== "success") {
+        session.connect = async () => {
+          const outcome = outcomes[index - 1] ?? "busy";
+          if (outcome === "timeout") return;
+          if (outcome === "busy-then-other") {
+            session.emit("error", new Error("synthetic peer failure"));
+          }
+          if (outcome === "emitted" || outcome === "busy-then-other") {
+            session.emit("error", new Error("RTC scall 486 after 0 retries"));
+            return;
+          }
+          throw new Error(outcome === "other" ? "RTC scall 408 after 0 retries" : "RTC scall 486 after 0 retries");
+        };
+      }
+      options.configure?.(session, index);
+    },
+  });
+}
+
+async function finishBusyBudget(state: ReturnType<typeof setup>) {
+  await vi.advanceTimersByTimeAsync(12_000);
+  await vi.advanceTimersByTimeAsync(1);
+  await state.router.refreshInformation(SN);
+  const first = state.router.getSessionRefreshDiagnostics().lastFinishedAtMs!;
+  await vi.advanceTimersByTimeAsync(Math.max(0, first + 30_000 - Date.now()));
+  await vi.advanceTimersByTimeAsync(12_000);
+}
+
+async function busyCooldownRead(state: ReturnType<typeof setup>, cooldown: number) {
+  const exhausted = state.router.getSessionRefreshDiagnostics().lastFinishedAtMs!;
+  await vi.advanceTimersByTimeAsync(Math.max(0, exhausted + cooldown - 1 - Date.now()));
+  await state.router.refreshInformation(SN);
+  await tick();
+}
+
+describe("busy-only renewal cooldown", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it.each(["busy", "emitted"])("reopens an exhausted %s budget after 60 seconds and a fresh read", async (mode) => {
+    const state = busySetup([mode, mode, "success"]);
+    await open(state.router);
+    await vi.advanceTimersByTimeAsync(270_000);
+    await finishBusyBudget(state);
+    expect(state.sessions).toHaveLength(3);
+    await busyCooldownRead(state, 60_000);
+    expect(state.sessions).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.sessions).toHaveLength(4);
+    expect(state.router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 3, failures: 2, successes: 1 });
+    expect(state.router.getSessionRefreshDiagnostics().recent.map((row) => row.attemptOrdinal)).toEqual([1, 2, 3]);
+    expect(state.sessions.map((session) => session.sends)).toEqual([2, 0, 0, 1]);
+    const evidence = state.router.getConnectionDiagnostics();
+    expect(evidence.active.map((row) => row.generation)).toEqual([4]);
+    expect(evidence.terminal.map((row) => row.generation).sort()).toEqual([1, 2, 3]);
+    state.router.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    ["busy", "other"],
+    ["other", "busy"],
+    ["timeout", "busy"],
+    ["busy", "timeout"],
+    ["busy-then-other", "busy"],
+  ])("never reopens a mixed budget %s then %s", async (first, second) => {
+    const state = busySetup([first, second]);
+    await open(state.router);
+    await vi.advanceTimersByTimeAsync(270_000);
+    await finishBusyBudget(state);
+    for (let i = 0; i < 12; i++) {
+      await vi.advanceTimersByTimeAsync(30_000);
+      await state.router.refreshInformation(SN);
+    }
+    expect(state.sessions).toHaveLength(3);
+    expect(state.sessions[0]!.closed).toBe(false);
+    state.router.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("doubles repeated busy cycles to 300 seconds and bounds one-time terminal history", async () => {
+    const state = busySetup();
+    await open(state.router);
+    await vi.advanceTimersByTimeAsync(270_000);
+    for (let cycle = 0; cycle < 18; cycle++) {
+      await finishBusyBudget(state);
+      const before = state.sessions.length;
+      await busyCooldownRead(state, Math.min(60_000 * 2 ** cycle, 300_000));
+      expect(state.sessions).toHaveLength(before);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(state.sessions).toHaveLength(before + 1);
+    }
+    const evidence = state.router.getConnectionDiagnostics();
+    expect(evidence.terminal).toHaveLength(32);
+    expect(evidence.terminalEvicted).toBe(5);
+    expect(new Set(evidence.terminal.map((row) => row.generation)).size).toBe(32);
+    expect(state.router.getSessionRefreshDiagnostics().recent.at(-1)!.attemptOrdinal).toBe(37);
+    expect(state.sessions[0]!.closed).toBe(false);
+    state.router.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["missing", "stale", "before exhaustion", "tainted", "disconnected"])(
+    "requires healthy original read evidence: %s",
+    async (health) => {
+      const state = busySetup();
+      await open(state.router);
+      await vi.advanceTimersByTimeAsync(270_000);
+      await finishBusyBudget(state);
+      if (health === "stale") {
+        await vi.advanceTimersByTimeAsync(1);
+        await state.router.refreshInformation(SN);
+      }
+      if (health === "tainted") {
+        state.sessions[0]!.answer = false;
+        const failed = state.router.refreshInformation(SN).catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(8_000);
+        await failed;
+      }
+      if (health === "disconnected") state.sessions[0]!.isConnected = false;
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(state.sessions).toHaveLength(3);
+      state.router.close();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(["userId", "authToken", "missing"])("cancels cooldown when identity changes: %s", async (field) => {
+    const original = { authToken: "synthetic", userId: "synthetic-user" };
+    let identity: RtcIdentity | undefined = original;
+    const state = busySetup([], { identity: () => identity });
+    await open(state.router);
+    await vi.advanceTimersByTimeAsync(270_000);
+    await finishBusyBudget(state);
+    await busyCooldownRead(state, 60_000);
+    identity = field === "missing" ? undefined : { ...original, [field]: "changed-synthetic" };
+    await vi.advanceTimersByTimeAsync(1);
+    identity = original;
+    await state.router.refreshInformation(SN);
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(state.sessions).toHaveLength(3);
+    state.router.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["lease", "scheduler"])("defers cooldown renewal while the %s is busy", async (holder) => {
+    const state = busySetup(["busy", "busy", "success"]);
+    await open(state.router);
+    await vi.advanceTimersByTimeAsync(270_000);
+    await finishBusyBudget(state);
+    await busyCooldownRead(state, 60_000);
+    const lease = holder === "lease" ? await state.router.sessionFor(SN) : undefined;
+    const scheduler = (
+      state.router as unknown as {
+        sessions: Map<string, { scheduler: import("../station-work-scheduler.js").StationWorkScheduler }>;
+      }
+    ).sessions.get(SN)!.scheduler;
+    let release!: () => void;
+    const job =
+      holder === "scheduler"
+        ? scheduler.enqueue({
+            target: "synthetic",
+            kind: "read",
+            sendByMs: Infinity,
+            run: () =>
+              new Promise<void>((resolve) => {
+                release = resolve;
+              }),
+          })
+        : undefined;
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.sessions).toHaveLength(3);
+    lease?.release();
+    if (job) {
+      release();
+      await job;
+    }
+    await tick();
+    expect(state.sessions).toHaveLength(4);
+    expect(state.router.getSessionRefreshDiagnostics().successes).toBe(1);
+    state.router.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["success", "peer close", "router close"])(
+    "resets the backoff for a new generation after %s",
+    async (ending) => {
+      const state = busySetup(["busy", "busy", "success"]);
+      await open(state.router);
+      await vi.advanceTimersByTimeAsync(270_000);
+      await finishBusyBudget(state);
+      await busyCooldownRead(state, 60_000);
+      if (ending === "success") await vi.advanceTimersByTimeAsync(1);
+      else {
+        if (ending === "router close") state.router.close();
+        else state.sessions[0]!.close();
+        await open(state.router);
+      }
+      const adopted = state.sessions.at(-1)!;
+      expect(adopted.closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(270_000);
+      await finishBusyBudget(state);
+      const before = state.sessions.length;
+      await busyCooldownRead(state, 60_000);
+      expect(state.sessions).toHaveLength(before);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(state.sessions).toHaveLength(before + 1);
+      expect(state.router.getSessionRefreshDiagnostics().lastAttempt?.attemptOrdinal).toBe(3);
+      state.router.close();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+});
+
 describe("bounded proactive RTC session replacement", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -127,6 +349,38 @@ describe("bounded proactive RTC session replacement", () => {
     expect(sessions[0]!.closed).toBe(true);
     expect(consumeRetiredInformationRead(error)).toBe(false);
     router.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("snapshots both owners and adopts only the verified candidate with unknown fake stage evidence", async () => {
+    const { router, sessions } = setup({
+      configure: (s, index) => {
+        if (index === 1) s.autoOpen = false;
+      },
+    });
+    await open(router);
+    await vi.advanceTimersByTimeAsync(270_000);
+    expect(
+      router
+        .getConnectionDiagnostics()
+        .active.map((row) => ({ generation: row.generation, role: row.role, stages: row.stages })),
+    ).toEqual([
+      { generation: 1, role: "current", stages: null },
+      { generation: 2, role: "candidate", stages: null },
+    ]);
+    sessions[1]!.open();
+    await tick();
+    expect(router.getConnectionDiagnostics().active).toMatchObject([
+      { generation: 2, role: "current", outcome: "connected", stages: null },
+    ]);
+    expect(router.getConnectionDiagnostics().terminal).toMatchObject([
+      { generation: 1, retirement: "retired", stages: null },
+    ]);
+    router.close();
+    const snapshot = router.getConnectionDiagnostics();
+    expect(snapshot.epoch).toBe(1);
+    expect(snapshot.terminal).toHaveLength(2);
+    expect(snapshot.activeCount).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
   });
 

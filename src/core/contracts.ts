@@ -337,7 +337,75 @@ export interface CommandObservation {
   passiveReadback?: boolean;
   /** A mains-powered target permits bounded authoritative reads after an unconfirmed write. */
   lateEffectReadback?: boolean;
+  /** An explicit absolute state may replace an unsent write of the same property. */
+  replaceableState?: boolean;
   timeoutMs: number;
+}
+
+/** Finite terminal outcome of one command attempt. */
+export type CommandStatus =
+  | "validation_failed"
+  | "connect_timeout"
+  | "queue_full"
+  | "expired_before_send"
+  | "superseded_before_send"
+  | "cancelled_before_send"
+  | "closed_before_send"
+  | "acknowledged"
+  | "pending_accepted"
+  | "rejected"
+  | "ack_timeout"
+  | "expired_after_send"
+  | "cancelled_after_send"
+  | "closed_after_send"
+  | "not_sent";
+
+/** Local automatic-send permission; healthy does not establish physical effect or availability. */
+export interface PropertyCommandHealth {
+  readonly status: "healthy" | "command_degraded";
+  readonly cooldownRemainingMs: number;
+  /** Monotonic transition ordering within one client lifetime. */
+  readonly revision?: number;
+}
+
+/** Immutable outcome for one invocation, independently of subsequent reported state. */
+export interface CommandReceipt {
+  readonly status: CommandStatus;
+  readonly sendAttempted: boolean;
+  readonly effect: "unconfirmed" | "unknown" | "confirmed_report";
+  readonly attempt?: number;
+  readonly intent?: number;
+  readonly superseded?: boolean;
+  readonly rejectionCode?: number;
+  readonly responseLatencyMs?: number;
+  readonly commandHealth?: PropertyCommandHealth;
+  readonly sentAtMs?: number;
+  readonly sentAtMonotonicMs?: number;
+  readonly sessionGeneration?: number;
+}
+
+/** Frozen local monotonic admission and execution authority for an explicit state write. */
+export interface CommandExecutionContext {
+  readonly profile: "bounded-state-v1";
+  readonly bornAtMs: number;
+  readonly sendByMs: number;
+  readonly totalByMs: number;
+  readonly signal?: AbortSignal;
+  readonly wallExpiresAtMs?: number;
+  readonly clockUncertaintyMs?: number;
+  readonly wallOffsetMs?: number;
+  readonly replacementKey?: string;
+  readonly intent?: number;
+  readonly isCurrent?: () => boolean;
+  readonly origin?: "caller" | "retry" | "correction";
+  /** Automatic send permission is independent of observation and correction ownership. */
+  readonly automatic?: boolean;
+  readonly parentAttempt?: number;
+  readonly preparationWaitMs?: number;
+  readonly authorizingRead?: number;
+  readonly originalSentAtMonotonicMs?: number;
+  readonly readStartedAgeMs?: number;
+  readonly readFinishedAgeMs?: number;
 }
 
 const COMMAND_OBSERVATION = Symbol("command-observation");

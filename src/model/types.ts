@@ -205,6 +205,8 @@ export interface PropertySpec {
   kind?: ValueKind;
   /** Whether the value can be written back to the device (a setter exists). */
   writable: boolean;
+  /** A verified absolute state with bounded execution and replaceable unsent intent. */
+  boundedStateWrites?: true;
   /** Allowed values for `type: "enum"` (raw → label). */
   enumValues?: Record<number, string>;
   /**

@@ -178,17 +178,26 @@ function hasZoomEvidence(ctx: CommandContext): boolean {
   return ZOOM_EVIDENCE_PARAMS.some((p) => ctx.paramIds.has(p)) || (!!ctx.model && ZOOM_MODEL_HINT.test(ctx.model));
 }
 
+/** T8426 rotation is supported; its preset command envelope is unconfirmed. */
+function hasPresetWire(ctx: CommandContext): boolean {
+  return ctx.deviceType !== DeviceType.FLOODLIGHT_CAMERA_8426;
+}
+
 /**
  * Pan-tilt rotate as a transport-neutral {@link Command}. CONFIRMED wire command (captured on
  * T8425 ch3 during live-view): `{"commandType":6030,"data":{"cmd_type":1,"rotate_type":1..4,
  * "zoom":1.0}}` under the generic control wrapper `1700` on the camera channel. `cmd_type:1` =
  * move; `zoom` defaults to 1.0.
+ * T8426 uses the same command and direction codes with no `zoom` field.
  *
  * Emitted as a `set-json` intent — the capability names only the param + payload; the transport
  * resolver picks the encryption level by topology (standalone → L1, HomeBase → L2). A PT cam can be
  * either, so the level is NOT fixed here.
  */
 export function rotateCommand(direction: PtzDirection, ctx: CommandContext, zoom = 1.0): Command {
+  if (ctx.deviceType === DeviceType.FLOODLIGHT_CAMERA_8426) {
+    return setJson(PTZ_CMD.PTZ_ROTATE, { cmd_type: 1, rotate_type: PTZ_ROTATE[direction] }, ctx);
+  }
   return setJson(PTZ_CMD.PTZ_ROTATE, { cmd_type: 1, rotate_type: PTZ_ROTATE[direction], zoom }, ctx);
 }
 
@@ -425,26 +434,31 @@ export const PTZ_MEMBERS = {
    *
    * `answers` because calling it performs nothing: it hands back the namespace the verbs live on. Offering
    * it as a control would produce one that returns an object and does nothing.
+   * Absent on T8426: rotation is supported, but no preset wire is confirmed for that model.
    */
   preset: {
-    ...method(({ ctx, sink, media }) => {
-      const p: PtzPresetActions = {
-        goto: (id: number) => sink.dispatch(gotoPresetCommand(id, ctx)),
-        preview: (id: number) => sink.dispatch(previewPresetCommand(id, ctx)),
-        save: async (id: number) => {
-          for (const cmd of savePresetCommand(id, ctx)) await sink.dispatch(cmd);
-        },
-        setDefault: (id: number) => sink.dispatch(setDefaultPositionCommand(id, ctx)),
-        delete: (id: number) => sink.dispatch(deletePresetCommand(id, ctx)),
-      };
-      if (media?.p2pControlQuery) {
-        p.list = async (opts) =>
-          parsePresetPoints(await media.p2pControlQuery!(PTZ_CMD.PTZ_PRESET_QUERY, { value: 0 }, opts));
-        p.image = async (id, opts) =>
-          parsePresetImage(await media.p2pControlQuery!(PTZ_CMD.PTZ_PRESET_PIC, { value: id }, opts));
-      }
-      return actionNamespace(p);
-    }, "The preset sub-API: goto/preview/save/setDefault/delete, plus list/image when bound."),
+    ...method(
+      ({ ctx, sink, media }) => {
+        const p: PtzPresetActions = {
+          goto: (id: number) => sink.dispatch(gotoPresetCommand(id, ctx)),
+          preview: (id: number) => sink.dispatch(previewPresetCommand(id, ctx)),
+          save: async (id: number) => {
+            for (const cmd of savePresetCommand(id, ctx)) await sink.dispatch(cmd);
+          },
+          setDefault: (id: number) => sink.dispatch(setDefaultPositionCommand(id, ctx)),
+          delete: (id: number) => sink.dispatch(deletePresetCommand(id, ctx)),
+        };
+        if (media?.p2pControlQuery) {
+          p.list = async (opts) =>
+            parsePresetPoints(await media.p2pControlQuery!(PTZ_CMD.PTZ_PRESET_QUERY, { value: 0 }, opts));
+          p.image = async (id, opts) =>
+            parsePresetImage(await media.p2pControlQuery!(PTZ_CMD.PTZ_PRESET_PIC, { value: id }, opts));
+        }
+        return actionNamespace(p);
+      },
+      "The preset sub-API: goto/preview/save/setDefault/delete, plus list/image when bound.",
+      hasPresetWire,
+    ),
     answers: true,
   },
 } as const satisfies Members;
@@ -466,6 +480,7 @@ export const PTZ: CapabilityModule = {
     if (action === "rotate" && isDirection(value)) return rotateCommand(value, ctx);
     if (typeof value === "number") {
       if (action === "zoom") return hasZoomEvidence(ctx) ? zoomCommand(value, ctx) : undefined;
+      if (!hasPresetWire(ctx)) return undefined;
       if (action === "gotoPreset") return gotoPresetCommand(value, ctx);
       if (action === "previewPreset") return previewPresetCommand(value, ctx);
       if (action === "deletePreset") return deletePresetCommand(value, ctx);
@@ -488,6 +503,9 @@ export const PTZ: CapabilityModule = {
     evidenceParams: [1029, 6090, 6091, 6092, 6210],
     deviceTypes: [
       DeviceType.OUTDOOR_PT_CAMERA,
+      DeviceType.SOLO_CAMERA_E30,
+      DeviceType.INDOOR_PT_CAMERA_S350,
+      DeviceType.FLOODLIGHT_CAMERA_8426,
       DeviceType.INDOOR_PT_CAMERA,
       DeviceType.INDOOR_PT_CAMERA_1080,
       DeviceType.CAMERA_4G_S330,

@@ -1,5 +1,6 @@
 /** Modified for genomez S1 experimental source preview, 2026-10-17. */
 import { EventEmitter } from "node:events";
+import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Device } from "../../model/device.js";
 import { buildPortalHeader, parsePortalHeader } from "../../transport/rtc/portal-packet.js";
@@ -64,6 +65,8 @@ class Session extends EventEmitter {
 }
 
 function fixture(initial = "1") {
+  const wall = Date.now();
+  vi.spyOn(performance, "now").mockImplementation(() => Date.now() - wall);
   const eufy = new EufyMega({
     email: "test@example.com",
     password: "synthetic",
@@ -104,7 +107,10 @@ function fixture(initial = "1") {
   return { eufy, client, session, device, receipts, changes };
 }
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 function command(f: ReturnType<typeof fixture>, on = false) {
   const settled: string[] = [];
@@ -392,11 +398,19 @@ describe("RTC information readback confirmation", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(f.device.light!()!.isOn).toBe(value === 1);
       expect(f.client.rtc.getReadDiagnostics()).toMatchObject({ successes: 1, failures: 0 });
-      expect(f.client.rtc.getCommandDiagnostics()).toEqual(completed);
+      expect(f.client.rtc.getCommandDiagnostics()).toEqual({
+        ...completed,
+        scheduler: expect.any(Array),
+        schedulerTotals: expect.any(Object),
+      });
       expect(f.session.isConnected).toBe(true);
       expect(f.session.listenerCount("commandData")).toBe(1);
       await vi.advanceTimersByTimeAsync(13000);
-      expect(f.client.rtc.getCommandDiagnostics()).toEqual(completed);
+      expect(f.client.rtc.getCommandDiagnostics()).toEqual({
+        ...completed,
+        scheduler: expect.any(Array),
+        schedulerTotals: expect.any(Object),
+      });
     } finally {
       await f.eufy.disconnect();
       await c.run;
@@ -471,7 +485,11 @@ describe("RTC information readback confirmation", () => {
         expect(f.session.listenerCount("commandData")).toBe(0);
         expect(f.session.isConnected).toBe(false);
         if (ending !== "disconnect") {
-          expect(f.client.rtc.getCommandDiagnostics()).toEqual(completed);
+          expect(f.client.rtc.getCommandDiagnostics()).toEqual({
+            ...completed,
+            scheduler: expect.any(Array),
+            schedulerTotals: expect.any(Object),
+          });
           expect(f.client.rtc.getReadDiagnostics()).toMatchObject({ failures: 1 });
         }
         expect(f.device.light!()!.isOn).toBe(true);

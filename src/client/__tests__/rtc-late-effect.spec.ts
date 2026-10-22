@@ -28,6 +28,7 @@ function fixture() {
     reject: (error: Error) => void;
   }[] = [];
   const reconciler = new RtcLateEffectReconciler({
+    now: () => Date.now(),
     canRead: () => allowed,
     read: (station, signal, timeoutMs) => {
       const pending = Promise.withResolvers<void>();
@@ -135,6 +136,31 @@ describe("RTC late effect station scheduling", () => {
     expect(f.events).toEqual(["scheduled", "expired"]);
     expect(f.reads).toHaveLength(3);
     f.reconciler.close();
+  });
+
+  it("passes whole-millisecond budgets to the router when the monotonic clock is fractional", async () => {
+    vi.useFakeTimers();
+    const timeouts: number[] = [];
+    const reconciler = new RtcLateEffectReconciler({
+      now: () => Date.now() + 0.75,
+      canRead: () => true,
+      // Mirrors the router's validation, which rejects any non-integer timeout before sending.
+      read: async (_station, _signal, timeoutMs) => {
+        if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new RangeError("synthetic timeout validation");
+        timeouts.push(timeoutMs);
+      },
+      event: () => {},
+    });
+    const intent = reconciler.begin("synthetic-station", "synthetic-camera", lightCommand(1));
+    reconciler.sent(intent, Date.now() + 0.25);
+    reconciler.finish(intent, true);
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(timeouts).toHaveLength(3);
+    expect(timeouts.slice(0, 2)).toEqual([8_000, 8_000]);
+    expect(timeouts[2]).toBeGreaterThanOrEqual(4_998);
+    expect(timeouts[2]).toBeLessThanOrEqual(5_000);
+    expect(reconciler.diagnostics()).toMatchObject({ readFailures: 0 });
+    reconciler.close();
   });
 
   it("charges a read failure once and consumes later opportunities while backoff holds", async () => {

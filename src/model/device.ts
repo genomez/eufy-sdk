@@ -347,6 +347,8 @@ export class Device {
   private readonly reportedIds = new Map<ParamNamespace, Set<number>>();
   /** Last stated classification and topology facts; partial records do not erase them. */
   private recordFacts: Omit<CloudRecord, "params" | "dpParams"> = {};
+  /** Parent identity supplied by the roster owner, independently of this device's parameter evidence. */
+  private stationContext?: Pick<AvailabilityContext, "stationDeviceType" | "stationModel">;
   /** The record's `device_name` as stated, before the {@link modelName} fallback is applied. */
   private deviceName?: string;
   /** Live property values, keyed by property name (or `unknown_<pt>`). */
@@ -463,6 +465,7 @@ export class Device {
     );
     const properties = mergeProperties(capabilities, {
       ...this.recordFacts,
+      ...this.stationContext,
       codec: next.codec,
       capabilities: new Set(capabilities),
       paramIds: this.reportedIds.get(namespace),
@@ -478,6 +481,7 @@ export class Device {
       this.resolveInto({ ...next, capabilities, properties });
     this.propertyReadContext = {
       ...this.propertyReadContext,
+      ...this.stationContext,
       model: this.recordFacts.model,
       deviceType: this.recordFacts.deviceType,
       category: this.recordFacts.category,
@@ -486,6 +490,18 @@ export class Device {
     };
     if (this.binding) this.rebuildBinding();
     return gained;
+  }
+
+  /** Re-project the manifest and bound members when the covering station's identity changes. */
+  setStationContext(ctx: Pick<AvailabilityContext, "stationDeviceType" | "stationModel">): void {
+    if (
+      this.stationContext &&
+      this.stationContext.stationDeviceType === ctx.stationDeviceType &&
+      this.stationContext.stationModel === ctx.stationModel
+    )
+      return;
+    this.stationContext = { stationDeviceType: ctx.stationDeviceType, stationModel: ctx.stationModel };
+    this.reresolve({});
   }
 
   /** Retain only actual supplied IDs, without manufacturing values or an observation timestamp. */
@@ -503,6 +519,7 @@ export class Device {
     const catalogContext = ctx.dpCatalog ? ctx : this.binding?.ctx;
     return {
       ...ctx,
+      ...this.stationContext,
       codec: this.codec,
       model: this.recordFacts.model,
       deviceType: this.recordFacts.deviceType,

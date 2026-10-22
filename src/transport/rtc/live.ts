@@ -52,7 +52,7 @@ export const T9000Live = {
   /** Portal packet id of the raw keepalive. */
   KEEPALIVE: 1139,
   KEEPALIVE_MS: PORTAL_KEEPALIVE_MS,
-  FIRST_FRAME_TIMEOUT_MS: 15_000,
+  FIRST_FRAME_TIMEOUT_MS: 25_000,
   /** The portal's `streamId` for a live view, carried in the header byte the codec names `isResponse`. */
   STREAM_ID: 1,
 } as const;

@@ -36,7 +36,8 @@ async function main(): Promise<void> {
 
   if (mode === "preset") {
     // Preset workflow via the `preset()` namespace.
-    const preset = ptz.preset();
+    const preset = ptz.preset?.();
+    if (!preset) throw new Error(`${sn} has no confirmed preset controls`);
     const id = process.argv[4] ? Number(process.argv[4]) : 1;
 
     // Reads are live-only — guard with `?.`. `list()` returns [{ id, raw }].

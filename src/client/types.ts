@@ -17,6 +17,9 @@ import type { BizMapFrame } from "../transport/mqtt/biz-stream.js";
 import type { VacuumMapSnapshot } from "../model/index.js";
 import type { PushEvent, RawPushMessage } from "../transport/push/types.js";
 import type { AvailabilityObservation, EufyDevice, RealtimeMessage } from "../core/types.js";
+import type { LateEffectEvent } from "./rtc-late-effect.js";
+import type { LateContraryEffect } from "./rtc-late-contrary.js";
+import type { CommandHealthEvent } from "./command-health.js";
 
 /**
  * Fixed technical origin of a reported error.
@@ -87,6 +90,24 @@ export interface WaitForRealtimeOptions {
    * a later call can observe the generation's final result.
    */
   timeoutMs?: number;
+}
+
+/** Explicit opt-in to a frozen bounded absolute-state command lifetime. */
+export interface PropertyExecutionOptions {
+  profile?: "bounded-state-v1";
+  signal?: AbortSignal;
+  /** Absolute expiration translated conservatively into the local wall-clock domain. */
+  callerExpiresAtMs?: number;
+  /** Remaining caller lifetime, reduced by any preceding transmission or preparation. */
+  remainingBudgetMs?: number;
+  /** Maximum established clock/round-trip uncertainty, from zero through one second. */
+  clockUncertaintyMs?: number;
+  /** Automatic admission retains refusal lineage and never receives an explicit-send exception. */
+  automatic?: boolean;
+  /** A bounded correction transfers existing observation ownership without renewing its bounds. */
+  correction?: boolean;
+  /** Exclusive original correction-window expiry in the local wall-clock domain. */
+  correctionExpiresAtMs?: number;
 }
 
 export interface EufyMegaOptions extends MegaClientConfig {
@@ -314,7 +335,9 @@ export type EufyMegaEventMap = {
   [K in keyof DeviceEventMap]: [DeviceEventMap[K]];
 } & {
   /** Finite lifecycle observations without device identifiers or raw values. */
-  rtcLateEffect: [event: "scheduled" | "confirmed" | "expired" | "superseded" | "read_failed" | "pending_accepted"];
+  rtcLateEffect: [event: LateEffectEvent];
+  lateContraryEffect: [event: LateContraryEffect];
+  commandHealth: [event: CommandHealthEvent];
   /** Catch-all: fires for EVERY semantic event, payload tagged with its `eventName`. */
   event: [AnyDeviceEvent];
   /**

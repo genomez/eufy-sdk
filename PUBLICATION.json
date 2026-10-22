@@ -1,48 +1,47 @@
 {
   "schemaVersion": 1,
-  "preparationDate": "2026-10-18",
-  "version": "0.2.1-s1.experimental.6",
-  "status": "published-source-delivery",
-  "published": true,
-  "npmPublication": false,
-  "runtimeSourceRelease": "https://github.com/genomez/ha-eufy-sdk-addon/releases/tag/s1-runtime-0.4.1.experimental.6",
-  "candidateSourceManifest": "SOURCE_MANIFEST.json",
-  "candidatePreparationReceiptsAreHistorical": true,
-  "acceptedMonorepoCommit": "c254aac11d4ad8e599cd14fa89e5e47e33264516",
-  "integrationVersion": "0.3.1-s1.experimental.6",
-  "addonVersion": "0.4.1-s1.experimental.6",
+  "version": "0.2.1-s1.experimental.7",
+  "status": "prepared-locally-unpublished",
+  "published": false,
+  "acceptedMonorepoCommit": "6deea127459f368edb24d7d3df59dcaf60d5b508",
+  "preparationBaseCommit": "249eccef7f226e653f3745032d128465f8f7dbdf",
+  "addonVersion": "0.4.1-s1.experimental.7",
+  "integrationVersion": "0.3.1-s1.experimental.7",
   "relayDefault": false,
   "keepaliveMs": 29000,
-  "knownLimitations": [
-    "Accepted Linux amd64 image passed isolated smoke checks; this exact release has no claimed physical-device, live HA/HACS installation or overnight soak acceptance.",
-    "Earlier dated dev3 companion references are preserved as historical source records."
-  ],
-  "verification": {
-    "typecheck": "pass",
-    "build": "pass",
-    "tests": 5208,
-    "passed": 5206,
-    "inheritedWindowsDocSnippetFailures": 2,
-    "testFiles": 260
-  },
-  "publicationDocumentationOverrides": {
-    "README.md": {
-      "candidateSha256": "b4eeef7a2949c1984f6c14162449b2b88a0dc1993a52cd7e9061abb704000b56",
-      "preparedSha256": "c21adbd3b0cd85716abd426277bb249dc261d66c4e2daa4a768e6a0c05229221",
-      "reason": "Add current unpublished preparation and intended corresponding-source location; preserve dated records and implementation bytes.",
-      "publicationSha256": "9bc11b6849f9f4fe0a6f19fa8e6375f5f526118774eb055e38fe83eeaefecdd3"
+  "runtimeSourceRelease": null,
+  "registryManifestDigest": null,
+  "correspondingSourceArchive": "eufy-sdk-0.2.1-s1.experimental.7-source.tar.gz",
+  "sourceExceptions": {
+    "BUILD_PROVENANCE.json": {
+      "inputSha256": "225e3adfa40f65603f8ec85e7be2c2a9fbc993dc7f8057aad3e08fc313534ed8",
+      "preparedSha256": "c32cf5d4577dbfe933bd1197c06175f942ab1cc91068e6ea13cf1d54e60bfa18",
+      "reason": "Version, publication documentation, provenance or source inventory refresh; implementation preserved."
     },
     "EXPERIMENTAL.md": {
-      "candidateSha256": "a74d402ec66e21d3ab5c74d50caafa6cf5e8d638ea3a71611fa5cc43a768e681",
-      "preparedSha256": "152dcf8835357465a9b0be96fe876dc5eb386817b5aa1cdd33c14d77cb7a5945",
-      "reason": "Add current unpublished preparation and intended corresponding-source location; preserve dated records and implementation bytes.",
-      "publicationSha256": "e8e2eab0a7bb2f50c63f4beb9138c2ce9035bbe12199cc8ab1f737b460f304d1"
+      "inputSha256": "a74d402ec66e21d3ab5c74d50caafa6cf5e8d638ea3a71611fa5cc43a768e681",
+      "preparedSha256": "3fd1100fa0a75274eca3a05b8a39a6218e4d4143b287cadbf3f7cd7b38af441f",
+      "reason": "Version, publication documentation, provenance or source inventory refresh; implementation preserved."
     },
-    "PUBLICATION.json": {
-      "candidateSha256": "85a99a6f426b3d3f1cd762aaa41b38fe7b0857bbce987c7d2d2195f19205a804",
-      "reason": "Replace historical candidate preparation summary with current unpublished publication preparation and documented source exceptions."
+    "MODIFICATIONS.md": {
+      "inputSha256": "58325f51e7de57acf2e21d93c3c48d5b3a9db79a54d3aae240c2b960467c4057",
+      "preparedSha256": "65b0e6fc36defe056da97a58f85033f6887d72515319bc8b410d2eb5738004ed",
+      "reason": "Version, publication documentation, provenance or source inventory refresh; implementation preserved."
+    },
+    "README.md": {
+      "inputSha256": "b4eeef7a2949c1984f6c14162449b2b88a0dc1993a52cd7e9061abb704000b56",
+      "preparedSha256": "c0aa9b63a8ed9003b5a8c620dbd527483fdaa2ad1b60d4aedf592f86ec2129b3",
+      "reason": "Version, publication documentation, provenance or source inventory refresh; implementation preserved."
+    },
+    "package-lock.json": {
+      "inputSha256": "b1d71685ca1c40ebad1ab74a47b84be55c1ad77e51338b0d70e25f8e6c211ebc",
+      "preparedSha256": "006967c283277d43489fe580529b2c5a0475c3af7ea63ba669c33d0a09cb8650",
+      "reason": "Version, publication documentation, provenance or source inventory refresh; implementation preserved."
+    },
+    "package.json": {
+      "inputSha256": "d2f38c31a7384284228f4c72e705d1d5384f9ad3847e12ed5c36bfcdfcb6510e",
+      "preparedSha256": "b7b3ff1d6d01a3b5f12ff816910942199cfa82e0895554d5f92fcd92ec3e9085",
+      "reason": "Version, publication documentation, provenance or source inventory refresh; implementation preserved."
     }
-  },
-  "correspondingSourceArchive": "eufy-sdk-0.2.1-s1.experimental.6-source.tar.gz",
-  "publicationDate": "2026-10-18"
+  }
 }

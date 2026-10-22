@@ -242,12 +242,88 @@ describe("RtcSession", () => {
     expect(closed).toHaveBeenCalledTimes(1);
   });
 
-  it("surfaces a handler failure as an error instead of an unhandled rejection", async () => {
+  it.each(["ordinary", "synchronous close", "observer throws", "hangup throws", "signaling throws", "peer throws"])(
+    "terminates a granted peer-init failure with its original cause: %s",
+    async (mode) => {
+      const s = await authenticated(setup());
+      const cause = new Error("synthetic native cause");
+      const failure = new Error("synthetic peer initialization failure", { cause });
+      const disposalFailure = new Error("synthetic disposal failure");
+      const closed = vi.fn();
+      s.session.on("close", closed);
+      s.session.on("error", () => {
+        expect(s.session.getConnectionDiagnostics().lastFailure?.stage).toBe("peer_init");
+        if (mode === "synchronous close") s.session.close();
+        if (mode === "observer throws") throw disposalFailure;
+      });
+      if (mode === "hangup throws")
+        s.sig.sendHangup.mockImplementation(() => {
+          throw disposalFailure;
+        });
+      if (mode === "signaling throws")
+        s.sig.close.mockImplementation(() => {
+          throw disposalFailure;
+        });
+      if (mode === "peer throws")
+        s.peer.close.mockImplementation(() => {
+          throw disposalFailure;
+        });
+      s.peer.init.mockRejectedValueOnce(failure);
+      s.sig.hub({ action: 3, dataType: "scall", data: { status: 100, turn: TURN } });
+      s.sig.hub({ action: 3, dataType: "info", data: { sdp: "synthetic queued offer" } });
+      await flush();
+      expect(s.errors).toEqual([failure]);
+      expect(s.errors[0]).toBe(failure);
+      expect(closed).toHaveBeenCalledExactlyOnceWith(failure);
+      expect((closed.mock.calls[0]![0] as Error).cause).toBe(cause);
+      expect(s.session.closeOrigin).toBe("peer_failed");
+      expect(s.sig.sendHangup).toHaveBeenCalledTimes(1);
+      expect(s.sig.close).toHaveBeenCalledTimes(1);
+      expect(s.peer.close).toHaveBeenCalledTimes(1);
+      s.sig.hub({ action: 3, dataType: "info", data: { sdp: "synthetic late offer" } });
+      s.peer.emit("commandChannelOpen");
+      s.peer.emit("iceCandidate", "synthetic candidate");
+      s.session.close();
+      await flush();
+      expect(s.session.isConnected).toBe(false);
+      expect(s.peer.handleRemoteOffer).not.toHaveBeenCalled();
+      expect(s.sig.sendInfoSdp).not.toHaveBeenCalled();
+      expect(s.sig.sendInfoCandidate).not.toHaveBeenCalled();
+      expect(s.session.sendCommand(Buffer.from("synthetic"))).toBe(false);
+      expect(closed).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("normalizes a non-Error peer-init rejection once for error and close", async () => {
     const s = await authenticated(setup());
-    s.peer.init.mockRejectedValueOnce(new Error("no native module"));
+    const closed = vi.fn();
+    s.session.on("close", closed);
+    s.peer.init.mockRejectedValueOnce("synthetic failure");
     s.sig.hub({ action: 3, dataType: "scall", data: { status: 100, turn: TURN } });
     await flush();
-    expect(s.errors.map((e) => e.message)).toEqual(["no native module"]);
+    expect(s.errors).toHaveLength(1);
+    expect(s.errors[0]).toBeInstanceOf(Error);
+    expect(s.errors[0]!.message).toBe("synthetic failure");
+    expect(closed).toHaveBeenCalledExactlyOnceWith(s.errors[0]);
+    expect(s.session.closeOrigin).toBe("peer_failed");
+  });
+
+  it("disposes a granted peer completing after local closure without replacing the first origin", async () => {
+    const s = await authenticated(setup());
+    const init = Promise.withResolvers<void>();
+    const closed = vi.fn();
+    s.session.on("close", closed);
+    s.peer.init.mockImplementationOnce(() => init.promise);
+    s.sig.hub({ action: 3, dataType: "scall", data: { status: 100, turn: TURN } });
+    await flush();
+    s.session.close();
+    init.resolve();
+    await flush();
+    expect(s.peer.close).toHaveBeenCalledTimes(2);
+    expect(s.session.closeOrigin).toBe("local");
+    expect(s.errors).toEqual([]);
+    expect(closed).toHaveBeenCalledTimes(1);
+    expect(s.session.isConnected).toBe(false);
   });
 });
 

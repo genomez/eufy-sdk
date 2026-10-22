@@ -235,11 +235,11 @@ describe("ptz capability module", () => {
       await acts.rotate(PtzDirection.right);
       await acts.left();
       await acts.zoom!(2);
-      await acts.preset().goto(4);
-      await acts.preset().preview(9);
-      await acts.preset().save(7);
-      await acts.preset().delete(4);
-      await acts.preset().setDefault(4);
+      await acts.preset!().goto(4);
+      await acts.preset!().preview(9);
+      await acts.preset!().save(7);
+      await acts.preset!().delete(4);
+      await acts.preset!().setDefault(4);
       expect(sent[0]).toMatchObject({ kind: "set-json", data: { rotate_type: PTZ_ROTATE.right }, channel: 3 });
       expect(sent[1]).toMatchObject({ data: { rotate_type: PTZ_ROTATE.left } });
       expect(sent[2]).toMatchObject({ kind: "set-payload", cmd: PTZ_CMD.PTZ_ZOOM, payload: { dstZoom: 2 } });
@@ -262,7 +262,7 @@ describe("ptz capability module", () => {
     });
 
     it("preset().list is present only with a media provider and queries id 6034", async () => {
-      expect(bind<PtzActions>("ptz", ctx(3)).acts.preset().list).toBeUndefined();
+      expect(bind<PtzActions>("ptz", ctx(3)).acts.preset!().list).toBeUndefined();
 
       const calls: Array<{ param: number; data: Record<string, unknown> }> = [];
       const media = {
@@ -272,13 +272,13 @@ describe("ptz capability module", () => {
         },
       } as unknown as MediaProvider;
       const acts = bind<PtzActions>("ptz", ctx(3), { media: media }).acts;
-      const presets = await acts.preset().list!();
+      const presets = await acts.preset!().list!();
       expect(calls).toEqual([{ param: PTZ_CMD.PTZ_PRESET_QUERY, data: { value: 0 } }]);
       expect(presets).toEqual([{ id: 7, raw: { id: 7, name: "Gate" } }]);
     });
 
     it("preset().image is present only with a media provider and queries id 6097", async () => {
-      expect(bind<PtzActions>("ptz", ctx(3)).acts.preset().image).toBeUndefined();
+      expect(bind<PtzActions>("ptz", ctx(3)).acts.preset!().image).toBeUndefined();
 
       const calls: Array<{ param: number; data: Record<string, unknown> }> = [];
       const media = {
@@ -288,7 +288,7 @@ describe("ptz capability module", () => {
         },
       } as unknown as MediaProvider;
       const acts = bind<PtzActions>("ptz", ctx(3), { media: media }).acts;
-      const img = await acts.preset().image!(2);
+      const img = await acts.preset!().image!(2);
       expect(calls).toEqual([{ param: PTZ_CMD.PTZ_PRESET_PIC, data: { value: 2 } }]);
       expect(img).toEqual({ index: 2, data: "/9j/thumb" });
     });

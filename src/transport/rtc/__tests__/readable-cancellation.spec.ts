@@ -48,6 +48,82 @@ function setup(manual = false) {
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 describe("RTC readable cancellation", () => {
+  it("keeps station connection bounded at twelve seconds before the first-IDR timer exists", async () => {
+    vi.useFakeTimers();
+    const { router, provider, commands, session } = setup(true);
+    try {
+      const opening = provider.openReadable!();
+      const rejected = expect(opening).rejects.toThrow("did not come up within 12000ms");
+      await vi.advanceTimersByTimeAsync(11_999);
+      expect(commands).toEqual([]);
+      expect(session.close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      expect(session.close).toHaveBeenCalled();
+      session.ready();
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(commands).toEqual([]);
+    } finally {
+      router.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels every pending waiter and cannot start from a late connection", async () => {
+    const { router, provider, commands, session } = setup(true);
+    const controllers = [new AbortController(), new AbortController()];
+    const requests = controllers.map((controller) => provider.openReadable!({ signal: controller.signal }));
+    const rejected = requests.map((request) => expect(request).rejects.toThrow("cancelled"));
+    for (const controller of controllers) controller.abort(new Error("cancelled"));
+    await Promise.all(rejected);
+    await tick();
+    session.ready();
+    await tick();
+    expect(commands).toEqual([]);
+    expect(session.close).toHaveBeenCalled();
+    for (const controller of controllers) expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    router.close();
+  });
+
+  it("aborts an acquired readable immediately near the 25-second IDR deadline without retry", async () => {
+    vi.useFakeTimers();
+    const { router, provider, commands } = setup();
+    try {
+      const controller = new AbortController();
+      const readable = await provider.openReadable!({ signal: controller.signal });
+      await vi.advanceTimersByTimeAsync(24_999);
+      expect(commands).toEqual([1003]);
+      controller.abort();
+      expect(readable.destroyed).toBe(true);
+      expect(commands).toEqual([1003, 1004]);
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(commands).toEqual([1003, 1004]);
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    } finally {
+      router.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("final detach bypasses an ordinary command waiting for an ACK", async () => {
+    const { router, provider, commands } = setup();
+    const readable = await provider.openReadable!();
+    const waiting = router.dispatchCommand("station", {
+      kind: "set-payload",
+      cmd: 1224,
+      payload: { mode_type: 1, user_name: "synthetic" },
+      channel: 0,
+      mValue3: 0,
+    });
+    const rejected = expect(waiting).rejects.toThrow();
+    await tick();
+    expect(commands).toHaveLength(2);
+    readable.destroy();
+    expect(commands.at(-1)).toBe(1004);
+    router.close();
+    await rejected;
+  });
+
   it("rejects an already aborted request without creating a station session", async () => {
     const { provider, sessions } = setup();
     const controller = new AbortController();

@@ -293,13 +293,14 @@ describe("RTC information refresh", () => {
     },
   );
 
-  it("rejects a queued information read after the preceding sent read times out", async () => {
+  it("shares a queued read failure and refuses a new read on the tainted generation", async () => {
     const { router, session } = await prepared({ ackTimeoutMs: 10 });
     const media = await router.sessionFor(SN);
     try {
       const first = expect(router.refreshInformation(SN)).rejects.toThrow();
-      const second = expect(router.refreshInformation(SN)).rejects.toThrow(/until the session retires/);
+      const second = expect(router.refreshInformation(SN)).rejects.toThrow(/response timed out/);
       await Promise.all([first, second]);
+      await expect(router.refreshInformation(SN)).rejects.toThrow(/until the session retires/);
       expect(session.sent).toHaveLength(1);
       expect(session.closed).toBe(false);
     } finally {

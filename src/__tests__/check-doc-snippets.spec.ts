@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..", "..");
@@ -20,10 +20,11 @@ const FIXTURES = join(ROOT, "scripts", "ci", "__fixtures__", "doc-snippets");
  * `--docs` points it at the fixtures, so the real run cannot see them and this one cannot be broken by
  * editing a guide.
  */
-function run(dir: string): { code: number; output: string } {
+function run(dir: string, env = process.env): { code: number; output: string } {
   try {
     const output = execFileSync("node", ["scripts/ci/check-doc-snippets.mjs", "--docs", dir], {
       cwd: ROOT,
+      env,
       encoding: "utf8",
       stdio: "pipe",
     });
@@ -62,6 +63,30 @@ describe("the doc-snippet checker", () => {
     expect(code).toBe(0);
   }, 120_000);
 });
+
+test("a compiler launch failure without diagnostics fails the gate", () => {
+  const dir = mkdtempSync(join(tmpdir(), "doc-snippets-compiler-"));
+  try {
+    const preload = join(dir, "compiler-failure.mjs");
+    writeFileSync(
+      preload,
+      'import childProcess from "node:child_process";\n' +
+        'import { syncBuiltinESMExports } from "node:module";\n' +
+        'childProcess.execFileSync = () => { throw new Error("synthetic compiler launch failure"); };\n' +
+        "syncBuiltinESMExports();\n",
+      "utf8",
+    );
+    const { code, output } = run(join(FIXTURES, "clean"), {
+      ...process.env,
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(preload).href}`,
+    });
+    expect(code).not.toBe(0);
+    expect(output).toContain("synthetic compiler launch failure");
+    expect(output).not.toContain("documented snippets typecheck");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 120_000);
 
 test("the generated API reference is not documentation this gate owns", () => {
   // TypeDoc writes `docs/<out>/` — gitignored, and full of ```ts SIGNATURE fragments that are not

@@ -66,6 +66,59 @@ function fixture() {
 describe("RTC live startup ownership", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
+  it.each([15_000, 24_999])("accepts a first IDR after %i milliseconds without restarting", (delay) => {
+    const f = fixture();
+    const c = f.live.attach();
+    const frames: LiveVideoFrame[] = [];
+    const error = vi.fn();
+    c.onMedia(({ frame }) => frames.push(frame));
+    c.on("error", error);
+    vi.advanceTimersByTime(delay);
+    expect(f.live.active).toBe(true);
+    f.session.emit("mediaData", media(unit(19)), PortalLinkType.LIVE);
+    vi.advanceTimersByTime(25_000);
+    expect(frames).toHaveLength(1);
+    expect(error).not.toHaveBeenCalled();
+    expect(f.sent).toHaveLength(1);
+    c.detach();
+    expect(f.sent).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("fails at exactly 25 seconds without an IDR and never retries", () => {
+    const f = fixture();
+    const c = f.live.attach();
+    const error = vi.fn();
+    c.on("error", error);
+    vi.advanceTimersByTime(24_999);
+    expect(f.live.active).toBe(true);
+    expect(error).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(f.live.active).toBe(false);
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(f.idle).toHaveBeenCalledTimes(1);
+    expect(f.sent).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(60_000);
+    expect(f.sent).toHaveLength(2);
+  });
+  it.each([1, 24_999])("final detach at %i milliseconds stops immediately before IDR", (delay) => {
+    const f = fixture();
+    const c = f.live.attach();
+    vi.advanceTimersByTime(delay);
+    const keepalives = f.session.sendRaw.mock.calls.length;
+    c.detach();
+    c.detach();
+    expect(f.live.active).toBe(false);
+    expect(f.sent).toHaveLength(2);
+    expect(f.idle).toHaveBeenCalledTimes(1);
+    expect(f.session.listenerCount("mediaData")).toBe(0);
+    expect(f.session.listenerCount("commandData")).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    f.session.emit("mediaData", media(unit(19)), PortalLinkType.LIVE);
+    vi.advanceTimersByTime(60_000);
+    expect(f.sent).toHaveLength(2);
+    expect(f.session.sendRaw).toHaveBeenCalledTimes(keepalives);
+  });
   it("preserves a three-byte IDR before a later four-byte unit", () => {
     const f = fixture(),
       c = f.live.attach(),
@@ -128,7 +181,7 @@ describe("RTC live startup ownership", () => {
     const errors: Error[] = [];
     first.on("error", (e) => errors.push(e));
     f.ack(0);
-    vi.advanceTimersByTime(14000);
+    vi.advanceTimersByTime(24000);
     const second = f.live.attach();
     second.on("error", (e) => errors.push(e));
     vi.advanceTimersByTime(1000);
@@ -147,7 +200,7 @@ describe("RTC live startup ownership", () => {
     f.session.emit("mediaData", media(unit(21)), PortalLinkType.LIVE);
     expect(frames).toHaveLength(0);
     expect(c.primed).toBe(false);
-    vi.advanceTimersByTime(15000);
+    vi.advanceTimersByTime(25000);
     expect(f.live.active).toBe(false);
   });
   it.each([false, true])(
@@ -159,7 +212,7 @@ describe("RTC live startup ownership", () => {
       c.onMedia(({ frame }) => frames.push(frame));
       f.session.emit("mediaData", media(unit(19, three)), PortalLinkType.LIVE);
       expect(frames[0]).toMatchObject({ codec: "h265", keyframe: true });
-      vi.advanceTimersByTime(15000);
+      vi.advanceTimersByTime(25000);
       expect(f.live.active).toBe(true);
       expect(f.session.sendRaw).toHaveBeenCalled();
       c.detach();
@@ -175,7 +228,7 @@ describe("RTC live startup ownership", () => {
     const full = media(unit(19));
     f.session.emit("mediaData", full.subarray(0, full.length - 1), PortalLinkType.LIVE);
     expect(frames).toHaveLength(0);
-    vi.advanceTimersByTime(15000);
+    vi.advanceTimersByTime(25000);
     expect(f.live.active).toBe(false);
   });
   it("detaching one reader preserves its sibling and detaching the last clears every timer", () => {

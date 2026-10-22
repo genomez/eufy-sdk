@@ -15,6 +15,7 @@
  * when a command/stream/doorbell-ring needs it and closed when idle, so the camera can sleep.
  */
 import { EventEmitter } from "node:events";
+import { performance } from "node:perf_hooks";
 import { MegaHttpClient, LoginStatus, SessionExpiredError, type LoginResult } from "../transport/http/mega-client.js";
 import { SecureMqtt, isNotAuthorized, type SecureMqttCredentials } from "../transport/mqtt/secure-mqtt.js";
 import { mqttAppName, mqttScopeFor, type MqttScope } from "../transport/mqtt/topics.js";
@@ -32,6 +33,17 @@ import { consumeConnectionDeadline } from "../transport/rtc/connection-deadline.
 import { RtcCommandRouter } from "../transport/rtc/command-router.js";
 import { commandOutcome, RtcCommandRejection } from "../transport/rtc/command-diagnostics.js";
 import { RtcLateEffectReconciler } from "./rtc-late-effect.js";
+import { RtcLateContraryObserver, type RtcReportIdentity } from "./rtc-late-contrary.js";
+export type { LateContraryEffect, LateContraryConfirmation } from "./rtc-late-contrary.js";
+import { CommandIntentRegistry, type CommandIntent } from "./command-intents.js";
+import { CommandHealthGate, type CommandHealthToken } from "./command-health.js";
+export {
+  COMMAND_FAST_REFUSAL_MAX_MS,
+  COMMAND_FAST_REFUSAL_WINDOW_MS,
+  COMMAND_FAST_REFUSAL_THRESHOLD,
+  COMMAND_DEGRADED_COOLDOWN_MS,
+} from "./command-health.js";
+export type { CommandHealthEvent } from "./command-health.js";
 import type { PortalResponse } from "../transport/rtc/portal-packet.js";
 import { stationOf } from "../transport/p2p/station-channels.js";
 import {
@@ -84,6 +96,8 @@ import {
   StateConvergenceError,
   type Command,
   type CommandObservation,
+  type CommandExecutionContext,
+  type CommandReceipt,
   type CommandSink,
   type Ff09SettingsReader,
   type MediaProvider,
@@ -120,6 +134,7 @@ import type {
   RealtimePlaneReadiness,
   RealtimeReadiness,
   WaitForRealtimeOptions,
+  PropertyExecutionOptions,
 } from "./types.js";
 
 export type {
@@ -133,10 +148,22 @@ export type {
   RealtimePlaneReadiness,
   RealtimeReadiness,
   WaitForRealtimeOptions,
+  PropertyExecutionOptions,
 } from "./types.js";
 
 /** Private read-binding topology retained without changing the shared command contract. */
 type ReadContext = CommandContext & { stationSerial?: string };
+
+/** Invocation ownership carried through the bound sink without changing capability setters. */
+interface PropertyInvocation {
+  ordinal: number;
+  execution?: CommandExecutionContext;
+  intent?: CommandIntent;
+  receipt?: CommandReceipt;
+  receiptRequested?: boolean;
+  transportAttempted?: boolean;
+  health?: CommandHealthToken;
+}
 
 /** Detached context from one retained roster snapshot; missing records remain cache-unknown. */
 export interface CachedDeviceContext {
@@ -344,6 +371,8 @@ export class EufyMega extends EventEmitter {
    * this map must never be what keeps one alive.
    */
   private readonly liveDevices = new Map<string, WeakRef<Device>>();
+  /** Every returned model's parent projection, including older references for the same serial. */
+  private readonly stationContextDevices = new Set<WeakRef<Device>>();
   /** Serialized state-transition transactions keyed by device and reflected member. */
   private readonly stateTransitions = new Map<string, Promise<unknown>>();
   /** Local writes already awaiting the same semantic transition, counted per reflected member. */
@@ -392,12 +421,68 @@ export class EufyMega extends EventEmitter {
   private readonly mapStores = new Map<string, VacuumMapStore>();
   /** Re-armed after each cloud-param poll; cancelled by {@link disconnect}. */
   private readonly pollTimer = new Timer();
+  private cloudPollSchedule?: { epoch: number; scheduledAtMs: number | null; nextDueAtMs: number | null };
+  private cloudPollInFlight = 0;
   /** Optional station-state schedule, independent of the cloud polling timer. */
   private readonly stateRefreshTimer = new Timer();
+  private readonly commandIntents = new CommandIntentRegistry();
+  private readonly propertyPreparations = new Set<AbortController>();
+  private readonly commandHealth = new CommandHealthGate((event) => {
+    if (event.status === "command_degraded") this.lateEffects.suppressAutomatic(event.device, event.property);
+    this.emit("commandHealth", event);
+  });
   private readonly lateEffects = new RtcLateEffectReconciler({
+    intents: this.commandIntents,
     canRead: (station) => this.automaticInformationAllowed() && this.rtc.informationRefreshReady(station, true),
-    read: (station, signal, timeoutMs) => this.readLateEffect(station, signal, timeoutMs),
+    read: (station, signal, timeoutMs, options) => this.readLateEffect(station, signal, timeoutMs, options),
+    retry: async (request) => {
+      const property = commandObservation(request.command)?.property;
+      const parent = property === undefined ? undefined : this.commandHealthParents.get(request.intent);
+      const health = parent ? this.commandHealth.child(parent) : undefined;
+      if (parent && !health) return { status: "cancelled_before_send", sendAttempted: false };
+      try {
+        return await this.rtc.dispatchCommandWithReceipt(request.device, request.command, {
+          execution: {
+            profile: "bounded-state-v1",
+            bornAtMs: request.originalSentAtMonotonicMs,
+            sendByMs: request.sendByMonotonicMs,
+            totalByMs: request.totalByMonotonicMs,
+            wallExpiresAtMs: request.wallExpiresAtMs,
+            wallOffsetMs: request.wallOffsetMs,
+            clockUncertaintyMs: request.clockUncertaintyMs,
+            signal: health ? AbortSignal.any([request.signal, health.controller.signal]) : request.signal,
+            replacementKey: request.intent.replacementKey,
+            intent: request.intent.ordinal,
+            isCurrent: request.isCurrent,
+            origin: "retry",
+            parentAttempt: request.parentAttempt,
+            preparationWaitMs: 0,
+            authorizingRead: request.authorizingRead,
+            originalSentAtMonotonicMs: request.originalSentAtMonotonicMs,
+            readStartedAgeMs: request.readStartedAgeMs,
+            readFinishedAgeMs: request.readFinishedAgeMs,
+          },
+          onSent: () => {
+            if (health) health.sent = true;
+            request.onSent();
+          },
+          onResponse: (receipt) => this.commandHealth.response(health, receipt),
+        });
+      } finally {
+        this.commandHealth.release(health);
+      }
+    },
     event: (event) => this.emit("rtcLateEffect", event),
+    recoverySettled: (device, intent) => this.lateContrary.recoverySettled(device, intent),
+  });
+  private readonly commandHealthParents = new WeakMap<CommandIntent, CommandHealthToken>();
+  private readonly lateContrary = new RtcLateContraryObserver({
+    intents: this.commandIntents,
+    canRead: (station, resumeSession) =>
+      this.automaticInformationAllowed() && (resumeSession || this.rtc.informationRefreshReady(station, true)),
+    read: (station, signal, timeoutMs, options) => this.readLateEffect(station, signal, timeoutMs, options),
+    recoveryBusy: (device, intent) => this.lateEffects.recoveryBusy(device, intent),
+    event: (event) => this.emit("lateContraryEffect", event),
   });
   private readonly reportRefreshes = new Map<
     string,
@@ -450,6 +535,7 @@ export class EufyMega extends EventEmitter {
     }
     this.registry = new DeviceRegistry({
       mega: this.mega,
+      onRoster: () => this.reconcileStationContexts(),
       onError: (e) => this.reportError(e, "device_registry"),
       logger: opts.logger,
     });
@@ -489,8 +575,12 @@ export class EufyMega extends EventEmitter {
       sessionRefreshMs: opts.rtc?.sessionRefreshMs,
       commandKeepaliveMs: opts.rtc?.commandKeepaliveMs,
       maxCallRetries: opts.rtc?.maxCallRetries,
-      onFrame: (stationSn, frame) => this.onRtcFrame(stationSn, frame),
-      onSessionClosed: (stationSn) => this.lateEffects.closeStation(stationSn),
+      onFrame: (stationSn, frame, identity) => this.onRtcFrame(stationSn, frame, identity),
+      onSessionReplaced: (stationSn) => this.lateContrary.closeStation(stationSn),
+      onSessionClosed: (stationSn) => {
+        this.lateContrary.closeStation(stationSn);
+        this.lateEffects.closeStation(stationSn);
+      },
       requestsCommandReadback: (stationSn, deviceSn, command, frame) =>
         rtcCommandReadbackRequested(stationSn, deviceSn, command, frame, this.registry),
       confirmsCommand: (stationSn, deviceSn, command, frame) =>
@@ -746,12 +836,13 @@ export class EufyMega extends EventEmitter {
   }
 
   /** Apply qualified RTC information and dispatch scoped notifications through the model event path. */
-  private onRtcFrame(stationSn: string, frame: PortalResponse): void {
+  private onRtcFrame(stationSn: string, frame: PortalResponse, identity?: RtcReportIdentity): void {
     const observedAtMs = Date.now();
     if (rtcReportParameters(stationSn, frame, this.registry).size) this.scheduleReportRefresh(stationSn);
     for (const [sn, params] of rtcStateParameters(stationSn, frame, this.registry)) {
       this.applyRealtimeState(sn, params);
       this.lateEffects.observe(sn, params);
+      if (identity) this.lateContrary.observe(sn, params, identity);
       const device = this.liveDevices.get(sn)?.deref();
       const properties = Object.fromEntries(
         (device?.observedProperties(params) ?? []).flatMap(({ property, value }) =>
@@ -907,29 +998,19 @@ export class EufyMega extends EventEmitter {
     );
   }
 
-  /**
-   * Late reads use the normal station queue and share any report refresh already in flight. A failed
-   * late read is counted only by the reconciler: it never charges the scheduled refresh backoff, delays
-   * the scheduled timer or suppresses report refreshes, which remain the connection-health signal.
-   */
-  private async readLateEffect(station: string, signal: AbortSignal, timeoutMs: number): Promise<unknown> {
+  /** Qualified late reads retain their actual wire-start and session ownership. */
+  private async readLateEffect(
+    station: string,
+    signal: AbortSignal,
+    timeoutMs: number,
+    options?: { notBeforeMonotonicMs?: number; priority: "late-check" },
+  ): Promise<unknown> {
     const generation = this.realtimeGeneration;
     if (!generation || !this.automaticInformationAllowed()) return;
-    const existing = this.reportRefreshes.get(station)?.promise;
-    if (existing) return existing;
-    if (this.stateRefreshSweep) return this.stateRefreshSweep.promise;
-    const entry = this.reportRefreshes.get(station) ?? {};
-    clearTimeout(entry.timer);
-    entry.timer = undefined;
-    this.reportRefreshes.set(station, entry);
     const combined = AbortSignal.any([signal, generation.abort.signal]);
-    const promise = this.refreshDeviceState(station, { signal: combined, timeoutMs });
-    entry.promise = promise;
-    try {
-      return await promise;
-    } finally {
-      if (this.reportRefreshes.get(station) === entry) this.reportRefreshes.delete(station);
-    }
+    const result = await this.rtc.refreshInformation(station, { signal: combined, timeoutMs, ...options });
+    if (generation !== this.realtimeGeneration || combined.aborted) return;
+    return { ...result, deviceParams: Object.fromEntries(rtcStateParameters(station, result.frame, this.registry)) };
   }
 
   /** Debounce reports; an active late-effect intent permits one bounded deferral onto the station queue. */
@@ -1514,19 +1595,79 @@ export class EufyMega extends EventEmitter {
    * (`p2p_did` present â†’ P2P, else MQTT); the chosen router re-resolves its own routing tail. Every
    * other kind is P2P.
    */
-  private commandSinkFor(sn: string): CommandSink {
+  private commandSinkFor(sn: string, invocation?: PropertyInvocation): CommandSink {
     return {
       dispatch: async (cmd: Command) => {
+        const current: PropertyInvocation = invocation ?? { ordinal: this.commandIntents.allocate() };
+        const target = this.rtcDevice(sn);
+        if (
+          target?.stationSn &&
+          target.stationSn !== sn &&
+          "channel" in cmd &&
+          this.registry.serialForFrame(target.stationSn, cmd.channel) !== sn
+        )
+          throw new Error("RTC command requires an unambiguous attached-device channel");
         const observation = commandObservation(cmd);
+        current.intent ??= this.commandIntents.acceptValidated(
+          target?.stationSn || sn,
+          sn,
+          current.ordinal,
+          observation?.replaceableState ? `${sn}:${observation.property}` : undefined,
+          current.execution !== undefined,
+        );
+        if (!current.intent) {
+          current.receipt = current.execution
+            ? this.rtc.recordUnsentReceipt("superseded_before_send", current.execution)
+            : Object.freeze({
+                status: "superseded_before_send",
+                sendAttempted: false,
+                effect: "unconfirmed",
+                intent: current.ordinal,
+              });
+          if (!current.receiptRequested) throw new Error("command superseded before send");
+          return;
+        }
+        if (target && observation?.replaceableState && observation.lateEffectReadback) {
+          current.health = this.commandHealth.bind(
+            sn,
+            observation.property,
+            current.ordinal,
+            current.execution?.automatic === true || current.execution?.origin === "correction",
+          );
+          if (!current.health) {
+            current.receipt = current.execution
+              ? this.rtc.recordUnsentReceipt("queue_full", current.execution)
+              : { status: "queue_full", sendAttempted: false, effect: "unconfirmed" };
+            if (!current.receiptRequested) throw new Error("command health capacity exhausted");
+            return;
+          }
+          this.commandHealthParents.set(current.intent, current.health);
+        }
+        if (current.execution)
+          current.execution = {
+            ...current.execution,
+            intent: current.ordinal,
+            replacementKey: current.intent.replacementKey,
+            isCurrent: () => this.commandIntents.isPropertyCurrent(current.intent!),
+            signal: current.health?.automatic
+              ? current.execution.signal
+                ? AbortSignal.any([current.execution.signal, current.health.controller.signal])
+                : current.health.controller.signal
+              : current.execution.signal,
+          };
         if (observation?.passiveReadback) {
-          const route = this.commandRouteFor(sn, cmd);
+          const route = this.commandRouteFor(sn, cmd, current);
           if (route.passiveReadback) {
-            await route.dispatch(Date.now() + this.rtc.commandTimeoutMs);
+            try {
+              await route.dispatch(Date.now() + this.rtc.commandTimeoutMs);
+            } finally {
+              this.commandHealth.release(current.health);
+            }
             return;
           }
         }
         if (!observation) {
-          await this.routeCommand(sn, cmd);
+          await this.routeCommand(sn, cmd, undefined, current);
           return;
         }
         const deadlineAtMs = this.rtcDevice(sn) ? Date.now() + this.rtc.commandTimeoutMs : undefined;
@@ -1573,7 +1714,7 @@ export class EufyMega extends EventEmitter {
             if (expired || (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs))
               throw new Error("RTC command timed out before send");
             if (epoch !== this.realtimeEpoch) throw new Error("observed command superseded by disconnect");
-            await this.routeCommand(sn, cmd, deadlineAtMs);
+            await this.routeCommand(sn, cmd, deadlineAtMs, current);
             acknowledge();
             const refreshed = await this.refreshEventState(sn, observation);
             if (!refreshed || epoch !== this.realtimeEpoch) return;
@@ -1651,14 +1792,20 @@ export class EufyMega extends EventEmitter {
    * kind and stays transport-agnostic; only the facade sees both sides and decides here. Everything
    * else is RTC for a supported station and its attached devices, or P2P for other stations.
    */
-  private routeCommand(sn: string, cmd: Command, deadlineAtMs?: number): Promise<void> {
-    return this.commandRouteFor(sn, cmd).dispatch(deadlineAtMs);
+  private routeCommand(
+    sn: string,
+    cmd: Command,
+    deadlineAtMs?: number,
+    invocation?: PropertyInvocation,
+  ): Promise<void> {
+    return this.commandRouteFor(sn, cmd, invocation).dispatch(deadlineAtMs);
   }
 
   /** Resolve the command's selected transport and its independent state-report policy. */
   private commandRouteFor(
     sn: string,
     cmd: Command,
+    invocation?: PropertyInvocation,
   ): { dispatch: (deadlineAtMs?: number) => Promise<void>; passiveReadback?: boolean } {
     if (cmd.kind === "ff09-actuate" || cmd.kind === "ff09-autolock" || cmd.kind === "ff09-setting-toggle") {
       const dev = this.registry.require(sn);
@@ -1687,20 +1834,125 @@ export class EufyMega extends EventEmitter {
           )
             return Promise.reject(new Error("RTC command requires an unambiguous attached-device channel"));
           const intent =
-            target.stationSn && target.stationSn !== sn ? this.lateEffects.begin(target.stationSn, sn, cmd) : undefined;
+            target.stationSn && target.stationSn !== sn
+              ? this.lateEffects.begin(target.stationSn, sn, cmd, {
+                  intent: invocation?.intent,
+                  ...(invocation?.execution &&
+                  invocation.execution.origin !== "correction" &&
+                  this.commandHealth.status(sn, commandObservation(cmd)!.property).status !== "command_degraded"
+                    ? {
+                        retry: {
+                          totalByMonotonicMs: invocation.execution.totalByMs,
+                          signal: invocation.execution.signal,
+                          wallExpiresAtMs: invocation.execution.wallExpiresAtMs,
+                          wallOffsetMs: invocation.execution.wallOffsetMs,
+                          clockUncertaintyMs: invocation.execution.clockUncertaintyMs,
+                        },
+                      }
+                    : {}),
+                })
+              : undefined;
+          const contraryWatch =
+            invocation?.execution && invocation.intent && target.stationSn
+              ? this.lateContrary.begin(
+                  target.stationSn,
+                  sn,
+                  cmd,
+                  invocation.intent,
+                  invocation.execution.origin !== "correction",
+                )
+              : undefined;
           try {
+            if (invocation?.receiptRequested) {
+              invocation.transportAttempted = true;
+              const receipt = await this.rtc.dispatchCommandWithReceipt(sn, cmd, {
+                ...(invocation.execution
+                  ? { execution: invocation.execution }
+                  : {
+                      deadlineAtMs,
+                      ...(invocation.intent
+                        ? {
+                            intent: {
+                              replacementKey: invocation.intent.replacementKey,
+                              isCurrent: () => this.commandIntents.isPropertyCurrent(invocation.intent!),
+                            },
+                          }
+                        : {}),
+                    }),
+                onSent: (sentAt: number) => {
+                  if (invocation.health) invocation.health.sent = true;
+                  if (intent) this.lateEffects.sent(intent, sentAt);
+                },
+                onResponse: (receipt) => this.commandHealth.response(invocation.health, receipt),
+              });
+              if (intent && receipt.sentAtMonotonicMs !== undefined && receipt.sessionGeneration !== undefined)
+                this.lateEffects.sent(intent, {
+                  sentAtMs: receipt.sentAtMs ?? Date.now(),
+                  sentAtMonotonicMs: receipt.sentAtMonotonicMs,
+                  sessionGeneration: receipt.sessionGeneration,
+                });
+              if (intent?.retry) intent.retry.parentAttempt = receipt.attempt;
+              const pending =
+                receipt.status === "rejected" &&
+                receipt.rejectionCode === -108 &&
+                this.lateEffects.finish(intent, true, true);
+              if (!pending)
+                this.lateEffects.finish(
+                  intent,
+                  ["ack_timeout", "expired_after_send", "rejected"].includes(receipt.status),
+                );
+              invocation.receipt = Object.freeze({
+                ...receipt,
+                ...(invocation.health
+                  ? { commandHealth: this.commandHealth.status(sn, commandObservation(cmd)!.property) }
+                  : {}),
+                ...(pending ? { status: "pending_accepted" as const } : {}),
+                ...(invocation.intent && !this.commandIntents.isPropertyCurrent(invocation.intent)
+                  ? { superseded: true }
+                  : {}),
+              });
+              this.lateContrary.finish(contraryWatch, invocation.receipt);
+              return;
+            }
             await this.rtc.dispatchCommand(sn, cmd, {
               deadlineAtMs,
-              ...(intent ? { onSent: (sentAt: number) => this.lateEffects.sent(intent, sentAt) } : {}),
+              ...(invocation?.intent
+                ? {
+                    intent: {
+                      replacementKey: invocation.intent.replacementKey,
+                      isCurrent: () => this.commandIntents.isPropertyCurrent(invocation.intent!),
+                    },
+                  }
+                : {}),
+              ...(invocation?.health || intent
+                ? {
+                    onSent: (sentAt: number) => {
+                      if (invocation?.health) invocation.health.sent = true;
+                      if (intent) this.lateEffects.sent(intent, sentAt);
+                    },
+                  }
+                : {}),
+              ...(invocation?.health
+                ? { onResponse: (receipt: CommandReceipt) => this.commandHealth.response(invocation.health, receipt) }
+                : {}),
             });
             this.lateEffects.finish(intent, false);
           } catch (error) {
+            this.lateContrary.finish(contraryWatch, { status: "not_sent", sendAttempted: false, effect: "unknown" });
             if (
               error instanceof RtcCommandRejection &&
               error.code === -108 &&
               this.lateEffects.finish(intent, true, true)
-            )
+            ) {
+              if (invocation?.receiptRequested)
+                invocation.receipt = Object.freeze({
+                  status: "pending_accepted",
+                  sendAttempted: true,
+                  effect: "unconfirmed",
+                  intent: invocation.ordinal,
+                });
               return;
+            }
             this.lateEffects.finish(
               intent,
               ["ack_timeout", "expired_after_send", "rejected"].includes(commandOutcome(error)),
@@ -1915,11 +2167,14 @@ export class EufyMega extends EventEmitter {
     const rec = await this.registry.record(sn);
     const dev = Device.fromRecord(sn, rec, this.opts.logger);
     if (rec.dpParams) dev.applyParams(rec.dpParams);
-    this.liveDevices.set(sn, new WeakRef(dev));
+    const held = new WeakRef(dev);
+    this.liveDevices.set(sn, held);
+    this.stationContextDevices.add(held);
     const cloudParams = this.registry.list().find((record) => record.sn === sn)?.params ?? rec.params;
     this.cloudParamIds.set(dev, new Set(Object.keys(cloudParams ?? {}).map(Number)));
     this.realtimeParamIds.set(dev, new Map(Object.keys(rec.dpParams ?? {}).map((id) => [Number(id), 0])));
     const ctx = await this.commandContext(sn, rec);
+    dev.setStationContext(ctx);
     dev.bindActions(
       ctx,
       this.commandSinkFor(sn),
@@ -2102,6 +2357,7 @@ export class EufyMega extends EventEmitter {
     const generation = this.realtimeGeneration;
     return {
       ...this.stateRefreshEvidence,
+      cloudPoll: this.getCloudPollDiagnostics(),
       recent: this.stateRefreshEvidence.recent.map((entry) => ({ ...entry })),
       operations: this.stateRefreshEvidence.operations.map((entry) => ({ ...entry })),
       lastOperationFailure: this.stateRefreshEvidence.lastOperationFailure
@@ -2124,6 +2380,11 @@ export class EufyMega extends EventEmitter {
     };
   }
 
+  /** Passive actual connection stages and bounded terminal evidence across realtime resets. */
+  getRtcConnectionDiagnostics() {
+    return this.rtc.getConnectionDiagnostics();
+  }
+
   /** Passive counters for bounded station-session replacement attempts. */
   getRtcSessionRefreshDiagnostics() {
     return this.rtc.getSessionRefreshDiagnostics();
@@ -2136,7 +2397,12 @@ export class EufyMega extends EventEmitter {
 
   /** Passive bounded control-operation observations. */
   getRtcCommandDiagnostics() {
-    return { ...this.rtc.getCommandDiagnostics(), lateEffect: this.lateEffects.diagnostics() };
+    return {
+      ...this.rtc.getCommandDiagnostics(),
+      lateEffect: this.lateEffects.diagnostics(),
+      lateContrary: this.lateContrary.diagnostics(),
+      commandHealth: this.commandHealth.diagnostics(),
+    };
   }
 
   /** Passive bounded information-exchange observations. */
@@ -2340,8 +2606,39 @@ export class EufyMega extends EventEmitter {
     const every = this.opts.pollMs ?? DEFAULT_POLL_MS;
     if (every <= 0 || epoch !== this.realtimeEpoch) return;
     this.pollTimer.arm(every, () => {
+      this.cloudPollSchedule = undefined;
       void this.pollOnce(epoch).finally(() => this.schedulePoll(epoch));
     });
+    try {
+      const now = Date.now();
+      const validTime = Number.isSafeInteger(now) && now >= 0;
+      const due = now + every;
+      this.cloudPollSchedule = {
+        epoch,
+        scheduledAtMs: validTime ? now : null,
+        nextDueAtMs:
+          validTime && Number.isSafeInteger(every) && every > 0 && every <= 2_147_483_647 && Number.isSafeInteger(due)
+            ? due
+            : null,
+      };
+    } catch {
+      this.cloudPollSchedule = undefined;
+    }
+  }
+
+  /** Detached scheduling evidence; stale epochs cannot supply due times or in-flight state. */
+  private getCloudPollDiagnostics() {
+    const configured = this.opts.pollMs ?? DEFAULT_POLL_MS;
+    const intervalMs = Number.isSafeInteger(configured) && configured >= 0 ? configured : null;
+    const pending = this.pollTimer.pending && this.cloudPollSchedule?.epoch === this.realtimeEpoch;
+    const inFlight = this.cloudPollInFlight > 0;
+    return {
+      enabled: intervalMs !== null && intervalMs > 0 && (this.pollTimer.pending || inFlight),
+      intervalMs,
+      scheduledAtMs: pending ? this.cloudPollSchedule!.scheduledAtMs : null,
+      nextDueAtMs: pending ? this.cloudPollSchedule!.nextDueAtMs : null,
+      inFlight,
+    };
   }
 
   /** The effective cloud poll interval in ms â€” the configured {@link EufyMegaOptions.pollMs} or the default. */
@@ -2359,6 +2656,7 @@ export class EufyMega extends EventEmitter {
   setPollInterval(ms: number): void {
     this.opts.pollMs = ms;
     this.pollTimer.cancel();
+    this.cloudPollSchedule = undefined;
     this.schedulePoll();
   }
 
@@ -2384,6 +2682,7 @@ export class EufyMega extends EventEmitter {
    */
   private async pollOnce(epoch = this.realtimeEpoch): Promise<void> {
     const revision = this.realtimeReportRevision;
+    if (epoch === this.realtimeEpoch) this.cloudPollInFlight++;
     try {
       const diff = await this.registry.pollChanges();
       this.reconcileStorageTelemetryOwners();
@@ -2407,6 +2706,8 @@ export class EufyMega extends EventEmitter {
         this.scheduleStateRefresh(generation, true);
     } catch (e) {
       this.reportError(e, "cloud_poll");
+    } finally {
+      if (epoch === this.realtimeEpoch) this.cloudPollInFlight = Math.max(0, this.cloudPollInFlight - 1);
     }
   }
 
@@ -3014,17 +3315,184 @@ export class EufyMega extends EventEmitter {
    * ```
    */
   async setProperty(sn: string, name: string, value: boolean | number | string): Promise<void> {
-    // WRITE path. Every property resolves through the
-    // capability modules: the module picks the right command variant for THIS device (JSON control
-    // vs direct-binary vs burst, which param id), and the sink routes it to the transport
-    // (HomeBase-vs-standalone handled downstream). No cascade. P2P write is fire-and-forget, so a
-    // missing recipe must throw, not silently no-op.
-    const ctx = await this.commandContext(sn);
-    const cmd = buildCapabilityCommand(name, value, ctx);
-    // No module produced a command for this (device, action) â†’ the device doesn't support it.
-    // Throw instead of silently no-op'ing (the P2P write path is fire-and-forget).
-    if (!cmd) throw new CapabilityNotSupportedError(sn, name);
-    await this.commandSinkFor(sn).dispatch(cmd);
+    await this.executeProperty(sn, name, value);
+  }
+
+  /** Execute one property invocation and return its own immutable transport receipt. */
+  async setPropertyWithReceipt(
+    sn: string,
+    name: string,
+    value: boolean | number | string,
+    options: PropertyExecutionOptions = {},
+  ): Promise<CommandReceipt> {
+    return this.executeProperty(sn, name, value, options);
+  }
+
+  /** Passive local automatic-send permission; neither a read nor proof of device availability. */
+  propertyCommandHealth(sn: string, property: string) {
+    return this.commandHealth.status(sn, property);
+  }
+
+  /** Verify a current observation; explicit resume permits fresh session acquisition without replay. */
+  async confirmLateContraryEffect(
+    sn: string,
+    intent: number,
+    options: { signal?: AbortSignal; resumeSession?: boolean } = {},
+  ) {
+    return this.lateContrary.confirm(sn, intent, options.signal, options.resumeSession === true);
+  }
+
+  /** Release socket-owned observation without creating a command or acquiring a session. */
+  cancelLateContraryEffect(sn: string, intent: number): void {
+    this.lateContrary.cancel(sn, intent);
+  }
+
+  /** Preparation and dispatch share invocation ordering and one frozen profile lifetime. */
+  private async executeProperty(
+    sn: string,
+    name: string,
+    value: boolean | number | string,
+    options?: PropertyExecutionOptions,
+  ): Promise<CommandReceipt> {
+    const ordinal = this.commandIntents.allocate();
+    const bornAtMs = performance.now();
+    const wallAtEntry = Date.now();
+    const invocation: PropertyInvocation = { ordinal, receiptRequested: options !== undefined };
+    const terminal = (status: CommandReceipt["status"]): CommandReceipt =>
+      invocation.execution
+        ? this.rtc.recordUnsentReceipt(status, invocation.execution)
+        : Object.freeze({ status, sendAttempted: false, effect: "unconfirmed", intent: ordinal });
+    if (options?.profile !== undefined && options.profile !== "bounded-state-v1") return terminal("validation_failed");
+    if (options?.automatic !== undefined && typeof options.automatic !== "boolean")
+      return terminal("validation_failed");
+    if ((options?.automatic === true || options?.correction === true) && options?.profile !== "bounded-state-v1")
+      return terminal("validation_failed");
+    if (
+      options?.correctionExpiresAtMs !== undefined &&
+      (options.correction !== true ||
+        options.profile !== "bounded-state-v1" ||
+        !Number.isFinite(options.correctionExpiresAtMs) ||
+        options.correctionExpiresAtMs <= 0 ||
+        options.correctionExpiresAtMs > wallAtEntry + 600_000)
+    )
+      return terminal("validation_failed");
+    let controller: AbortController | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let rejectPreparation: (() => void) | undefined;
+    const epoch = this.realtimeEpoch;
+    if (options?.profile) {
+      const remaining = options.remainingBudgetMs ?? 72_000;
+      const expiry = options.callerExpiresAtMs ?? wallAtEntry + remaining;
+      const uncertainty = options.clockUncertaintyMs ?? 0;
+      if (
+        ![remaining, expiry, uncertainty].every(Number.isFinite) ||
+        remaining <= 0 ||
+        remaining > Number.MAX_SAFE_INTEGER ||
+        expiry <= 0 ||
+        expiry > Number.MAX_SAFE_INTEGER ||
+        uncertainty < 0 ||
+        uncertainty > 1_000
+      )
+        return terminal("validation_failed");
+      const totalByMs = bornAtMs + Math.min(72_000, remaining, expiry - wallAtEntry - uncertainty);
+      invocation.execution = {
+        profile: options.profile,
+        bornAtMs,
+        sendByMs: Math.min(
+          bornAtMs + 60_000,
+          totalByMs - 12_000,
+          bornAtMs + (options.correctionExpiresAtMs ?? Infinity) - wallAtEntry - uncertainty,
+          options.correctionExpiresAtMs === undefined
+            ? Infinity
+            : (this.lateContrary.correctionDeadline(sn, value) ?? bornAtMs),
+        ),
+        totalByMs,
+        wallExpiresAtMs: Math.min(expiry, options.correctionExpiresAtMs ?? Infinity),
+        clockUncertaintyMs: uncertainty,
+        wallOffsetMs: wallAtEntry - bornAtMs,
+        intent: ordinal,
+        origin: options.correction === true ? "correction" : "caller",
+        automatic: options.automatic === true || options.correction === true,
+      };
+      if (this.propertyPreparations.size >= 1_024) return terminal("queue_full");
+      if (invocation.execution.sendByMs <= bornAtMs) return terminal("expired_before_send");
+      controller = new AbortController();
+      this.propertyPreparations.add(controller);
+      invocation.execution = {
+        ...invocation.execution,
+        signal: options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
+      };
+    }
+    try {
+      invocation.execution?.signal?.throwIfAborted();
+      const preparation = this.commandContext(sn);
+      const ctx = invocation.execution
+        ? await Promise.race([
+            preparation,
+            new Promise<never>((_, reject) => {
+              rejectPreparation = () => reject(new Error("command preparation cancelled"));
+              invocation.execution!.signal!.addEventListener("abort", rejectPreparation, { once: true });
+              timer = setTimeout(
+                () => reject(new Error("command preparation expired")),
+                Math.max(0, invocation.execution!.sendByMs - performance.now()),
+              );
+            }),
+          ])
+        : await preparation;
+      clearTimeout(timer);
+      if (rejectPreparation) invocation.execution?.signal?.removeEventListener("abort", rejectPreparation);
+      if (epoch !== this.realtimeEpoch) {
+        if (options?.profile) return terminal("closed_before_send");
+        throw new Error("command preparation interrupted");
+      }
+      invocation.execution?.signal?.throwIfAborted();
+      if (invocation.execution && performance.now() >= invocation.execution.sendByMs)
+        return terminal("expired_before_send");
+      const cmd = buildCapabilityCommand(name, value, ctx);
+      if (!cmd) throw new CapabilityNotSupportedError(sn, name);
+      if (invocation.execution) {
+        const observation = commandObservation(cmd);
+        if (
+          !this.rtcDevice(sn) ||
+          !observation?.replaceableState ||
+          !observation.lateEffectReadback ||
+          !observation.passiveReadback ||
+          typeof value !== "boolean"
+        )
+          return terminal("validation_failed");
+        invocation.execution = { ...invocation.execution, preparationWaitMs: performance.now() - bornAtMs };
+      }
+      if (options?.correction === true) this.lateContrary.prepareCorrection(sn, ordinal, value);
+      await this.commandSinkFor(sn, invocation).dispatch(cmd);
+      return (
+        invocation.receipt ??
+        Object.freeze({ status: "acknowledged", sendAttempted: true, effect: "unconfirmed", intent: ordinal })
+      );
+    } catch (error) {
+      if (!options?.profile) throw error;
+      if (invocation.transportAttempted)
+        return Object.freeze({
+          status:
+            epoch !== this.realtimeEpoch
+              ? "closed_after_send"
+              : invocation.execution?.signal?.aborted
+                ? "cancelled_after_send"
+                : "ack_timeout",
+          sendAttempted: true,
+          effect: "unknown",
+          intent: ordinal,
+        });
+      if (epoch !== this.realtimeEpoch) return terminal("closed_before_send");
+      if (invocation.execution?.signal?.aborted) return terminal("cancelled_before_send");
+      if (invocation.execution && performance.now() >= invocation.execution.sendByMs)
+        return terminal("expired_before_send");
+      return terminal("validation_failed");
+    } finally {
+      this.lateContrary.finishCorrection(sn, ordinal);
+      clearTimeout(timer);
+      if (rejectPreparation) invocation.execution?.signal?.removeEventListener("abort", rejectPreparation);
+      if (controller) this.propertyPreparations.delete(controller);
+    }
   }
 
   /**
@@ -3088,6 +3556,23 @@ export class EufyMega extends EventEmitter {
     const stationSn = dev.stationSn || dev.sn;
     const station = stationSn !== dev.sn ? this.registry.list().find((entry) => entry.sn === stationSn) : undefined;
     return { stationDeviceType: cachedDeviceType(station), stationModel: station?.model };
+  }
+
+  /** Refresh held manifests after any roster load, including loads initiated by a per-device read. */
+  private reconcileStationContexts(): void {
+    const roster = new Map(this.registry.list().map((cached) => [cached.sn, cached]));
+    for (const held of this.stationContextDevices) {
+      const dev = held.deref();
+      if (!dev) {
+        this.stationContextDevices.delete(held);
+        continue;
+      }
+      const cached = roster.get(dev.sn);
+      if (!cached) continue;
+      const station = stationOf(cached);
+      if (dev.stationSn !== station) dev.reresolve({ parentSn: station === cached.sn ? "" : station });
+      dev.setStationContext(this.parentStationContext(cached));
+    }
   }
 
   /** The same context derivation for fetched records and cached polls; this half performs no I/O. */
@@ -3157,6 +3642,7 @@ export class EufyMega extends EventEmitter {
       deviceSn: ev.deviceSn,
       stationSn: ev.stationSn,
       thumbnailUrl: ev.thumbnailUrl,
+      deliveryId: ev.raw?.persistentId,
       payload: ev.payload as Record<string, unknown>,
     };
     const outputs = decodeCapabilityEvent(signal, this.capsForEvent(ev.deviceSn));
@@ -3294,8 +3780,14 @@ export class EufyMega extends EventEmitter {
    * (call {@link login} again to reconnect without re-authenticating).
    */
   async disconnect(): Promise<void> {
+    for (const controller of this.propertyPreparations) controller.abort();
+    this.propertyPreparations.clear();
+    this.commandIntents.close();
     this.realtimeEpoch++;
+    this.cloudPollInFlight = 0;
+    this.lateContrary.close();
     this.lateEffects.close();
+    this.commandHealth.close();
     for (const sn of [...this.storageTelemetryOwners.keys()]) this.invalidateStorageTelemetryOwner(sn);
     this.stateRefreshEvidence = emptyStateRefreshEvidence();
     this.eventRoutingRecorder = new EventRoutingRecorder();
@@ -3341,6 +3833,7 @@ export class EufyMega extends EventEmitter {
    */
   private async teardownRealtime(): Promise<void> {
     this.pollTimer.cancel();
+    this.cloudPollSchedule = undefined;
     this.stateRefreshTimer.cancel();
     for (const entry of this.reportRefreshes.values()) clearTimeout(entry.timer);
     this.reportRefreshes.clear();

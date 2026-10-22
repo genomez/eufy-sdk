@@ -1,7 +1,7 @@
 /** Modified for genomez S1 experimental source preview, 2026-10-16. */
 import { asBool, clamp } from "../../core/util.js";
 import { DeviceType } from "../device-types.js";
-import { isFloodLight, WALL_LIGHT_TYPES } from "../device-family.js";
+import { isFloodLight, isStation9000, WALL_LIGHT_TYPES } from "../device-family.js";
 import { setScalar, setJson, setPayload, describeDevice } from "./access.js";
 import type { CapabilityModule, CapabilityActions, CommandContext } from "./types.js";
 import { memberWrite, propertiesOf, type Members, type Surface, type MemberDeps } from "./members.js";
@@ -296,11 +296,16 @@ export const LIGHT_MEMBERS = {
               expected: asBool(value) ? 1 : 0,
               observed: asBool(value),
               lateEffectReadback: isFloodLight(ctx),
+              replaceableState: isFloodLight(ctx),
             }
           : undefined,
       timeoutMs: 20_000,
     },
     write: (v, ctx) => switchFrame(asBool(v), ctx),
+    boundedStateWrites: (ctx) =>
+      isFloodLight(ctx) &&
+      isStation9000({ deviceType: ctx.stationDeviceType, model: ctx.stationModel }) &&
+      (ctx.paramIds?.has(LIGHT_CMD.FLOODLIGHT_SWITCH) ?? false),
     writeAs: "set",
     aliases: { on: true, off: false },
   },

@@ -11,6 +11,7 @@
  *
  * @module p2p/live-trace
  */
+import type { LiveStreamStartFailureReason, LiveStreamStartStage } from "../../core/contracts.js";
 import type { Logger } from "../../core/logger.js";
 
 /** The message every startup trace is logged under. */
@@ -161,7 +162,26 @@ export type LiveTrace =
    * Media still arriving means this never fires, so a picture that stopped advancing while this is silent
    * stopped for a reason upstream of the station's attention.
    */
-  | { phase: "channel-silent"; silentMs: number; outcome: "reasserted" | "declined" };
+  | { phase: "channel-silent"; silentMs: number; outcome: "reasserted" | "declined" }
+  /**
+   * A failed start's typed facts. `errorName` is restricted to standard JavaScript error names;
+   * arbitrary names, messages, stacks and causes are never carried.
+   */
+  | {
+      phase: "start-failed";
+      reason: LiveStreamStartFailureReason;
+      stage: LiveStreamStartStage;
+      attempts: number;
+      errorName?:
+        | "Error"
+        | "EvalError"
+        | "RangeError"
+        | "ReferenceError"
+        | "SyntaxError"
+        | "TypeError"
+        | "URIError"
+        | "AggregateError";
+    };
 
 /**
  * Record one startup observation at debug level.

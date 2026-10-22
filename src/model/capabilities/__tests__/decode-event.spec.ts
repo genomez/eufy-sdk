@@ -18,6 +18,25 @@ describe("decodeEvent — unified inbound dispatch", () => {
       expect(push(3103)[0]).toMatchObject({ event: "doorbellPress" });
     });
 
+    it.each([
+      [{ unique_id: "press-one", session_id: "session-one" }, "delivery-one", "unique:press-one"],
+      [{ session_id: "session-one" }, "delivery-one", "session:session-one"],
+      [{}, "delivery-one", "delivery:delivery-one"],
+      [{ unique_id: " ", session_id: "session-one" }, undefined, "session:session-one"],
+      [{ eventId: "unqualified" }, undefined, undefined],
+      [{ unique_id: 1, session_id: "" }, undefined, undefined],
+    ])("normalizes doorbell source identity without using receipt time: %j", (payload, deliveryId, eventId) => {
+      expect(push(3103, { payload, deliveryId })[0].payload.eventId).toBe(eventId);
+    });
+
+    it("preserves distinct rapid press identities and repeated delivery identity", () => {
+      const first = push(3103, { payload: { unique_id: "press-one" } })[0].payload.eventId;
+      const second = push(3103, { payload: { unique_id: "press-two" } })[0].payload.eventId;
+      const repeat = push(3103, { payload: { unique_id: "press-one", thumbnail: "updated" } })[0].payload.eventId;
+      expect(first).not.toBe(second);
+      expect(repeat).toBe(first);
+    });
+
     it("face (3102) → personDetected", () => {
       expect(push(3102)[0]).toMatchObject({ event: "personDetected" });
     });

@@ -162,6 +162,8 @@ function deviceClassOf(codec: Codec, realtime: RealtimeKind): DeviceClass {
 
 export interface DeviceRegistryDeps {
   mega: MegaHttpClient;
+  /** Synchronous notification after a refreshed roster and its topology caches are installed. */
+  onRoster?: () => void;
   /** Surface a non-fatal fetch error (a house/body query that failed) without aborting the merge. */
   onError: (e: unknown) => void;
   /** Diagnostics sink for facts that are NOT errors — see the owner-gated overlay note on {@link DeviceRegistry.record}. */
@@ -182,6 +184,7 @@ export class DeviceRegistry {
   private readonly mega: MegaHttpClient;
   private readonly onError: (e: unknown) => void;
   private readonly logger: Logger;
+  private readonly onRoster?: () => void;
   private devices: EufyDevice[] = [];
   /** Conflicting duplicate topology cannot be made safe by the ordinary last-row merge. */
   private inventoryConflicts = new Set<string>();
@@ -239,6 +242,7 @@ export class DeviceRegistry {
     this.mega = deps.mega;
     this.onError = deps.onError;
     this.logger = deps.logger ?? noopLogger;
+    this.onRoster = deps.onRoster;
   }
 
   /** The current device cache (last {@link getDevices} result). */
@@ -344,6 +348,7 @@ export class DeviceRegistry {
     // capability resolution, so a refresh can legitimately change a device's capability set.
     this.frameCapsCache.clear();
     this.deviceCapsCache.clear();
+    this.onRoster?.();
     return this.devices;
   }
 

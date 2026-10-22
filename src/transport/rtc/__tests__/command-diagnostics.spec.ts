@@ -109,3 +109,46 @@ describe("control evidence retention", () => {
     expect(commandOutcome(new Error(message))).toBe(outcome);
   });
 });
+
+describe("queue wait evidence", () => {
+  it("charges terminal queued attempts once into fixed detached histogram bins", () => {
+    const recorder = new CommandEvidenceRecorder(() => 100);
+    const waits = [100, 1000, 5000, 15000, 60000, 60001];
+    for (const value of waits) {
+      const row = recorder.begin("synthetic-target", "attached", 1400, 1700);
+      row.queueWaitMs = value;
+      recorder.finish(row, "expired_before_send");
+      recorder.finish(row, "expired_before_send");
+    }
+    const snapshot = recorder.snapshot();
+    expect(snapshot.queueWait).toEqual({
+      observations: 6,
+      totalMs: waits.reduce((sum, value) => sum + value, 0),
+      maxMs: 60001,
+      lastMs: 60001,
+      le100: 1,
+      le1000: 1,
+      le5000: 1,
+      le15000: 1,
+      le60000: 1,
+      gt60000: 1,
+    });
+    snapshot.queueWait.observations = 999;
+    expect(recorder.snapshot().queueWait.observations).toBe(6);
+    expect(recorder.snapshot().completed).toBe(6);
+  });
+
+  it("leaves preparation-only queue wait unknown and never counts it as zero", () => {
+    const recorder = new CommandEvidenceRecorder(() => 100);
+    const row = recorder.begin("synthetic-target", "attached", 0, 1700);
+    recorder.finish(row, "cancelled_before_send");
+    expect(recorder.snapshot().recent[0]).toMatchObject({
+      queueWaitMs: null,
+      sendAttempted: false,
+      sendAttemptedAtMs: null,
+      admissionRemainingAtSendMs: null,
+      totalRemainingAtSendMs: null,
+    });
+    expect(recorder.snapshot().queueWait.observations).toBe(0);
+  });
+});

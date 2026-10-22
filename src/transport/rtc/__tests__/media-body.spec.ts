@@ -261,7 +261,7 @@ describe("RtcLive canonical media bodies", () => {
     emit(body(idr, { declared: idr.length + 1, frameType: 1 }));
     emit(body(delta, { frameType: 1 }));
     expect(frames).toHaveLength(0);
-    vi.advanceTimersByTime(4999);
+    vi.advanceTimersByTime(14999);
     expect(live.active).toBe(true);
     vi.advanceTimersByTime(1);
     expect(errors).toHaveLength(1);
