@@ -3,7 +3,7 @@
   "acceptedMonorepoCommit": "6deea127459f368edb24d7d3df59dcaf60d5b508",
   "publicBaseCommit": "249eccef7f226e653f3745032d128465f8f7dbdf",
   "version": "0.2.1-s1.experimental.7",
-  "status": "prepared-locally-unpublished",
+  "status": "published-source-delivery",
   "files": {
     ".editorconfig": {
       "bytes": 487,
@@ -46,8 +46,8 @@
       "sha256": "b3e79451e7c4e4006600d8c203218d2cdf90cd3fa8522c5af37f6b82c0336e86"
     },
     "EXPERIMENTAL.md": {
-      "bytes": 10253,
-      "sha256": "3fd1100fa0a75274eca3a05b8a39a6218e4d4143b287cadbf3f7cd7b38af441f"
+      "bytes": 10410,
+      "sha256": "a37cdaec4912bd442da82c6748394d0499c9356052b6d0d3c4e6d79c47b86e05"
     },
     "LICENSE": {
       "bytes": 11339,
@@ -58,12 +58,12 @@
       "sha256": "65b0e6fc36defe056da97a58f85033f6887d72515319bc8b410d2eb5738004ed"
     },
     "PUBLICATION.json": {
-      "bytes": 2593,
-      "sha256": "f2cfa52d23306e3d6e1acc1b250c83f07a8dfb07e2ffb9b7ffaf3311b8d42304"
+      "bytes": 3491,
+      "sha256": "6d4ea4311bd6a513e7d26e900fa5fa7b453d70c581144f40be5962e9b9bb2cd4"
     },
     "README.md": {
-      "bytes": 4810,
-      "sha256": "c0aa9b63a8ed9003b5a8c620dbd527483fdaa2ad1b60d4aedf592f86ec2129b3"
+      "bytes": 4967,
+      "sha256": "015815bbb71b76eb1049d0403fbba276ba16aab2f937380be873ea2a774e503f"
     },
     "docs/architecture.md": {
       "bytes": 7091,
@@ -2181,5 +2181,6 @@
       "bytes": 892,
       "sha256": "6dca24173ddebbfac4b47e287c782122e6f1f7817555d78e82f4a870b4c96082"
     }
-  }
+  },
+  "preparationRecordsHistorical": true
 }
