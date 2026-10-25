@@ -137,7 +137,8 @@ export function isHevcKeyframe(annexB: Buffer): boolean {
 
 /**
  * One consumer of a {@link RtcLive}: the shape `openReadableFromConsumer` and `MediaProvider.live` want.
- * Frames are HEVC Annex B; a consumer starts on the first keyframe and, after a pause, resumes on the next.
+ * Frames are HEVC Annex B; a consumer starts on the first live keyframe after video subscription and,
+ * after a pause, resumes on the next. A transition from no video listeners rearms the keyframe gate.
  */
 export class RtcLiveConsumer extends EventEmitter implements LiveStreamConsumer {
   awaitingKeyframe = true;
@@ -146,6 +147,28 @@ export class RtcLiveConsumer extends EventEmitter implements LiveStreamConsumer 
 
   constructor(private readonly owner: RtcLive) {
     super();
+  }
+
+  /** A first video subscription waits for a live keyframe, including after listener removal. */
+  override on(...args: Parameters<EventEmitter["on"]>): this {
+    this.rearmVideoSubscription(args[0]);
+    return super.on(...args);
+  }
+
+  /** Register through the same video gate as {@link on}. */
+  override addListener(...args: Parameters<EventEmitter["addListener"]>): this {
+    return this.on(...args);
+  }
+
+  /** Prepended video subscriptions obey the same keyframe gate as {@link on}. */
+  override prependListener(...args: Parameters<EventEmitter["prependListener"]>): this {
+    this.rearmVideoSubscription(args[0]);
+    return super.prependListener(...args);
+  }
+
+  /** Rearm only a transition from no video listeners; other event subscriptions leave media untouched. */
+  private rearmVideoSubscription(event: string | symbol): void {
+    if (event === "video" && this.listenerCount("video") === 0) this.awaitingKeyframe = true;
   }
 
   get primed(): boolean {
@@ -184,7 +207,7 @@ export class RtcLiveConsumer extends EventEmitter implements LiveStreamConsumer 
 
   /** @internal */
   deliver(frame: LiveVideoFrame): void {
-    if (this.detached || this.paused) return;
+    if (this.detached || this.paused || this.listenerCount("video") === 0) return;
     if (this.awaitingKeyframe) {
       if (!frame.keyframe) return;
       this.awaitingKeyframe = false;
@@ -215,6 +238,8 @@ export interface RtcLiveOptions {
   accountId: string;
   /** Called when the last consumer leaves and the live has been stopped. */
   onIdle?: () => void;
+  /** Decoded ingress before any consumer delivery; cached frames never call this. */
+  onSourceMedia?: () => void;
   logger?: Logger;
   keepaliveMs?: number;
 }
@@ -233,6 +258,7 @@ export class RtcLive {
   private readonly onCmd = (frame: Buffer, linkType: number) => this.onCommandFrame(frame, linkType);
   private startSegment = -1;
   private startAcked = false;
+  private contactAcked = false;
   private strayLogged = 0;
   private width = 0;
   private height = 0;
@@ -282,6 +308,7 @@ export class RtcLive {
     session.on("close", this.onClose);
     this.startSegment = seg.next();
     this.startAcked = false;
+    this.contactAcked = false;
     this.strayLogged = 0;
     this.parameterSets = { codec: "h265", vps: [], sps: [], pps: [] };
     this.firstFrame = setTimeout(() => {
@@ -356,6 +383,7 @@ export class RtcLive {
       frame.length >= PORTAL_HEADER_LENGTH + 4 &&
       header.paramLength >= 4
     ) {
+      if (p.errCode === 0) this.contactAcked = true;
       if (this.startAcked || !this.firstFrame) return;
       this.startAcked = true;
       this.opts.logger?.info?.(`${tag} live start acked err=${p.errCode ?? 0}`);
@@ -388,6 +416,11 @@ export class RtcLive {
     if (video.width > 0 && video.height > 0) {
       this.width = video.width;
       this.height = video.height;
+    }
+    if (this.contactAcked) {
+      try {
+        this.opts.onSourceMedia?.();
+      } catch {}
     }
     const data = video.data;
     const sets = this.retainParameterSets(data);

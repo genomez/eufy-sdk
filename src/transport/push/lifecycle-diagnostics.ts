@@ -5,6 +5,7 @@ export type PushLifecycleEvent =
   | "login_accepted"
   | "login_rejected"
   | "server_close"
+  | "frame_parse_failed"
   | "socket_error"
   | "socket_closed"
   | "reconnect_scheduled"

@@ -161,7 +161,7 @@ function autoSpotlightCommand(on: boolean, ctx: CommandContext, opts: AutoSpotli
  * a confirmed exchange:
  *  - `"json"`: JSON control-payload (`{commandType:1400,data:{time,type,value}}` under 1700) —
  *    FLOODLIGHT_8425/8426, wall-light cams, indoor pan/tilt (31/35) and CAMERA_4G_S330.
- *  - `"int-string"`: level-1 int+string — indoor/outdoor 1080p/2K siblings, outdoor-PT/solo-E30,
+ *  - `"int-string"`: level-1 int+string — indoor/outdoor 1080p/2K siblings, outdoor-PT,
  *    and the Cam2C/Cam2/Cam3 families.
  * NOTE: this is FRAME SHAPE only, not encryption LEVEL. The level (L1 vs L2) is a runtime topology
  * trait resolved at send time — never fixed by family here. The switch shape happens to be L1 for
@@ -197,7 +197,6 @@ const LIGHT_SWITCH_INT_STRING_TYPES: ReadonlySet<number> = new Set<number>([
   DeviceType.INDOOR_OUTDOOR_CAMERA_2K,
   DeviceType.INDOOR_OUTDOOR_CAMERA_1080P,
   DeviceType.OUTDOOR_PT_CAMERA,
-  DeviceType.SOLO_CAMERA_E30,
   DeviceType.CAMERA2C,
   DeviceType.CAMERA2,
   DeviceType.CAMERA2_PRO,
@@ -395,7 +394,9 @@ export const LIGHT: CapabilityModule = {
   // status LED, on every camera; it belongs to `camera`). Params: floodlight switch 1400, spotlight
   // brightness/enable 1401/1403, indoor-spot enable/bright 6080/6082. Plus explicit light model names.
   detection: {
-    evidenceParams: [1400, 1401, 1403, 6080, 6082, 1413],
+    detect: (record) =>
+      record.model !== "T8171" &&
+      [1400, 1401, 1403, 6080, 6082, 1413].some((param) => Object.hasOwn(record.params ?? {}, param)),
     modelHints: [/floodlight|wall.?light|spot.?light|search.?light/i],
   },
   /**

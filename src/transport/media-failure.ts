@@ -73,7 +73,7 @@ export interface MediaFailure {
  *
  * Read off an unknown error and checked against {@link MEDIA_FAILURE_REASONS} rather than trusted: the
  * downloader is injected, so its errors are whatever the caller's implementation throws, and the one
- * thing that must never reach a log line here is a message someone else wrote â€” a media URL is signed,
+ * thing that must never reach a log line here is a message someone else wrote — a media URL is signed,
  * and a failure often quotes the response. A term this SDK defines is safe by construction; anything
  * else is dropped, leaving the log exactly as uninformative as it was before.
  */

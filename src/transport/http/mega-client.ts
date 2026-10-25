@@ -32,6 +32,13 @@ import type { SecureMqttCredentials } from "../mqtt/secure-mqtt.js";
 import { downloadMediaResource, mediaFailureError, MediaDownloadAuthenticationError } from "./media-download.js";
 import { randomPhoneModel, randomUserAgent } from "./phone-model.js";
 import { normalizePushImage } from "./decodeImageV1.js";
+import { CloudHttpRecorder, type CloudHttpDiagnostics, type CloudHttpEvidence } from "./cloud-http-diagnostics.js";
+export type {
+  CloudHttpDiagnostics,
+  CloudHttpEvidence,
+  CloudHttpCategory,
+  CloudHttpStatusClass,
+} from "./cloud-http-diagnostics.js";
 
 export type RegionShard = "eu-pr" | "us-pr";
 
@@ -325,6 +332,7 @@ export interface SignedRetry {
  * @internal
  */
 export class MegaHttpClient {
+  private readonly cloudHttpRecorder = new CloudHttpRecorder();
   private readonly cfg: Required<Pick<MegaClientConfig, "appName" | "appVersion" | "countryCode">> & MegaClientConfig;
   private region: RegionShard;
   /** The host `estimate_domain` answered, kept for the RTC shard derivation. */
@@ -546,6 +554,11 @@ export class MegaHttpClient {
     };
   }
 
+  /** Sanitized physical POST observations, including body reads; envelope errors are outside this boundary. */
+  getCloudHttpDiagnostics(): CloudHttpDiagnostics {
+    return this.cloudHttpRecorder.diagnostics();
+  }
+
   /**
    * POST returning an axios-shaped `{status, data}` — `data` is JSON-parsed when possible, else the
    * raw text. Never throws on HTTP status (the callers classify the envelope themselves). 20s timeout.
@@ -555,13 +568,31 @@ export class MegaHttpClient {
     body: string | object,
     headers: Record<string, string>,
   ): Promise<{ status: number; data: unknown }> {
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: typeof body === "string" ? body : JSON.stringify(body),
-      signal: AbortSignal.timeout(20_000),
-    });
-    return { status: res.status, data: parseMaybeJson(await res.text()) };
+    const finish = this.cloudHttpRecorder.begin(url);
+    let status: number | undefined;
+    let failure: CloudHttpEvidence["failure"] = "request";
+    let timeout = false;
+    let signal: AbortSignal | undefined;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: typeof body === "string" ? body : JSON.stringify(body),
+        signal: (signal = AbortSignal.timeout(20_000)),
+      });
+      status = res.status;
+      failure = "body_read";
+      const data = parseMaybeJson(await res.text());
+      failure = status < 200 || status >= 300 ? "http_status" : "none";
+      return { status, data };
+    } catch (error) {
+      timeout =
+        (error instanceof Error && error.name === "TimeoutError") ||
+        (signal?.aborted === true && signal.reason instanceof Error && signal.reason.name === "TimeoutError");
+      throw error;
+    } finally {
+      finish(status, failure, timeout);
+    }
   }
 
   /** Step 1: discover the account's region shard (and the bootstrap host). */

@@ -1,5 +1,7 @@
 /** Modified for genomez S1 experimental source preview, 2026-10-14. */
 import { connectionDeadline } from "../../transport/rtc/connection-deadline.js";
+import { EventEmitter } from "node:events";
+import { performance } from "node:perf_hooks";
 import { markRetiredInformationRead } from "../../transport/rtc/retired-information-read.js";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EufyMega } from "../eufy-mega.js";
@@ -968,6 +970,7 @@ describe("generation-owned RTC state refresh", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
   });
   afterEach(() => vi.useRealTimers());
 
@@ -1054,7 +1057,7 @@ describe("generation-owned RTC state refresh", () => {
     await eufy.disconnect();
   });
 
-  it("a successful cloud sweep supersedes the pending fast timer", async () => {
+  it("a successful cloud sweep supersedes the pending retired-session timer", async () => {
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     eufy.on("error", () => {});
     await (eufy as any).ensureRealtime();
@@ -1079,10 +1082,449 @@ describe("generation-owned RTC state refresh", () => {
     await (eufy as any).ensureRealtime();
     const error = retiredFailure();
     refresh.mockRejectedValueOnce(error);
-    await vi.advanceTimersByTimeAsync(32_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     refresh.mockRejectedValueOnce(error);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(eufy.getStateRefreshDiagnostics().schedules.at(-1)?.delayMs).toBe(60_000);
+    await eufy.disconnect();
+  });
+
+  it("exposes threshold retry deadlines and doubles through a five-minute cap", async () => {
+    const { eufy, refresh } = await reachThirdDeadline();
+    for (const [index, delay] of [30_000, 60_000, 120_000, 240_000, 300_000, 300_000].entries()) {
+      const calls = refresh.mock.calls.length;
+      const diagnostic = eufy.getStateRefreshDiagnostics();
+      expect(diagnostic).toMatchObject({
+        retryAttempt: index + 1,
+        retryReason: "failure_backoff",
+        nextRetryAtMs: Date.now() + delay,
+        scheduledPaused: false,
+        inFlight: false,
+      });
+      diagnostic.nextRetryAtMs = 0;
+      expect(eufy.getStateRefreshDiagnostics().nextRetryAtMs).toBe(Date.now() + delay);
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(refresh).toHaveBeenCalledTimes(calls);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(refresh).toHaveBeenCalledTimes(calls + 1);
+    }
+    await eufy.disconnect();
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({
+      nextRetryAtMs: null,
+      retryAttempt: 0,
+      retryReason: null,
+    });
+  });
+
+  it.each([0.5, 0.999999])("adds bounded positive jitter below the cap: %s", async (random) => {
+    vi.mocked(Math.random).mockReturnValue(random);
+    vi.setSystemTime(0);
+    const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
+    eufy.on("error", () => {});
+    await (eufy as any).ensureRealtime();
+    refresh.mockRejectedValue(new Error("Synthetic read failure"));
+    await vi.advanceTimersByTimeAsync(210_000);
+    for (const base of [30_000, 60_000, 120_000, 240_000, 300_000]) {
+      const delay = Math.min(base + Math.floor(random * 1_001), 300_000);
+      const calls = refresh.mock.calls.length;
+      expect(eufy.getStateRefreshDiagnostics().nextRetryAtMs).toBe(Date.now() + delay);
+      await vi.advanceTimersByTimeAsync(delay - 1);
+      expect(refresh).toHaveBeenCalledTimes(calls);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(refresh).toHaveBeenCalledTimes(calls + 1);
+    }
+    await eufy.disconnect();
+  });
+
+  it("preserves a configured interval longer than the retry cap", async () => {
+    vi.setSystemTime(0);
+    const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 600_000 } });
+    eufy.on("error", () => {});
+    await (eufy as any).ensureRealtime();
+    refresh.mockRejectedValue(new Error("Synthetic read failure"));
+    await vi.advanceTimersByTimeAsync(1_800_000);
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ retryAttempt: 1, nextRetryAtMs: 2_400_000 });
+    await vi.advanceTimersByTimeAsync(599_999);
+    expect(refresh).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(refresh).toHaveBeenCalledTimes(5);
+    await eufy.disconnect();
+  });
+
+  it("joins a cloud-initiated in-flight sweep at the retry deadline and lets startup join it", async () => {
+    const { eufy, refresh } = await reachThirdDeadline();
+    let finish!: (value: typeof result) => void;
+    refresh.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+    const client = eufy as any;
+    const cloud = client.pollOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    const startup = client.refreshRealtimeStates(client.realtimeGeneration, "startup");
+    await vi.advanceTimersByTimeAsync(310_000);
+    expect(refresh).toHaveBeenCalledTimes(5);
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ inFlight: true, nextRetryAtMs: null });
+    finish(result);
+    await Promise.all([cloud, startup]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(eufy.getStateRefreshDiagnostics().recent.at(-1)).toMatchObject({
+      trigger: "cloud_poll",
+      scheduledJoins: 1,
+      startupJoins: 1,
+    });
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({
+      inFlight: false,
+      retryAttempt: 0,
+      retryReason: null,
+      nextRetryAtMs: null,
+    });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(refresh).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(refresh).toHaveBeenCalledTimes(6);
+    await eufy.disconnect();
+  });
+
+  it("a failed cloud sweep leaves the pending retry deadline intact", async () => {
+    const { eufy, refresh } = await reachThirdDeadline();
+    const due = eufy.getStateRefreshDiagnostics().nextRetryAtMs;
+    await vi.advanceTimersByTimeAsync(10_000);
+    await (eufy as any).pollOnce();
+    expect(refresh).toHaveBeenCalledTimes(5);
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ nextRetryAtMs: due, retryAttempt: 1 });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(refresh).toHaveBeenCalledTimes(6);
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ retryAttempt: 2 });
+    await eufy.disconnect();
+  });
+
+  it.each(["session_recovery", "station_active", "station_queued"])(
+    "yields a retry to existing RTC work: %s",
+    async (protection) => {
+      const { eufy, refresh } = await reachThirdDeadline();
+      const rtc = (eufy as any).rtc;
+      const renewal = rtc.getSessionRefreshDiagnostics();
+      const command = rtc.getCommandDiagnostics();
+      const renewalRead = vi
+        .spyOn(rtc, "getSessionRefreshDiagnostics")
+        .mockReturnValue({ ...renewal, attempts: protection === "session_recovery" ? 1 : 0 });
+      const commandRead = vi.spyOn(rtc, "getCommandDiagnostics").mockReturnValue({
+        ...command,
+        schedulerTotals: {
+          ...command.schedulerTotals,
+          active: protection === "station_active" ? 1 : 0,
+          queued: protection === "station_queued" ? 1 : 0,
+        },
+      });
+      const before = eufy.getStateRefreshDiagnostics();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(refresh).toHaveBeenCalledTimes(4);
+      expect(eufy.getStateRefreshDiagnostics()).toMatchObject({
+        attempts: before.attempts,
+        successes: before.successes,
+        failures: before.failures,
+        retryAttempt: 1,
+        nextRetryAtMs: Date.now() + 30_000,
+        retryReason: protection === "session_recovery" ? "session_recovery" : "station_work",
+      });
+      renewalRead.mockReturnValue(renewal);
+      commandRead.mockReturnValue(command);
+      refresh.mockResolvedValue(result);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(refresh).toHaveBeenCalledTimes(5);
+      expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ retryAttempt: 0, retryReason: null });
+      await eufy.disconnect();
+    },
+  );
+
+  it.each(["target", "unrelated"])(
+    "bounds sustained %s station work and uses the serialized read queue",
+    async (busy) => {
+      const { eufy, refresh } = await reachThirdDeadline();
+      const client = eufy as any;
+      const rtc = client.rtc;
+      vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+      const busyStation = busy === "target" ? station : second;
+      const owner = rtc.workOwner(busyStation);
+      let release!: () => void;
+      const active = owner.enqueue({
+        target: busyStation,
+        kind: "write",
+        sendByMs: performance.now() + 600_000,
+        run: () => new Promise<void>((resolve) => (release = resolve)),
+      });
+      const queued = owner.enqueue({
+        target: busyStation,
+        kind: "write",
+        sendByMs: performance.now() + 600_000,
+        run: async () => {},
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const session = Object.assign(new EventEmitter(), {
+        isConnected: false,
+        async connect() {
+          this.isConnected = true;
+          session.emit("connected");
+        },
+        close() {
+          this.isConnected = false;
+          session.emit("close");
+        },
+      });
+      rtc.deps.identity = () => ({ authToken: "synthetic", userId: "synthetic-member" });
+      rtc.deps.shard = () => "us-pr";
+      rtc.deps.createSession = () => session;
+      const exchange = vi.spyOn(rtc, "readInformation").mockResolvedValue({
+        notificationCorrelation: "temporal-only",
+        frame: {
+          commandId: 1103,
+          channel: 255,
+          segment: 1,
+          isResponse: 0,
+          linkType: 3,
+          data: { params: [{ channel: 255, param_type: 1224, param_value: 1 }] },
+        },
+      });
+      refresh.mockRestore();
+      const read = vi.spyOn(eufy, "refreshDeviceState");
+      const before = eufy.getStateRefreshDiagnostics();
+      for (let count = 1; count <= 2; count++) {
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(read).not.toHaveBeenCalled();
+        expect(client.realtimeGeneration.stateRefreshDeferrals).toEqual({ retryAttempt: 1, count });
+        expect(eufy.getStateRefreshDiagnostics()).toMatchObject({
+          attempts: before.attempts,
+          successes: before.successes,
+          failures: before.failures,
+          retryAttempt: 1,
+          retryReason: "station_work",
+          cloudPoll: { enabled: false, intervalMs: 0 },
+        });
+      }
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(read).toHaveBeenCalledExactlyOnceWith(station, {
+        signal: client.realtimeGeneration.abort.signal,
+        timeoutMs: 15_000,
+      });
+      expect(client.realtimeGeneration.stateRefreshDeferrals).toBeUndefined();
+      if (busy === "target") {
+        expect(exchange).not.toHaveBeenCalled();
+        expect(owner.snapshot()).toMatchObject({ active: 1, queued: 2 });
+        expect(eufy.getStateRefreshDiagnostics()).toMatchObject({
+          attempts: before.attempts + 1,
+          successes: before.successes,
+          failures: before.failures,
+          inFlight: true,
+        });
+      } else {
+        expect(exchange).toHaveBeenCalledTimes(1);
+        expect(owner.snapshot()).toMatchObject({ active: 1, queued: 1 });
+      }
+      release();
+      await Promise.all([active, queued]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(exchange).toHaveBeenCalledTimes(1);
+      expect(rtc.getCommandDiagnostics().schedulerTotals.readTurns).toBe(1);
+      expect(eufy.getStateRefreshDiagnostics()).toMatchObject({
+        successes: before.successes + 1,
+        failures: before.failures,
+        retryAttempt: 0,
+        nextRetryAtMs: null,
+        cloudPoll: { enabled: false, intervalMs: 0 },
+      });
+      expect(client.registry.pollChanges).not.toHaveBeenCalled();
+      await eufy.disconnect();
+    },
+  );
+
+  it("bounds an unfinished renewal without changing evidence until a real attempt", async () => {
+    const { eufy, refresh } = await reachThirdDeadline();
+    const client = eufy as any;
+    const renewal = client.rtc.getSessionRefreshDiagnostics();
+    vi.spyOn(client.rtc, "getSessionRefreshDiagnostics").mockReturnValue({ ...renewal, attempts: 1 });
+    const before = eufy.getStateRefreshDiagnostics();
+    for (let count = 1; count <= 4; count++) {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(refresh).toHaveBeenCalledTimes(4);
+      expect(client.realtimeGeneration.stateRefreshDeferrals).toEqual({ retryAttempt: 1, count });
+      expect(eufy.getStateRefreshDiagnostics()).toMatchObject({
+        attempts: before.attempts,
+        successes: before.successes,
+        failures: before.failures,
+        retryAttempt: 1,
+        retryReason: "session_recovery",
+      });
+    }
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(refresh).toHaveBeenCalledTimes(5);
+    expect(client.realtimeGeneration.stateRefreshDeferrals).toBeUndefined();
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({
+      attempts: before.attempts + 1,
+      successes: before.successes,
+      failures: before.failures + 1,
+      retryAttempt: 2,
+      cloudPoll: { enabled: false, intervalMs: 0 },
+    });
+    expect(client.registry.pollChanges).not.toHaveBeenCalled();
+    await eufy.disconnect();
+  });
+
+  it("shares a finite deferral count across alternating protection reasons", async () => {
+    const { eufy, refresh } = await reachThirdDeadline();
+    const rtc = (eufy as any).rtc;
+    const renewal = rtc.getSessionRefreshDiagnostics();
+    const command = rtc.getCommandDiagnostics();
+    const renewing = vi.spyOn(rtc, "getSessionRefreshDiagnostics");
+    vi.spyOn(rtc, "getCommandDiagnostics").mockReturnValue({
+      ...command,
+      schedulerTotals: { ...command.schedulerTotals, active: 1 },
+    });
+    for (const unfinished of [true, false, true, true]) {
+      renewing.mockReturnValue({ ...renewal, attempts: unfinished ? 1 : 0 });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(refresh).toHaveBeenCalledTimes(4);
+    }
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(refresh).toHaveBeenCalledTimes(5);
+    expect((eufy as any).registry.pollChanges).not.toHaveBeenCalled();
+    await eufy.disconnect();
+  });
+
+  it("renews the deferral allowance after a failed real attempt and after success", async () => {
+    const { eufy, refresh } = await reachThirdDeadline();
+    const client = eufy as any;
+    const command = client.rtc.getCommandDiagnostics();
+    vi.spyOn(client.rtc, "getCommandDiagnostics").mockReturnValue({
+      ...command,
+      schedulerTotals: { ...command.schedulerTotals, active: 1 },
+    });
+    for (const delay of [30_000, 60_000]) {
+      const calls = refresh.mock.calls.length;
+      for (let count = 1; count <= 2; count++) {
+        await vi.advanceTimersByTimeAsync(delay);
+        expect(refresh).toHaveBeenCalledTimes(calls);
+        expect(client.realtimeGeneration.stateRefreshDeferrals.count).toBe(count);
+      }
+      await vi.advanceTimersByTimeAsync(delay);
+      expect(refresh).toHaveBeenCalledTimes(calls + 1);
+      expect(client.realtimeGeneration.stateRefreshDeferrals).toBeUndefined();
+    }
+    refresh.mockResolvedValueOnce(result);
+    await vi.advanceTimersByTimeAsync(360_000);
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ retryAttempt: 0 });
+    expect(client.realtimeGeneration.stateRefreshDeferrals).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(210_000);
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ retryAttempt: 1 });
+    const calls = refresh.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(refresh).toHaveBeenCalledTimes(calls);
+    expect(client.realtimeGeneration.stateRefreshDeferrals).toEqual({ retryAttempt: 1, count: 2 });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(refresh).toHaveBeenCalledTimes(calls + 1);
+    expect(client.registry.pollChanges).not.toHaveBeenCalled();
+    await eufy.disconnect();
+  });
+
+  it.each([false, true])("a real cloud sweep clears deferrals (success: %s)", async (success) => {
+    const { eufy, refresh } = await reachThirdDeadline();
+    const client = eufy as any;
+    const command = client.rtc.getCommandDiagnostics();
+    vi.spyOn(client.rtc, "getCommandDiagnostics").mockReturnValue({
+      ...command,
+      schedulerTotals: { ...command.schedulerTotals, queued: 1 },
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(client.realtimeGeneration.stateRefreshDeferrals).toEqual({ retryAttempt: 1, count: 1 });
+    const due = eufy.getStateRefreshDiagnostics().nextRetryAtMs;
+    if (success) refresh.mockResolvedValueOnce(result);
+    await client.pollOnce();
+    expect(client.realtimeGeneration.stateRefreshDeferrals).toBeUndefined();
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ retryAttempt: success ? 0 : 1 });
+    if (success) await vi.advanceTimersByTimeAsync(210_000);
+    else expect(eufy.getStateRefreshDiagnostics().nextRetryAtMs).toBe(due);
+    const calls = refresh.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(refresh).toHaveBeenCalledTimes(calls);
+    expect(client.realtimeGeneration.stateRefreshDeferrals).toEqual({ retryAttempt: 1, count: 1 });
+    expect(eufy.getStateRefreshDiagnostics().cloudPoll).toMatchObject({ enabled: false, intervalMs: 0 });
+    expect(client.registry.pollChanges).toHaveBeenCalledTimes(1);
+    await eufy.disconnect();
+  });
+
+  it.each(["teardown", "disconnect", "epoch"])("does not retain deferrals after %s", async (end) => {
+    const { eufy, refresh } = await reachThirdDeadline();
+    const client = eufy as any;
+    const command = client.rtc.getCommandDiagnostics();
+    vi.spyOn(client.rtc, "getCommandDiagnostics").mockReturnValue({
+      ...command,
+      schedulerTotals: { ...command.schedulerTotals, active: 1 },
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    const old = client.realtimeGeneration;
+    expect(old.stateRefreshDeferrals).toEqual({ retryAttempt: 1, count: 2 });
+    if (end === "teardown") await client.teardownRealtime();
+    else if (end === "disconnect") await eufy.disconnect();
+    else client.realtimeEpoch++;
+    const calls = refresh.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(refresh).toHaveBeenCalledTimes(calls);
+    expect(client.stateRefreshTimer.pending).toBe(false);
+    if (end === "epoch") {
+      refresh.mockResolvedValueOnce(result);
+      await client.ensureRealtime();
+      expect(client.realtimeGeneration).not.toBe(old);
+      expect(client.realtimeGeneration.stateRefreshDeferrals).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(210_000);
+      expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ retryAttempt: 1 });
+      const attempts = refresh.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(refresh).toHaveBeenCalledTimes(attempts);
+      expect(client.realtimeGeneration.stateRefreshDeferrals).toEqual({ retryAttempt: 1, count: 2 });
+    } else expect(old.stateRefreshDeferrals).toBeUndefined();
+    await eufy.disconnect();
+  });
+
+  it.each([false, true])(
+    "teardown cancels backoff even without advancing the epoch (in flight: %s)",
+    async (inFlight) => {
+      const { eufy, refresh } = await reachThirdDeadline();
+      let finish!: (value: typeof result) => void;
+      if (inFlight) {
+        refresh.mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finish = resolve;
+            }),
+        );
+        await vi.advanceTimersByTimeAsync(30_000);
+      }
+      await (eufy as any).teardownRealtime();
+      expect(eufy.getStateRefreshDiagnostics().nextRetryAtMs).toBeNull();
+      if (inFlight) finish(result);
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(refresh).toHaveBeenCalledTimes(inFlight ? 5 : 4);
+      expect((eufy as any).stateRefreshTimer.pending).toBe(false);
+      await eufy.disconnect();
+    },
+  );
+
+  it("hides obsolete retry evidence and cannot fire after an epoch change", async () => {
+    const { eufy, refresh } = await reachThirdDeadline();
+    const client = eufy as any;
+    client.realtimeEpoch++;
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({
+      active: false,
+      nextRetryAtMs: null,
+      retryAttempt: 0,
+      retryReason: null,
+    });
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(refresh).toHaveBeenCalledTimes(4);
+    expect(client.stateRefreshTimer.pending).toBe(false);
     await eufy.disconnect();
   });
 
@@ -1095,12 +1537,12 @@ describe("generation-owned RTC state refresh", () => {
     state.refresh.mockImplementation(async () => {
       throw connectionDeadline(station, 12_000);
     });
-    await vi.advanceTimersByTimeAsync(152_000);
+    await vi.advanceTimersByTimeAsync(180_000);
     expect(state.refresh).toHaveBeenCalledTimes(4);
     return state;
   }
 
-  it("final connection-deadline probe recovers at normal cadence with no write, login or cloud replay", async () => {
+  it("connection-deadline backoff retry recovers at normal cadence with no write, login or cloud replay", async () => {
     const { eufy, refresh } = await reachThirdDeadline();
     const dispatch = vi.spyOn((eufy as any).rtc, "dispatchCommand");
     const login = vi.spyOn(eufy, "login");
@@ -1126,49 +1568,52 @@ describe("generation-owned RTC state refresh", () => {
     await eufy.disconnect();
   });
 
-  it("final connection-deadline probe adds at most one attempt during a sustained outage", async () => {
+  it("connection-deadline backoff retry continues bounded retries during a sustained outage", async () => {
     const { eufy, refresh } = await reachThirdDeadline();
     await vi.advanceTimersByTimeAsync(30_000);
     expect(refresh).toHaveBeenCalledTimes(5);
-    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ scheduledPaused: true, failures: 4 });
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ scheduledPaused: false, failures: 4, retryAttempt: 2 });
     expect(eufy.getStateRefreshDiagnostics().schedules.at(-1)).toMatchObject({
       consecutiveFailures: 4,
-      delayMs: null,
+      delayMs: 60_000,
     });
-    await vi.advanceTimersByTimeAsync(3_600_000);
-    expect(refresh).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(refresh).toHaveBeenCalledTimes(6);
     refresh.mockResolvedValue(result);
     await (eufy as any).pollOnce();
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(refresh).toHaveBeenCalledTimes(7);
+    expect(refresh).toHaveBeenCalledTimes(8);
     expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(false);
     await eufy.disconnect();
   });
 
-  it.each([false, true])("final connection-deadline probe cancels on disconnect (in flight: %s)", async (inFlight) => {
-    const { eufy, refresh } = await reachThirdDeadline();
-    let finish!: (value: typeof result) => void;
-    refresh.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-    );
-    await vi.advanceTimersByTimeAsync(inFlight ? 30_000 : 29_999);
-    if (inFlight) {
-      expect(refresh).toHaveBeenCalledTimes(5);
-      expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ inFlight: true, scheduledPaused: false });
-    }
-    await eufy.disconnect();
-    if (inFlight) {
-      expect(refresh.mock.calls[4]![1]!.signal!.aborted).toBe(true);
-      finish(result);
-    }
-    await vi.advanceTimersByTimeAsync(600_000);
-    expect(refresh).toHaveBeenCalledTimes(inFlight ? 5 : 4);
-  });
+  it.each([false, true])(
+    "connection-deadline backoff retry cancels on disconnect (in flight: %s)",
+    async (inFlight) => {
+      const { eufy, refresh } = await reachThirdDeadline();
+      let finish!: (value: typeof result) => void;
+      refresh.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      await vi.advanceTimersByTimeAsync(inFlight ? 30_000 : 29_999);
+      if (inFlight) {
+        expect(refresh).toHaveBeenCalledTimes(5);
+        expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ inFlight: true, scheduledPaused: false });
+      }
+      await eufy.disconnect();
+      if (inFlight) {
+        expect(refresh.mock.calls[4]![1]!.signal!.aborted).toBe(true);
+        finish(result);
+      }
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(refresh).toHaveBeenCalledTimes(inFlight ? 5 : 4);
+    },
+  );
 
-  it("final connection-deadline probe is superseded by a successful cloud sweep", async () => {
+  it("connection-deadline backoff retry is superseded by a successful cloud sweep", async () => {
     const { eufy, refresh } = await reachThirdDeadline();
     refresh.mockResolvedValue(result);
     await vi.advanceTimersByTimeAsync(20_000);
@@ -1181,7 +1626,7 @@ describe("generation-owned RTC state refresh", () => {
     await eufy.disconnect();
   });
 
-  it("final connection-deadline probe coalesces a cloud caller and pauses on its failure", async () => {
+  it("connection-deadline backoff retry coalesces a cloud caller and backs off on its failure", async () => {
     const { eufy, refresh } = await reachThirdDeadline();
     let reject!: (error: Error) => void;
     refresh.mockImplementationOnce(
@@ -1198,13 +1643,15 @@ describe("generation-owned RTC state refresh", () => {
     await cloud;
     await vi.advanceTimersByTimeAsync(0);
     expect(eufy.getStateRefreshDiagnostics().recent.at(-1)).toMatchObject({ cloudPollJoins: 1 });
-    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(true);
-    await vi.advanceTimersByTimeAsync(600_000);
+    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(false);
+    await vi.advanceTimersByTimeAsync(59_999);
     expect(refresh).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(refresh).toHaveBeenCalledTimes(6);
     await eufy.disconnect();
   });
 
-  it("final connection-deadline probe cannot rearm an obsolete generation", async () => {
+  it("connection-deadline backoff retry cannot rearm an obsolete generation", async () => {
     const { eufy, refresh } = await reachThirdDeadline();
     let finish!: (value: typeof result) => void;
     refresh.mockImplementationOnce(
@@ -1232,33 +1679,33 @@ describe("generation-owned RTC state refresh", () => {
     "rtc: synthetic did not come up within 12000ms",
     "RTC information response timed out",
     "RTC information request rejected (1)",
-  ])("keeps the three-failure pause without a local deadline identity: %s", async (message) => {
+  ])("retries after the threshold without a local deadline identity: %s", async (message) => {
     vi.setSystemTime(0);
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     eufy.on("error", () => {});
     await (eufy as any).ensureRealtime();
     refresh.mockRejectedValue(new Error(message));
     await vi.advanceTimersByTimeAsync(210_000);
-    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(true);
+    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(false);
     await vi.advanceTimersByTimeAsync(600_000);
-    expect(refresh).toHaveBeenCalledTimes(4);
+    expect(refresh).toHaveBeenCalledTimes(8);
     await eufy.disconnect();
   });
 
-  it("does not reuse a consumed connection deadline at the third failure", async () => {
+  it("uses the same backoff for repeated connection-deadline errors", async () => {
     vi.setSystemTime(0);
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     eufy.on("error", () => {});
     await (eufy as any).ensureRealtime();
     refresh.mockRejectedValue(connectionDeadline(station, 12_000));
     await vi.advanceTimersByTimeAsync(210_000);
-    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(true);
+    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(false);
     await vi.advanceTimersByTimeAsync(600_000);
-    expect(refresh).toHaveBeenCalledTimes(4);
+    expect(refresh).toHaveBeenCalledTimes(8);
     await eufy.disconnect();
   });
 
-  it("does not add a deadline probe to a multiple-station sweep", async () => {
+  it("retries a multiple-station sweep without a special deadline probe", async () => {
     vi.setSystemTime(0);
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     (eufy as any).registry.list.mockReturnValue([
@@ -1271,13 +1718,13 @@ describe("generation-owned RTC state refresh", () => {
       throw connectionDeadline(station, 12_000);
     });
     await vi.advanceTimersByTimeAsync(210_000);
-    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(true);
+    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(false);
     await vi.advanceTimersByTimeAsync(600_000);
-    expect(refresh).toHaveBeenCalledTimes(8);
+    expect(refresh).toHaveBeenCalledTimes(16);
     await eufy.disconnect();
   });
 
-  it("uses the configured interval for the final deadline probe", async () => {
+  it("floors backoff at the configured interval", async () => {
     vi.setSystemTime(0);
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 60_000 } });
     eufy.on("error", () => {});
@@ -1304,7 +1751,7 @@ describe("generation-owned RTC state refresh", () => {
     await eufy.disconnect();
   });
 
-  it.each([false, true])("replays recorded read durations with a bounded probe (reachable: %s)", async (reachable) => {
+  it.each([false, true])("replays recorded read durations with bounded retries (reachable: %s)", async (reachable) => {
     vi.setSystemTime(0);
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     eufy.on("error", () => {});
@@ -1320,10 +1767,10 @@ describe("generation-owned RTC state refresh", () => {
       if (index < 3 || !reachable) throw connectionDeadline(station, 12_000);
       return result;
     });
-    await vi.advanceTimersByTimeAsync(214_013 + (reachable ? 2_105 : 12_003));
-    expect(starts).toEqual([30_000, 40_003, 172_006, 214_013]);
-    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(!reachable);
-    expect(eufy.getStateRefreshDiagnostics().schedules.at(-1)?.delayMs).toBe(reachable ? 30_000 : null);
+    await vi.advanceTimersByTimeAsync(242_013 + (reachable ? 2_105 : 12_003));
+    expect(starts).toEqual([30_000, 68_003, 200_006, 242_013]);
+    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(false);
+    expect(eufy.getStateRefreshDiagnostics().schedules.at(-1)?.delayMs).toBe(reachable ? 30_000 : 60_000);
     await eufy.disconnect();
   });
 
@@ -1333,7 +1780,7 @@ describe("generation-owned RTC state refresh", () => {
     return error;
   }
 
-  it("uses one two-second wait after retirement without increasing the three-failure limit", async () => {
+  it("floors the retired-session retry at normal cadence and continues after three failures", async () => {
     vi.setSystemTime(0);
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     eufy.on("error", () => {});
@@ -1344,28 +1791,28 @@ describe("generation-owned RTC state refresh", () => {
       throw retiredFailure();
     });
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(eufy.getStateRefreshDiagnostics().schedules.at(-1)?.delayMs).toBe(2_000);
-    await vi.advanceTimersByTimeAsync(1_999);
+    expect(eufy.getStateRefreshDiagnostics().schedules.at(-1)?.delayMs).toBe(30_000);
+    await vi.advanceTimersByTimeAsync(29_999);
     expect(refresh).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1);
     expect(refresh).toHaveBeenCalledTimes(3);
     expect(eufy.getStateRefreshDiagnostics().schedules.at(-1)?.delayMs).toBe(120_000);
     await vi.advanceTimersByTimeAsync(120_000);
     expect(refresh).toHaveBeenCalledTimes(4);
-    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(true);
-    await vi.advanceTimersByTimeAsync(600_000);
-    expect(refresh).toHaveBeenCalledTimes(4);
+    expect(eufy.getStateRefreshDiagnostics().scheduledPaused).toBe(false);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(refresh).toHaveBeenCalledTimes(5);
     expect(dispatch).not.toHaveBeenCalled();
     expect(login).not.toHaveBeenCalled();
     await eufy.disconnect();
   });
 
-  it("resets normal cadence after the accelerated read succeeds", async () => {
+  it("resets normal cadence after the retired-session retry succeeds", async () => {
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     eufy.on("error", () => {});
     await (eufy as any).ensureRealtime();
     refresh.mockRejectedValueOnce(retiredFailure());
-    await vi.advanceTimersByTimeAsync(32_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(refresh).toHaveBeenCalledTimes(3);
     expect(eufy.getStateRefreshDiagnostics().schedules.at(-1)).toMatchObject({
       delayMs: 30_000,
@@ -1409,7 +1856,7 @@ describe("generation-owned RTC state refresh", () => {
     await eufy.disconnect();
   });
 
-  it("coalesces a cloud caller during the fast read and preserves failure accounting", async () => {
+  it("coalesces a cloud caller during the retired-session retry and preserves failure accounting", async () => {
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     eufy.on("error", () => {});
     await (eufy as any).ensureRealtime();
@@ -1421,7 +1868,7 @@ describe("generation-owned RTC state refresh", () => {
           reject = r;
         }),
     );
-    await vi.advanceTimersByTimeAsync(32_000);
+    await vi.advanceTimersByTimeAsync(60_000);
     const cloud = (eufy as any).pollOnce();
     await vi.advanceTimersByTimeAsync(0);
     expect(refresh).toHaveBeenCalledTimes(3);
@@ -1436,7 +1883,7 @@ describe("generation-owned RTC state refresh", () => {
     await eufy.disconnect();
   });
 
-  it.each([false, true])("cancels accelerated recovery on disconnect (in flight: %s)", async (inFlight) => {
+  it.each([false, true])("cancels retired-session recovery on disconnect (in flight: %s)", async (inFlight) => {
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     eufy.on("error", () => {});
     await (eufy as any).ensureRealtime();
@@ -1449,7 +1896,7 @@ describe("generation-owned RTC state refresh", () => {
             finish = r;
           }),
       );
-    await vi.advanceTimersByTimeAsync(inFlight ? 32_000 : 31_999);
+    await vi.advanceTimersByTimeAsync(inFlight ? 60_000 : 59_999);
     await eufy.disconnect();
     if (inFlight) {
       expect(refresh.mock.calls[2]![1]!.signal!.aborted).toBe(true);
@@ -1459,7 +1906,7 @@ describe("generation-owned RTC state refresh", () => {
     expect(refresh).toHaveBeenCalledTimes(inFlight ? 3 : 2);
   });
 
-  it("backs off, pauses after three failures, and resumes after a successful normal sweep", async () => {
+  it("backs off after three failures and resets after a successful cloud sweep", async () => {
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     const errors: unknown[] = [];
     const listener = vi.fn();
@@ -1476,24 +1923,24 @@ describe("generation-owned RTC state refresh", () => {
     expect(refresh).toHaveBeenCalledTimes(3);
     await vi.advanceTimersByTimeAsync(120_000);
     expect(refresh).toHaveBeenCalledTimes(4);
-    await vi.advanceTimersByTimeAsync(600_000);
-    expect(refresh).toHaveBeenCalledTimes(4);
-    expect(errors).toHaveLength(3);
-    expect(listener.mock.calls).toEqual(Array.from({ length: 3 }, () => [error, { origin: "state_refresh" }]));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(refresh).toHaveBeenCalledTimes(5);
+    expect(errors).toHaveLength(4);
+    expect(listener.mock.calls).toEqual(Array.from({ length: 4 }, () => [error, { origin: "state_refresh" }]));
     expect(
       eufy
         .getStateRefreshDiagnostics()
-        .schedules.slice(-3)
+        .schedules.slice(-4)
         .map((item) => item.delayMs),
-    ).toEqual([60_000, 120_000, null]);
+    ).toEqual([60_000, 120_000, 30_000, 60_000]);
     refresh.mockResolvedValue(result);
     await (eufy as any).pollOnce();
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(refresh).toHaveBeenCalledTimes(6);
+    expect(refresh).toHaveBeenCalledTimes(7);
     await eufy.disconnect();
   });
 
-  it("backs off and pauses empty replies until a useful cloud-poll sweep resets the budget", async () => {
+  it("backs off empty replies until a useful cloud-poll sweep resets the cadence", async () => {
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     await (eufy as any).ensureRealtime();
     const success = eufy.getStateRefreshDiagnostics().lastSuccessMs;
@@ -1511,13 +1958,13 @@ describe("generation-owned RTC state refresh", () => {
     expect(refresh).toHaveBeenCalledTimes(4);
     await vi.advanceTimersByTimeAsync(1);
     expect((eufy as any).realtimeGeneration.stateRefreshFailures).toBe(3);
-    await vi.advanceTimersByTimeAsync(600_000);
-    expect(refresh).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(refresh).toHaveBeenCalledTimes(6);
     await (eufy as any).pollOnce();
-    expect((eufy as any).realtimeGeneration.stateRefreshFailures).toBe(3);
+    expect((eufy as any).realtimeGeneration.stateRefreshFailures).toBe(4);
     expect(eufy.getStateRefreshDiagnostics()).toMatchObject({
       successes: 1,
-      failures: 5,
+      failures: 6,
       lastSuccessMs: success,
       lastFailureKind: "empty_response",
     });
@@ -1527,9 +1974,9 @@ describe("generation-owned RTC state refresh", () => {
         .schedules.slice(-3)
         .map((item) => [item.consecutiveFailures, item.delayMs]),
     ).toEqual([
-      [1, 60_000],
       [2, 120_000],
-      [3, null],
+      [3, 30_000],
+      [4, 60_000],
     ]);
 
     refresh.mockResolvedValue(result);
@@ -1537,7 +1984,7 @@ describe("generation-owned RTC state refresh", () => {
     expect((eufy as any).realtimeGeneration.stateRefreshFailures).toBe(0);
     expect(eufy.getStateRefreshDiagnostics().lastSuccessMs).toBe(Date.now());
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(refresh).toHaveBeenCalledTimes(8);
+    expect(refresh).toHaveBeenCalledTimes(9);
     await eufy.disconnect();
   });
 

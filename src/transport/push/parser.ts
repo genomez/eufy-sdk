@@ -46,10 +46,32 @@ export class McsParser extends EventEmitter {
     this.sizePacketSoFar = 0;
   }
 
-  /** Feed a chunk of TLS bytes. */
-  handleData(chunk: Buffer): void {
-    this.data = Buffer.concat([this.data, chunk]);
-    this.waitForData();
+  /**
+   * Feed TLS bytes; only framing/decoding failures reach onFrameError, never message listener errors.
+   * Without a handler, parsing failures throw. A handled failure ends the feed and requires reset before reuse.
+   */
+  handleData(chunk: Buffer, onFrameError?: () => void): void {
+    let pending: Buffer | undefined = chunk;
+    while (true) {
+      let message: McsMessage | undefined;
+      let failed = false;
+      try {
+        if (pending) {
+          this.data = Buffer.concat([this.data, pending]);
+          pending = undefined;
+        }
+        message = this.readMessage();
+      } catch (error) {
+        if (!onFrameError) throw error;
+        failed = true;
+      }
+      if (failed) {
+        onFrameError!();
+        return;
+      }
+      if (!message) return;
+      this.emitMessage(message);
+    }
   }
 
   private minBytesNeeded(): number {
@@ -65,21 +87,25 @@ export class McsParser extends EventEmitter {
     }
   }
 
-  private waitForData(): void {
-    if (this.data.length < this.minBytesNeeded()) return;
-    switch (this.state) {
-      case State.VERSION_TAG_AND_SIZE:
-        this.onVersion();
-        break;
-      case State.TAG_AND_SIZE:
-        this.onTag();
-        break;
-      case State.SIZE:
-        this.onSize();
-        break;
-      case State.PROTO_BYTES:
-        this.onBytes();
-        break;
+  /** Advance wire state until one decoded message or an incomplete frame, without dispatching listeners. */
+  private readMessage(): McsMessage | undefined {
+    while (this.data.length >= this.minBytesNeeded()) {
+      switch (this.state) {
+        case State.VERSION_TAG_AND_SIZE:
+          this.onVersion();
+          break;
+        case State.TAG_AND_SIZE:
+          this.onTag();
+          break;
+        case State.SIZE:
+          this.onSize();
+          break;
+        case State.PROTO_BYTES: {
+          const message = this.onBytes();
+          this.state = State.TAG_AND_SIZE;
+          return message;
+        }
+      }
     }
   }
 
@@ -87,13 +113,13 @@ export class McsParser extends EventEmitter {
     const version = this.data.readInt8(0);
     this.data = this.data.subarray(1);
     if (version < 38) throw new Error(`MCS: wrong protocol version ${version}`);
-    this.onTag();
+    this.state = State.TAG_AND_SIZE;
   }
 
   private onTag(): void {
     this.messageTag = this.data.readInt8(0);
     this.data = this.data.subarray(1);
-    this.onSize();
+    this.state = State.SIZE;
   }
 
   private onSize(): void {
@@ -108,28 +134,17 @@ export class McsParser extends EventEmitter {
     if (incomplete) {
       this.sizePacketSoFar = reader.pos;
       this.state = State.SIZE;
-      this.waitForData();
       return;
     }
     this.data = this.data.subarray(reader.pos);
     this.sizePacketSoFar = 0;
-    if (this.messageSize > 0) {
-      this.state = State.PROTO_BYTES;
-      this.waitForData();
-    } else {
-      this.onBytes();
-    }
+    if (this.messageSize < 0) throw new Error("MCS: negative frame length");
+    this.state = State.PROTO_BYTES;
   }
 
-  private onBytes(): void {
+  private onBytes(): McsMessage {
     if (this.messageSize === 0) {
-      this.emitMessage({ tag: this.messageTag, object: {} });
-      this.next();
-      return;
-    }
-    if (this.data.length < this.messageSize) {
-      this.state = State.PROTO_BYTES;
-      return;
+      return { tag: this.messageTag, object: {} };
     }
     const buf = this.data.subarray(0, this.messageSize);
     this.data = this.data.subarray(this.messageSize);
@@ -139,13 +154,7 @@ export class McsParser extends EventEmitter {
       const type: Type = mcsRoot().lookupType(typeName);
       object = type.toObject(type.decode(buf), { longs: String, enums: String, bytes: Buffer });
     }
-    this.emitMessage({ tag: this.messageTag, object });
-    this.next();
-  }
-
-  private next(): void {
-    this.state = State.TAG_AND_SIZE;
-    this.waitForData();
+    return { tag: this.messageTag, object };
   }
 
   private emitMessage(m: McsMessage): void {

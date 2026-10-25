@@ -164,6 +164,8 @@ export interface DeviceRegistryDeps {
   mega: MegaHttpClient;
   /** Synchronous notification after a refreshed roster and its topology caches are installed. */
   onRoster?: () => void;
+  /** Actual cloud parameter receipt, independent of vendor freshness timestamps. */
+  onCloudParams?: (device: string, params: Readonly<Record<number, string>>) => void;
   /** Surface a non-fatal fetch error (a house/body query that failed) without aborting the merge. */
   onError: (e: unknown) => void;
   /** Diagnostics sink for facts that are NOT errors — see the owner-gated overlay note on {@link DeviceRegistry.record}. */
@@ -185,6 +187,7 @@ export class DeviceRegistry {
   private readonly onError: (e: unknown) => void;
   private readonly logger: Logger;
   private readonly onRoster?: () => void;
+  private readonly onCloudParams?: DeviceRegistryDeps["onCloudParams"];
   private devices: EufyDevice[] = [];
   /** Conflicting duplicate topology cannot be made safe by the ordinary last-row merge. */
   private inventoryConflicts = new Set<string>();
@@ -243,6 +246,7 @@ export class DeviceRegistry {
     this.onError = deps.onError;
     this.logger = deps.logger ?? noopLogger;
     this.onRoster = deps.onRoster;
+    this.onCloudParams = deps.onCloudParams;
   }
 
   /** The current device cache (last {@link getDevices} result). */
@@ -349,6 +353,9 @@ export class DeviceRegistry {
     this.frameCapsCache.clear();
     this.deviceCapsCache.clear();
     this.onRoster?.();
+    for (const device of this.devices)
+      if (bindings.has(device.sn) && Object.keys(device.params ?? {}).length)
+        this.onCloudParams?.(device.sn, device.params!);
     return this.devices;
   }
 
@@ -477,6 +484,9 @@ export class DeviceRegistry {
       try {
         const live = await this.mega.getDeviceParamList<{ params?: RawParam[] }>(sn);
         mergeParams(live.params, params, paramUpdatedAt);
+        const received: Record<number, string> = {};
+        mergeParams(live.params, received, {});
+        if (Object.keys(received).length) this.onCloudParams?.(sn, received);
       } catch (error) {
         if (error instanceof SessionExpiredError) throw error;
         if (error instanceof MegaApiError && error.code === OWNER_ONLY_CODE) {

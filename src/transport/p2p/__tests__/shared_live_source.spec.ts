@@ -48,6 +48,81 @@ describe("SharedLiveSource", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
+  it("observes new source video and audio once regardless of consumer fan-out or resume delivery", () => {
+    const onSourceMedia = vi.fn<() => void>();
+    const { source, last } = mk({ onSourceMedia });
+    const first = source.attach();
+    const second = source.attach();
+    const received = vi.fn();
+    first.onMedia(received);
+    second.onMedia(received);
+    first.pause();
+    second.pause();
+
+    last().video(frame(true));
+    expect(onSourceMedia).toHaveBeenCalledTimes(1);
+    last().audio({ codec: "aac-lc", data: Buffer.from([0xff, 0xf1]) });
+    expect(onSourceMedia).toHaveBeenCalledTimes(2);
+    last().video(frame(false));
+    expect(onSourceMedia).toHaveBeenCalledTimes(3);
+    expect(received).not.toHaveBeenCalled();
+
+    first.resume();
+    second.resume();
+    expect(received).toHaveBeenCalledTimes(6);
+    expect(onSourceMedia).toHaveBeenCalledTimes(3);
+    last().audio({ codec: "aac-lc", data: Buffer.from([0xff, 0xf1]) });
+    expect(onSourceMedia).toHaveBeenCalledTimes(4);
+    expect(received).toHaveBeenCalledTimes(8);
+    source.dispose();
+  });
+
+  it("does not observe a retained keyframe again when priming a late consumer", async () => {
+    const onSourceMedia = vi.fn<() => void>();
+    const { source, last } = mk({ onSourceMedia });
+    source.attach();
+    last().video(frame(true));
+    expect(onSourceMedia).toHaveBeenCalledTimes(1);
+
+    const joined = source.attach();
+    const received = vi.fn();
+    joined.on("video", received);
+    await Promise.resolve();
+    expect(joined.primed).toBe(true);
+    expect(received).toHaveBeenCalledTimes(1);
+    expect(onSourceMedia).toHaveBeenCalledTimes(1);
+    last().video(frame(false));
+    expect(onSourceMedia).toHaveBeenCalledTimes(2);
+    expect(received).toHaveBeenCalledTimes(2);
+    source.dispose();
+  });
+
+  it("does not observe retained media again during prebuffer attachment and drain", async () => {
+    const onSourceMedia = vi.fn<() => void>();
+    const { source, last } = mk({ onSourceMedia, preBufferSeconds: 10 });
+    source.attach();
+    last().video(frame(true));
+    last().audio({ codec: "aac-lc", data: Buffer.from([0xff, 0xf1]) });
+    last().video(frame(false));
+    expect(onSourceMedia).toHaveBeenCalledTimes(3);
+
+    expect(source.ringBuffer(10)).toHaveLength(2);
+    const { consumer, buffered } = source.attachWithPrebuffer(10);
+    expect(buffered.map((item) => item.kind)).toEqual(["video", "audio", "video"]);
+    const received = vi.fn();
+    consumer.onMedia(received);
+    await Promise.resolve();
+    expect(received).not.toHaveBeenCalled();
+    expect(source.ringBuffer(10)).toHaveLength(2);
+    expect(onSourceMedia).toHaveBeenCalledTimes(3);
+
+    last().video(frame(true));
+    last().audio({ codec: "aac-lc", data: Buffer.from([0xff, 0xf1]) });
+    expect(onSourceMedia).toHaveBeenCalledTimes(5);
+    expect(received).toHaveBeenCalledTimes(2);
+    source.dispose();
+  });
+
   it("warms exactly ONE stream for two attaches", () => {
     const { source, streams } = mk();
     source.attach();

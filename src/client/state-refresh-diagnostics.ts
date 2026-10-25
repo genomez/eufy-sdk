@@ -55,6 +55,12 @@ export interface StateRefreshDiagnostics {
   active: boolean;
   inFlight: boolean;
   scheduledPaused: boolean;
+  /** Due time of a pending threshold retry; null during reads, normal cadence or inactivity. */
+  nextRetryAtMs: number | null;
+  /** One-based threshold retry ordinal; protected deferrals retain it and success resets it to zero. */
+  retryAttempt: number;
+  /** The latest retry timer policy, without exception messages or station identifiers. */
+  retryReason: "failure_backoff" | "session_recovery" | "station_work" | null;
   intervalMs: number;
   targetStations: number;
   attempts: number;

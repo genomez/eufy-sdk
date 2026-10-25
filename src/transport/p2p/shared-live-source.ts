@@ -63,6 +63,8 @@ function sameConfig(a: LiveVideoConfig, b: LiveVideoConfig | undefined): boolean
 export type SharedLiveState = "idle" | "warming" | "live" | "lingering" | "stopped";
 
 export interface SharedLiveSourceOptions {
+  /** New source ingress only; consumer primes and prebuffer replay never call this. */
+  onSourceMedia?: () => void;
   /**
    * Factory that builds a fresh, **un-started** {@link LiveStreamHandle}. Called on every (re)warm so
    * a reconnect rebuilds the stream rather than reusing a dead one. `SharedLiveSource` calls
@@ -782,6 +784,9 @@ export class SharedLiveSource {
   }
 
   private onVideo(frame: LiveVideoFrame): void {
+    try {
+      this.opts.onSourceMedia?.();
+    } catch {}
     this.delivered.video = true;
     this.fruitlessReissues = 0;
     this.settleReuseWatch();
@@ -838,6 +843,9 @@ export class SharedLiveSource {
   }
 
   private onAudio(frame: LiveAudioFrame): void {
+    try {
+      this.opts.onSourceMedia?.();
+    } catch {}
     const item = { kind: "audio", frame, timestampMs: Date.now() } as const;
     this.delivered.audio = true;
     this.fruitlessReissues = 0;

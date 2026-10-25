@@ -14,7 +14,7 @@ const MAX_JPEG_BYTES = 10 * 1024 * 1024;
 /**
  * How many candidate URLs per device are remembered as already attempted.
  *
- * The set exists so the same thumbnail is not downloaded twice â€” one event arrives as several pushes
+ * The set exists so the same thumbnail is not downloaded twice — one event arrives as several pushes
  * (motion, then a person, then a face) carrying one URL between them. That is a question about the last
  * few seconds, so a bounded window answers it exactly as well as an unbounded one, and unbounded is a
  * leak: a signed media URL is a few hundred bytes, a busy camera produces hundreds a day, and a host

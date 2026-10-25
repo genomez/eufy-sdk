@@ -167,6 +167,15 @@ export function cameraPowerTier(model: string | undefined, capabilities: Readonl
   return capabilities.has("battery") && notMainsCamera({ model }) ? "battery" : "wired";
 }
 
+/** Conservative power evidence; an absent battery capability never proves mains power. */
+export function cameraPowerEvidence(
+  model: string | undefined,
+  capabilities: ReadonlySet<string>,
+): "mains" | "battery" | "unknown" {
+  if (!notMainsCamera({ model })) return "mains";
+  return capabilities.has("battery") ? "battery" : "unknown";
+}
+
 /** False for a mains camera whose battery params are sentinels — gates every physical-cell read. */
 const notMainsCamera = (ctx: AvailabilityContext): boolean => {
   const model = (ctx.model ?? "").toUpperCase();

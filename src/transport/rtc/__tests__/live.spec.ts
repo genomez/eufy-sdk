@@ -1,6 +1,7 @@
 /** Modified for genomez S1 experimental source preview, 2026-10-14. */
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { LiveVideoFrame } from "../../../core/contracts.js";
 import type { RtcSession } from "../session.js";
 import {
   RtcLive,
@@ -59,6 +60,16 @@ const inner = (pkt: Buffer) => {
   };
 };
 
+/** Correlated start acknowledgement for source-observation qualification. */
+function acknowledgeStart(session: FakeSession): void {
+  const header = parsePortalHeader(session.sent.at(-1)!)!;
+  session.emit(
+    "commandData",
+    Buffer.concat([buildPortalHeader(header.commandId, 4, header.channel, header.segment, 1), Buffer.alloc(4)]),
+    PortalLinkType.COMMAND,
+  );
+}
+
 describe("T9000 live helpers", () => {
   it("builds the start-live frame the portal sends: streamId 1 in the header, chn_list as objects", () => {
     const { hd, json } = inner(buildT9000StartLive({ accountId: "acct", channel: 1, segment: 7 }));
@@ -109,6 +120,131 @@ describe("RtcLive", () => {
     });
   });
   afterEach(() => vi.useRealTimers());
+
+  it("delivers pre-ACK media normally while withholding camera-contact evidence", () => {
+    const observe = vi.fn();
+    const source = new RtcLive({
+      session: s as unknown as RtcSession,
+      seg,
+      stationSn: "synthetic-station",
+      channel: 2,
+      accountId: "synthetic",
+      onSourceMedia: observe,
+    });
+    const consumer = source.attach();
+    const delivered = vi.fn();
+    consumer.onMedia(delivered);
+    s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+    expect(delivered).toHaveBeenCalledTimes(1);
+    expect(observe).not.toHaveBeenCalled();
+    acknowledgeStart(s);
+    s.emit("mediaData", media(101, pslice, false), PortalLinkType.LIVE);
+    expect(observe).toHaveBeenCalledTimes(1);
+    consumer.detach();
+  });
+
+  it("observes each decoded source frame once before consumer keyframe and pause filtering", () => {
+    const onSourceMedia = vi.fn<() => void>();
+    const source = new RtcLive({
+      session: s as unknown as RtcSession,
+      seg,
+      stationSn: "T9000X",
+      channel: 1,
+      accountId: "acct",
+      onSourceMedia,
+    });
+    const first = source.attach();
+    const second = source.attach();
+    acknowledgeStart(s);
+    const received = vi.fn();
+    first.onMedia(received);
+    second.onMedia(received);
+
+    s.emit("mediaData", media(101, pslice, false), PortalLinkType.LIVE);
+    expect(onSourceMedia).toHaveBeenCalledTimes(1);
+    expect(received).not.toHaveBeenCalled();
+    s.emit("mediaData", media(101, Buffer.concat([vps, idr]), true), PortalLinkType.LIVE);
+    expect(onSourceMedia).toHaveBeenCalledTimes(2);
+    expect(received).toHaveBeenCalledTimes(2);
+    first.pause();
+    second.pause();
+    s.emit("mediaData", media(101, pslice, false), PortalLinkType.LIVE);
+    expect(onSourceMedia).toHaveBeenCalledTimes(3);
+    expect(received).toHaveBeenCalledTimes(2);
+    first.resume();
+    second.resume();
+    expect(onSourceMedia).toHaveBeenCalledTimes(3);
+    first.detach();
+    second.detach();
+  });
+
+  it.each([
+    "wrong link",
+    "wrong channel",
+    "wrong command",
+    "short portal header",
+    "invalid portal magic",
+    "truncated portal body",
+    "short media header",
+    "wrong media length",
+    "wrong codec",
+    "missing Annex B header",
+    "short NAL header",
+  ])("ignores %s for source media observations", (invalid) => {
+    const onSourceMedia = vi.fn<() => void>();
+    const source = new RtcLive({
+      session: s as unknown as RtcSession,
+      seg,
+      stationSn: "T9000X",
+      channel: 1,
+      accountId: "acct",
+      onSourceMedia,
+    });
+    const consumer = source.attach();
+    acknowledgeStart(s);
+    let packet = media(101, Buffer.concat([vps, idr]), true);
+    let link: number = PortalLinkType.LIVE;
+    switch (invalid) {
+      case "wrong link":
+        link = PortalLinkType.PLAYBACK;
+        break;
+      case "wrong channel":
+        packet[12] = 102;
+        break;
+      case "wrong command":
+        packet.writeUInt16LE(T9000Live.KEEPALIVE, 4);
+        break;
+      case "short portal header":
+        packet = packet.subarray(0, PORTAL_HEADER_LENGTH - 1);
+        break;
+      case "invalid portal magic":
+        packet[0] = 0;
+        break;
+      case "truncated portal body":
+        packet = packet.subarray(0, packet.length - 1);
+        break;
+      case "short media header":
+        packet = Buffer.concat([buildPortalHeader(T9000Live.MEDIA, 21, 101, 0), Buffer.alloc(21)]);
+        break;
+      case "wrong media length":
+        packet.writeUInt32LE(1, PORTAL_HEADER_LENGTH);
+        break;
+      case "wrong codec":
+        packet[PORTAL_HEADER_LENGTH + 5] = 0;
+        break;
+      case "missing Annex B header":
+        packet = media(101, Buffer.from([1, 2, 3, 4, 5, 6]), true);
+        break;
+      case "short NAL header":
+        packet = media(101, Buffer.from([0, 0, 0, 1, 0x26]), true);
+        break;
+    }
+    s.emit("mediaData", packet, link);
+    expect(onSourceMedia).not.toHaveBeenCalled();
+    s.emit("mediaData", media(101, Buffer.concat([vps, idr]), true), PortalLinkType.LIVE);
+    expect(onSourceMedia).toHaveBeenCalledTimes(1);
+    consumer.detach();
+  });
 
   it("filters media on the play slot (101), not the device channel: a camera on channel 5 still streams", () => {
     const l5 = new RtcLive({
@@ -234,6 +370,149 @@ describe("RtcLive", () => {
     c.detach();
     vi.advanceTimersByTime(5000);
     expect(s.raw).toHaveLength(2);
+  });
+
+  it.each(["on", "addListener", "once", "prependListener", "prependOnceListener", "onMedia"] as const)(
+    "waits for a live IDR after an asynchronously delayed %s video subscription",
+    async (method) => {
+      const c = live.attach();
+      const got: LiveVideoFrame[] = [];
+      const started = vi.fn();
+      c.on("start", started);
+      s.emit("mediaData", media(101, Buffer.concat([vps, idr]), true), PortalLinkType.LIVE);
+      expect(c.primed).toBe(false);
+      expect(started).not.toHaveBeenCalled();
+      const subscription = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          if (method === "onMedia") c.onMedia(({ frame }) => got.push(frame));
+          else c[method]("video", (frame: LiveVideoFrame) => got.push(frame));
+          resolve();
+        }, 50);
+      });
+      s.emit("mediaData", media(101, pslice, false), PortalLinkType.LIVE);
+      await vi.advanceTimersByTimeAsync(50);
+      await subscription;
+      expect(got).toEqual([]);
+      s.emit("mediaData", media(101, pslice, false), PortalLinkType.LIVE);
+      expect(got).toEqual([]);
+      s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+      expect(got.map((frame) => frame.keyframe)).toEqual([true]);
+      expect(got[0]!.data).toEqual(Buffer.concat([vps, idr]));
+      expect(started).toHaveBeenCalledTimes(1);
+      c.detach();
+    },
+  );
+
+  it("rearms when the last video listener leaves and a new listener subscribes", () => {
+    const c = live.attach();
+    const first = vi.fn();
+    c.on("video", first);
+    s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+    expect(first).toHaveBeenCalledTimes(1);
+    c.off("video", first);
+    const next = vi.fn();
+    c.on("video", next);
+    expect(c.primed).toBe(false);
+    s.emit("mediaData", media(101, pslice, false), PortalLinkType.LIVE);
+    expect(next).not.toHaveBeenCalled();
+    s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+    expect(next).toHaveBeenCalledTimes(1);
+    c.detach();
+  });
+
+  it.each(["on", "addListener", "once", "prependListener", "prependOnceListener", "onMedia"] as const)(
+    "preserves the %s video subscription gate after all listeners are removed",
+    (method) => {
+      const c = live.attach();
+      c.on("video", () => {});
+      s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+      c.removeAllListeners();
+      const got: LiveVideoFrame[] = [];
+      if (method === "onMedia") c.onMedia(({ frame }) => got.push(frame));
+      else c[method]("video", (frame: LiveVideoFrame) => got.push(frame));
+      s.emit("mediaData", media(101, pslice, false), PortalLinkType.LIVE);
+      expect(got).toEqual([]);
+      s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+      expect(got.map((frame) => frame.keyframe)).toEqual([true]);
+      c.detach();
+    },
+  );
+
+  it("keeps independently timed consumers on the shared source without stalling an existing reader", () => {
+    const first = live.attach();
+    const second = live.attach();
+    const early: boolean[] = [];
+    const late: boolean[] = [];
+    first.onMedia(({ frame }) => early.push(frame.keyframe));
+    s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+    second.onMedia(({ frame }) => late.push(frame.keyframe));
+    s.emit("mediaData", media(101, pslice, false), PortalLinkType.LIVE);
+    expect(early).toEqual([true, false]);
+    expect(late).toEqual([]);
+    s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+    s.emit("mediaData", media(101, pslice, false), PortalLinkType.LIVE);
+    expect(late).toEqual([true, false]);
+    expect(s.sent.map((packet) => inner(packet).json.cmd)).toEqual([1003]);
+    first.detach();
+    expect(live.active).toBe(true);
+    second.detach();
+    expect(s.sent.map((packet) => inner(packet).json.cmd)).toEqual([1003, 1004]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not count audio subscriptions as video subscriptions or gate audio events", () => {
+    const c = live.attach();
+    const audio = vi.fn();
+    const video = vi.fn();
+    c.on("audio", audio);
+    const frame = { codec: "aac-lc", data: Buffer.from([1, 2]) };
+    c.emit("audio", frame);
+    s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+    expect(c.primed).toBe(false);
+    expect(audio).toHaveBeenCalledExactlyOnceWith(frame);
+    c.on("video", video);
+    s.emit("mediaData", media(101, pslice, false), PortalLinkType.LIVE);
+    c.emit("audio", frame);
+    expect(audio).toHaveBeenCalledTimes(2);
+    expect(video).not.toHaveBeenCalled();
+    s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+    expect(video).toHaveBeenCalledTimes(1);
+    c.detach();
+  });
+
+  it("keeps the source startup deadline separate from a delayed subscriber's IDR wait", () => {
+    const c = live.attach();
+    s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+    vi.advanceTimersByTime(T9000Live.FIRST_FRAME_TIMEOUT_MS + 1);
+    expect(live.active).toBe(true);
+    const frames = vi.fn();
+    c.on("video", frames);
+    s.emit("mediaData", media(101, pslice, false), PortalLinkType.LIVE);
+    expect(frames).not.toHaveBeenCalled();
+    s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+    expect(frames).toHaveBeenCalledTimes(1);
+    expect(s.sent).toHaveLength(1);
+    c.detach();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cannot deliver or restart after detaching before a delayed video subscription", async () => {
+    const c = live.attach();
+    s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+    c.detach();
+    await Promise.resolve();
+    const frames = vi.fn();
+    c.on("video", frames);
+    s.emit("mediaData", media(101, idr, true), PortalLinkType.LIVE);
+    vi.advanceTimersByTime(T9000Live.FIRST_FRAME_TIMEOUT_MS + 1);
+    expect(frames).not.toHaveBeenCalled();
+    expect(live.active).toBe(false);
+    expect(idle).toHaveBeenCalledTimes(1);
+    expect(s.sent.map((packet) => inner(packet).json.cmd)).toEqual([1003, 1004]);
+    expect(s.listenerCount("mediaData")).toBe(0);
+    expect(s.listenerCount("commandData")).toBe(0);
+    expect(s.listenerCount("close")).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("resumes on the next keyframe after a pause and fails every consumer when the session closes", () => {

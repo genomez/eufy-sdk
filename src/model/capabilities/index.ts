@@ -69,6 +69,7 @@ export {
 export {
   WorkingMode,
   PowerSource,
+  cameraPowerEvidence,
   cameraPowerTier,
   resolveWorkingMode,
   resolveWorkingModeValue,

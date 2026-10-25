@@ -5,7 +5,7 @@ import type { EufyDevice } from "../../../core/types.js";
 import { observeCommand } from "../../../core/contracts.js";
 import { RtcCommandRouter, type RtcCommandRouterDeps } from "../command-router.js";
 import type { RtcSession, RtcSessionOptions } from "../session.js";
-import { buildPortalHeader, parsePortalHeader, PORTAL_HEADER_LENGTH } from "../portal-packet.js";
+import { buildPortalHeader, parsePortalHeader, PORTAL_HEADER_LENGTH, PortalLinkType } from "../portal-packet.js";
 import { PORTAL_CMD_SET_PAYLOAD, PORTAL_STATION_CHANNEL } from "../commands.js";
 
 /** A stand-in for RtcSession: comes up on connect(), answers every send with a 1350 ACK unless told not to. */
@@ -1327,5 +1327,60 @@ describe("mixed profile intent replacement", () => {
       { sendAttempted: false, sendAttemptedAtMs: null },
     );
     router.close();
+  });
+});
+
+describe("passive camera command/media evidence", () => {
+  it("counts a legacy acquisition timeout as timeout without changing the thrown failure", async () => {
+    vi.useFakeTimers();
+    FakeSession.connectMode = "never";
+    const finish = vi.fn();
+    const { router, sessions } = makeRouter({ observeCommand: () => ({ sent: vi.fn(), response: vi.fn(), finish }) });
+    try {
+      const failure = router
+        .dispatchCommand(CAMERA, { kind: "set-json", param: 1400, data: { value: 0 }, channel: 2 })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(((await failure) as Error).message).toContain("did not come up within");
+      expect(finish).toHaveBeenCalledTimes(1);
+      expect(finish.mock.calls[0]![0]).toMatchObject({ status: "connect_timeout", sendAttempted: false });
+      expect(sessions[0]!.sent).toHaveLength(0);
+    } finally {
+      router.close();
+      FakeSession.connectMode = "up";
+      vi.useRealTimers();
+    }
+  });
+
+  it("withholds shared-slot contact after switching targets while delivering media unchanged", async () => {
+    const sibling = { ...camera, sn: "T8425P0000000002", raw: { device_channel: 3 } };
+    const observations: string[] = [];
+    const { router, sessions } = makeRouter({
+      findDevice: (sn) => (sn === SN ? station : sn === CAMERA ? camera : sn === sibling.sn ? sibling : undefined),
+      observeLiveMedia: (sn) => () => observations.push(sn),
+    });
+    const data = Buffer.from([0, 0, 0, 1, 0x26, 1, 0xaf, 0]);
+    const prefix = Buffer.alloc(22);
+    prefix.writeUInt32LE(data.length);
+    prefix[5] = 1;
+    const body = Buffer.concat([prefix, data]);
+    const packet = Buffer.concat([buildPortalHeader(1300, body.length, 101, 0, 0), body]);
+    try {
+      const first = await router.mediaProviderFor(CAMERA).live();
+      await Promise.resolve();
+      sessions[0]!.emit("mediaData", packet, PortalLinkType.LIVE);
+      expect(observations).toEqual([CAMERA]);
+      first.stop();
+      const next = await router.mediaProviderFor(sibling.sn).live();
+      const delivery = vi.fn();
+      next.on("video", delivery);
+      await Promise.resolve();
+      sessions[0]!.emit("mediaData", packet, PortalLinkType.LIVE);
+      expect(delivery).toHaveBeenCalledTimes(1);
+      expect(observations).toEqual([CAMERA]);
+      next.stop();
+    } finally {
+      router.close();
+    }
   });
 });

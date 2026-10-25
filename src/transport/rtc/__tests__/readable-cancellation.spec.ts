@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { EufyDevice } from "../../../core/types.js";
 import { RtcCommandRouter } from "../command-router.js";
 import type { RtcSession } from "../session.js";
-import { PORTAL_HEADER_LENGTH, SegmentCounter } from "../portal-packet.js";
+import { buildPortalHeader, PORTAL_HEADER_LENGTH, PortalLinkType, SegmentCounter } from "../portal-packet.js";
 
 function setup(manual = false) {
   const commands: number[] = [];
@@ -48,6 +48,54 @@ function setup(manual = false) {
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 describe("RTC readable cancellation", () => {
+  it.each([false, true])(
+    "starts objectMode=%s readable egress on a fresh IDR when source media precedes subscription",
+    async (objectMode) => {
+      const { router, provider, session, commands } = setup();
+      const parameterSets = Buffer.from([0, 0, 0, 1, 64, 1, 0, 0, 0, 1, 66, 1, 0, 0, 0, 1, 68, 1]);
+      const idr = Buffer.from([0, 0, 0, 1, 38, 1, 0]);
+      const delta = Buffer.from([0, 0, 0, 1, 2, 1, 0]);
+      const emit = (video: Buffer) => {
+        const header = Buffer.alloc(22);
+        header.writeUInt32LE(video.length);
+        header[5] = 1;
+        const body = Buffer.concat([header, video]);
+        session.emit(
+          "mediaData",
+          Buffer.concat([buildPortalHeader(1300, body.length, 101, 0), body]),
+          PortalLinkType.LIVE,
+        );
+      };
+      const sendCommand = session.sendCommand;
+      vi.spyOn(session, "sendCommand").mockImplementation((packet) => {
+        const sent = sendCommand(packet);
+        if (commands.at(-1) === 1003) emit(Buffer.concat([parameterSets, idr]));
+        return sent;
+      });
+      const controller = new AbortController();
+      try {
+        const readable = await provider.openReadable!({ objectMode, signal: controller.signal });
+        emit(delta);
+        expect(readable.read()).toBeNull();
+        emit(idr);
+        const received = readable.read();
+        expect(objectMode ? received.data : received).toEqual(Buffer.concat([parameterSets, idr]));
+        if (objectMode) expect(received).toMatchObject({ codec: "h265", keyframe: true });
+        emit(delta);
+        const dependent = readable.read();
+        expect(objectMode ? dependent.data : dependent).toEqual(delta);
+        controller.abort();
+        await tick();
+        expect(readable.destroyed).toBe(true);
+        expect(commands).toEqual([1003, 1004]);
+        expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+        expect(session.listenerCount("mediaData")).toBe(0);
+      } finally {
+        router.close();
+      }
+    },
+  );
+
   it("keeps station connection bounded at twelve seconds before the first-IDR timer exists", async () => {
     vi.useFakeTimers();
     const { router, provider, commands, session } = setup(true);

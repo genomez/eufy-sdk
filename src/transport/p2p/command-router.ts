@@ -13,6 +13,7 @@ import type { MegaHttpClient } from "../http/mega-client.js";
 import type { EufyDevice } from "../../core/types.js";
 import type {
   Command,
+  CommandReceipt,
   Ff09Identity,
   AutoLockSnapshot,
   MediaProvider,
@@ -30,6 +31,7 @@ import {
 import { noopLogger, type Logger } from "../../core/logger.js";
 import { assertNever } from "../../core/util.js";
 import { setTimeout as sleep } from "node:timers/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { CONNECT_TIMEOUT_MS, P2PSession, type P2PFrame } from "./p2p-session.js";
 import { buildDirectBinaryBody } from "./write-commands.js";
 import { CommandType } from "./commands.js";
@@ -218,6 +220,16 @@ export interface P2PRouterDeps {
   onLevel2Ready: (stationSn: string, cipherId: number) => void;
   /** A raw decoded frame — the client emits the low-level `p2p` event + runs the semantic decode. */
   onFrame: (stationSn: string, frame: P2PFrame) => void;
+  /** Newly received decoded source media, before consumer caching. */
+  observeLiveMedia?: (device: string) => (() => void) | undefined;
+  /** Passive command evidence; callbacks never participate in transport admission. */
+  observeCommand?: (device: string) =>
+    | {
+        sent: () => void;
+        response: (receipt: CommandReceipt) => void;
+        finish: (receipt: CommandReceipt) => void;
+      }
+    | undefined;
   /**
    * Power tier per parent-station serial (`"wired"` = persistent session, `"battery"` = on-demand +
    * idle-detach). Injected by the facade from resolved capabilities — plain data, so transport never
@@ -233,6 +245,11 @@ export interface P2PRouterDeps {
 }
 
 export class P2PCommandRouter {
+  /** One passive receipt per dispatch, shared by its sends and isolated from concurrent commands. */
+  private readonly commandObservation = new AsyncLocalStorage<{
+    observer: ReturnType<NonNullable<P2PRouterDeps["observeCommand"]>>;
+    sendAttempted: boolean;
+  }>();
   /** P2P session lifecycle: on-demand open + battery-aware idle-detach + refcount, per session key. */
   private readonly manager: SessionManager;
   /** Error objects already forwarded while a station startup awaits the same session signal. */
@@ -594,6 +611,44 @@ export class P2PCommandRouter {
    * implementation. Capability modules emit intent; this is the one place that knows P2P.
    */
   async dispatchCommand(sn: string, cmd: Command): Promise<void> {
+    const context = {
+      observer: undefined as ReturnType<NonNullable<P2PRouterDeps["observeCommand"]>>,
+      sendAttempted: false,
+    };
+    try {
+      context.observer = this.deps.observeCommand?.(sn);
+    } catch {}
+    return this.commandObservation.run(context, async () => {
+      let succeeded = false;
+      try {
+        await this.routeCommand(sn, cmd);
+        succeeded = true;
+      } finally {
+        try {
+          context.observer?.finish(
+            Object.freeze({
+              status: succeeded ? "acknowledged" : "not_sent",
+              sendAttempted: context.sendAttempted,
+              effect: "unconfirmed",
+            }),
+          );
+        } catch {}
+      }
+    });
+  }
+
+  /** Mark only the first send admission, after session and key acquisition have completed. */
+  private observeCommandSend(): void {
+    const context = this.commandObservation.getStore();
+    if (!context || context.sendAttempted) return;
+    context.sendAttempted = true;
+    try {
+      context.observer?.sent();
+    } catch {}
+  }
+
+  /** Route one invocation without interpreting uncorrelated legacy replies or exception text. */
+  private async routeCommand(sn: string, cmd: Command): Promise<void> {
     switch (cmd.kind) {
       // ── Intents — the transport picks the encryption level (see resolveScalarParam / setJson). ──
       case "set-param":
@@ -843,6 +898,10 @@ export class P2PCommandRouter {
     opts: SharedLiveOpts = {},
     mayOpenOwnSession = false,
   ): Promise<SharedLiveSource> {
+    let observeMedia: (() => void) | undefined;
+    try {
+      observeMedia = this.deps.observeLiveMedia?.(sn);
+    } catch {}
     const { session, parentSn, channel, accountId, homeBaseAttached } = await this.resolveSession(sn, {
       waitLevel2: "soft",
       requireLevel2ForAttached: true,
@@ -866,6 +925,11 @@ export class P2PCommandRouter {
       };
       this.liveSessionKeys.set(key, sessionKey);
       source = new SharedLiveSource({
+        onSourceMedia: () => {
+          try {
+            observeMedia?.();
+          } catch {}
+        },
         makeStream: (ctx) =>
           new LiveStream(held.session, {
             channel,
@@ -1535,6 +1599,7 @@ export class P2PCommandRouter {
     resolved ??= await this.resolveSession(sn, { waitLevel2: true });
     let sent = false;
     for (let i = 0; i < DIRECT_CMD_SENDS; i++) {
+      this.observeCommandSend();
       if (send(resolved)) sent = true;
       await sleep(200);
     }
@@ -1575,6 +1640,7 @@ export class P2PCommandRouter {
   ): Promise<void> {
     const { session, accountId } = await this.resolveSession(sn);
     if (!accountId) throw new Error(`int-plus-string command ${commandType} for ${sn} requires an account id`);
+    this.observeCommandSend();
     session.sendIntStringCommand(commandType, value, valueSub, accountId, channel);
   }
 
@@ -1629,6 +1695,7 @@ export class P2PCommandRouter {
       await this.sendBySessionLevel(sn, {
         l1: async ({ session, accountId }) => {
           for (let i = 0; i < DIRECT_CMD_SENDS; i++) {
+            this.observeCommandSend();
             session.sendSetPayload(cmd, payload, { accountId, channel });
             await sleep(200);
           }
@@ -1881,6 +1948,7 @@ export class P2PCommandRouter {
   private async sendIntStringCommand(sn: string, outerCmd: number, value: number): Promise<void> {
     const { session, channel, accountId } = await this.resolveSession(sn);
     for (let i = 0; i < DIRECT_CMD_SENDS; i++) {
+      this.observeCommandSend();
       session.sendIntStringCommand(outerCmd, value, channel, accountId, channel);
       await sleep(200);
     }
@@ -1909,6 +1977,7 @@ export class P2PCommandRouter {
     const camInfoPre = Buffer.from("ff00000087030000", "hex"); // 1103 GET_CAMERA_INFO precursor
     const gap = () => sleep(150);
 
+    this.observeCommandSend();
     session.sendRawLevel2Bytes(camInfoPre, 255, P2P_ENVELOPE.GET_CAMERA_INFO, 8); // precursor on the station channel
     await gap();
     for (let i = 0; i < 2; i++) {
@@ -1937,6 +2006,7 @@ export class P2PCommandRouter {
     const json = JSON.stringify(inner);
     await this.sendBySessionLevel(sn, {
       l1: ({ session, channel }) => {
+        this.observeCommandSend();
         session.sendStringPayloadCommand(outerCmd, json, channel);
         return Promise.resolve();
       },
@@ -1944,6 +2014,7 @@ export class P2PCommandRouter {
         if (!(await session.awaitLevel2Key(LEVEL2_GRACE_MS, "call"))) {
           throw new Error(`level-2 key not ready for ${sn} — cannot route HomeBase command`);
         }
+        this.observeCommandSend();
         session.sendRawLevel2(json, channel, outerCmd);
       },
     });

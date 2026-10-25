@@ -6,6 +6,7 @@ import { bind } from "./bind.js";
 import type { CommandContext } from "../types.js";
 import { commandObservation, type Command } from "../../../core/contracts.js";
 import { Device } from "../../device.js";
+import { DeviceType } from "../../device-types.js";
 
 describe("light switch scalar reports", () => {
   it("re-projects retained reported evidence when parent identity arrives or changes", () => {
@@ -150,14 +151,62 @@ describe("light capability module", () => {
 
   it("detects only from real SPOTLIGHT params (NOT 1045 status LED)", () => {
     // 1045 (status LED, on every camera) must NOT be here — that's `camera`, not `light`.
-    expect(LIGHT.detection?.evidenceParams).not.toContain(1045);
-    expect(LIGHT.detection?.evidenceParams).toEqual(expect.arrayContaining([1400, 6080, 1401]));
+    expect(LIGHT.detection?.detect?.({ params: { 1045: "1" } }, "camera")).toBe(false);
+    for (const param of [1400, 1401, 1403, 6080, 6082, 1413]) {
+      expect(LIGHT.detection?.detect?.({ params: { [param]: "0" } }, "camera")).toBe(true);
+    }
     const re = LIGHT.detection!.modelHints![0];
     expect(re.test("Floodlight Cam")).toBe(true);
     expect(re.test("Wired Doorbell")).toBe(false);
   });
 
+  it.each(["T8170", "T8425", "T8426"])("keeps light capability for spotlight model %s", (model) => {
+    const dev = Device.fromRecord("T8000P0000000000", {
+      model,
+      params: { 1400: "0", 1401: "50", 1403: "1" },
+    });
+    expect(dev.capabilities).toContain("light");
+    expect(dev.properties.map((property) => property.name)).toEqual(
+      expect.arrayContaining(["light", "brightness", "spotlightEnabled"]),
+    );
+  });
+
+  it("excludes T8171 despite reported spotlight parameters", () => {
+    const dev = Device.fromRecord("T8000P0000000000", {
+      model: "T8171",
+      deviceType: DeviceType.SOLO_CAMERA_E30,
+      params: { 1400: "0", 1401: "50", 1403: "1" },
+    });
+    expect(dev.capabilities).not.toContain("light");
+    for (const name of ["light", "brightness", "spotlightEnabled"]) {
+      expect(dev.properties.map((property) => property.name)).not.toContain(name);
+    }
+    for (const param of [1400, 1401, 1403, 6080, 6082, 1413]) {
+      expect(LIGHT.detection?.detect?.({ model: "T8171", params: { [param]: "0" } }, "camera")).toBe(false);
+    }
+  });
+
+  it("preserves spotlight name hints without parameter evidence", () => {
+    const dev = Device.fromRecord("T8000P0000000000", { model: "T8425", name: "Floodlight Cam" });
+    expect(dev.capabilities).toContain("light");
+  });
+
   describe("buildCommand — variant resolution", () => {
+    it("refuses the removed type 88 spotlight switch wire", () => {
+      expect(() => intent("light", true, { ...ctx(), deviceType: DeviceType.SOLO_CAMERA_E30 })).toThrow(
+        /light: unknown spotlight switch wire format/,
+      );
+    });
+
+    it.each([44, 45, 46, 48, 8, 9, 14, 15, 19, 23])("keeps int-string switch wire for type %i", (deviceType) => {
+      expect(intent("light", true, { ...ctx(2), deviceType })).toMatchObject({
+        kind: "set-param",
+        param: LIGHT_CMD.FLOODLIGHT_SWITCH,
+        form: "int-string",
+        value: 1,
+        channel: 2,
+      });
+    });
     it.each([
       [47, true],
       [87, true],

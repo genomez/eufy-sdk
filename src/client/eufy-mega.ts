@@ -1,13 +1,13 @@
 /** Modified for genomez S1 experimental source preview, 2026-10-17. */
 /**
- * eufy-sdk â€” one client for every eufy device class.
+ * eufy-sdk — one client for every eufy device class.
  *
  * Cloud APIs:  the eufy v6 cloud (+ legacy, planned)
  * Realtime:    secure MQTT (appliances)  +  P2P (cameras/HomeBases)
  *
  *   const eufy = new EufyMega({ email, password, region: "eu-pr" });
- *   await eufy.login(); // â†’ LoginResult; on success the SDK auto-starts realtime (push/MQTT/wired P2P)
- *   eufy.on("motion", (e) => console.log(e.deviceSn)); // typed semantic events â€” flowing already
+ *   await eufy.login(); // → LoginResult; on success the SDK auto-starts realtime (push/MQTT/wired P2P)
+ *   eufy.on("motion", (e) => console.log(e.deviceSn)); // typed semantic events — flowing already
  *   const dev = await eufy.getDevice((await eufy.getDevices())[0].sn);
  *   await dev.camera?.()?.snapshotStored?.();
  *
@@ -29,13 +29,13 @@ import { VacuumMapStore } from "../model/index.js";
 import { type P2PSession, type P2PFrame } from "../transport/p2p/p2p-session.js";
 import { P2PCommandRouter } from "../transport/p2p/command-router.js";
 import { consumeRetiredInformationRead } from "../transport/rtc/retired-information-read.js";
-import { consumeConnectionDeadline } from "../transport/rtc/connection-deadline.js";
 import { RtcCommandRouter } from "../transport/rtc/command-router.js";
 import { commandOutcome, RtcCommandRejection } from "../transport/rtc/command-diagnostics.js";
 import { RtcLateEffectReconciler } from "./rtc-late-effect.js";
 import { RtcLateContraryObserver, type RtcReportIdentity } from "./rtc-late-contrary.js";
 export type { LateContraryEffect, LateContraryConfirmation } from "./rtc-late-contrary.js";
 import { CommandIntentRegistry, type CommandIntent } from "./command-intents.js";
+import { CameraHealthIngress } from "./camera-health-ingress.js";
 import { CommandHealthGate, type CommandHealthToken } from "./command-health.js";
 export {
   COMMAND_FAST_REFUSAL_MAX_MS,
@@ -43,6 +43,7 @@ export {
   COMMAND_FAST_REFUSAL_THRESHOLD,
   COMMAND_DEGRADED_COOLDOWN_MS,
 } from "./command-health.js";
+export type { CameraHealth, CameraHealthEvent } from "./camera-health.js";
 export type { CommandHealthEvent } from "./command-health.js";
 import type { PortalResponse } from "../transport/rtc/portal-packet.js";
 import { stationOf } from "../transport/p2p/station-channels.js";
@@ -56,6 +57,16 @@ import { inspectRtcPushSignal } from "./rtc-push.js";
 import { EventRoutingRecorder, type EventRoutingDiagnostics } from "./event-routing-diagnostics.js";
 export type { EventRoutingDiagnostics } from "./event-routing-diagnostics.js";
 import { RtcObservationRecorder, type RtcObservationDiagnostics } from "./rtc-observation-diagnostics.js";
+import {
+  PropertyPreparationRecorder,
+  type PropertyPreparationObservation,
+  type PropertyPreparationDiagnostics,
+} from "./property-preparation-diagnostics.js";
+export type {
+  PropertyPreparationDiagnostics,
+  PropertyPreparationEvidence,
+  PropertyPreparationPhase,
+} from "./property-preparation-diagnostics.js";
 export type { RtcObservationDiagnostics } from "./rtc-observation-diagnostics.js";
 import {
   emptyStateRefreshEvidence,
@@ -156,6 +167,7 @@ type ReadContext = CommandContext & { stationSerial?: string };
 
 /** Invocation ownership carried through the bound sink without changing capability setters. */
 interface PropertyInvocation {
+  preparation?: PropertyPreparationObservation;
   ordinal: number;
   execution?: CommandExecutionContext;
   intent?: CommandIntent;
@@ -220,7 +232,7 @@ function tuyaDevIdFrom(raw: Record<string, unknown>): string | undefined {
 }
 
 /**
- * Default cloud-param poll interval (10 min) â€” paced to the cloud's own refresh rate rather than to a
+ * Default cloud-param poll interval (10 min) — paced to the cloud's own refresh rate rather than to a
  * host's refresh appetite. Rationale and the measurements behind the number are on
  * {@link EufyMegaOptions.pollMs}, the knob that overrides it (`0` disables the loop).
  */
@@ -247,7 +259,6 @@ const SESSION_RECYCLE_WAIT_MS = 5_000;
 interface StateRefreshResult {
   refreshed: boolean;
   retiredSession: boolean;
-  connectionDeadline: boolean;
 }
 
 interface RealtimeGeneration {
@@ -260,6 +271,7 @@ interface RealtimeGeneration {
   superseded?: RealtimeReadiness;
   settled: boolean;
   stateRefreshFailures?: number;
+  stateRefreshDeferrals?: { retryAttempt: number; count: number };
 }
 
 class RealtimeStartupSupersededError extends Error {}
@@ -304,7 +316,7 @@ function readinessSnapshot(
 }
 
 // Typed EventEmitter surface: declaration-merge strongly-typed on/once/off/emit onto the class so
-// `eufy.on("motion", e => â€¦)` autocompletes the name and types the payload, while the runtime is
+// `eufy.on("motion", e => …)` autocompletes the name and types the payload, while the runtime is
 // still the untyped node EventEmitter. Only these overloads are visible to consumers.
 export interface EufyMega {
   on<E extends EufyMegaEvent>(event: E, listener: (...args: EufyMegaEventMap[E]) => void): this;
@@ -314,13 +326,13 @@ export interface EufyMega {
 }
 
 /**
- * The package entry point â€” one client per Anker eufy account. Handles the {@link login} state machine
+ * The package entry point — one client per Anker eufy account. Handles the {@link login} state machine
  * (captcha/2FA/persistence), resolves the account's devices ({@link getDevices}/{@link getDevice}
- * â†’ capability-driven {@link Device}s), **auto-manages** the realtime channels (FCM push + secure MQTT
+ * → capability-driven {@link Device}s), **auto-manages** the realtime channels (FCM push + secure MQTT
  * start on login; P2P opens on demand per station and idle-detaches battery cameras), and fans every
- * transport's traffic into one typed semantic event stream (`eufy.on("motion", â€¦)`). Construct it with
+ * transport's traffic into one typed semantic event stream (`eufy.on("motion", …)`). Construct it with
  * an {@link EufyMegaOptions} (email/password + optional session/push stores), then drive `login()` to
- * completion â€” no `connect*` call needed (set `autoRealtime:false` to opt out). Call {@link disconnect}
+ * completion — no `connect*` call needed (set `autoRealtime:false` to opt out). Call {@link disconnect}
  * to tear the realtime channels down.
  */
 export class EufyMega extends EventEmitter {
@@ -330,16 +342,16 @@ export class EufyMega extends EventEmitter {
    * The installed secure-MQTT transports, one per credential scope.
    *
    * There is more than one because `get_user_mqtt_info` issues a DIFFERENT certificate per `app-name`
-   * and the broker's policy grants each line's topic space to its own cert â€” a `eufy_life` light's
+   * and the broker's policy grants each line's topic space to its own cert — a `eufy_life` light's
    * topics are silently denied to the default credential. A device's
    * scope is a pure function of its record, so the set of live connections follows the roster with no
    * extra state to keep in sync, and a scope with no devices is never connected.
    */
   private readonly transports = new Map<MqttScope, RealtimeTransport>();
-  /** Shared in-flight/settled `startMqtt()` promise PER SCOPE â€” so realtime bring-up and an on-demand
+  /** Shared in-flight/settled `startMqtt()` promise PER SCOPE — so realtime bring-up and an on-demand
    * publish await the SAME fully-connected transport instead of racing (and never open two). */
   private readonly mqttReady = new Map<MqttScope, Promise<void>>();
-  /** Device list/record/capability resolution + the frameâ†’caps cache. */
+  /** Device list/record/capability resolution + the frame→caps cache. */
   private readonly registry: DeviceRegistry;
   private pushClient?: PushClient;
   private readonly pushLifecycle = new PushLifecycleRecorder();
@@ -355,7 +367,7 @@ export class EufyMega extends EventEmitter {
    * The bring-up is fire-and-forget, so a caller that disconnects while it is still running would
    * otherwise leave behind whatever opened after teardown had already passed. A single "closing" flag
    * is not enough: `disconnect()` followed by `login()` clears it, and the stale bring-up then finishes,
-   * sees nothing amiss, and overwrites the live channels with its own â€” stranding the sockets it was
+   * sees nothing amiss, and overwrites the live channels with its own — stranding the sockets it was
    * meant to release. Comparing generations makes each bring-up responsible for exactly its own epoch.
    */
   private realtimeEpoch = 0;
@@ -367,7 +379,7 @@ export class EufyMega extends EventEmitter {
   private realtimeGeneration?: RealtimeGeneration;
   /**
    * Devices already handed to a caller, so a realtime report refreshes the object they are holding
-   * rather than only the registry. Weak so a caller dropping a `Device` still lets it be collected â€”
+   * rather than only the registry. Weak so a caller dropping a `Device` still lets it be collected —
    * this map must never be what keeps one alive.
    */
   private readonly liveDevices = new Map<string, WeakRef<Device>>();
@@ -378,7 +390,7 @@ export class EufyMega extends EventEmitter {
   /** Local writes already awaiting the same semantic transition, counted per reflected member. */
   private readonly commandRefreshes = new Map<string, { epoch: number; count: number }>();
   /**
-   * The param ids each bound device's read getters were built from â€” the evidence the gate saw at bind
+   * The param ids each bound device's read getters were built from — the evidence the gate saw at bind
    * time. Compared against an incoming report to notice when one carries an id the getters do not cover
    * yet, which is the signal to rebuild them (see {@link rebindReads}).
    */
@@ -390,7 +402,7 @@ export class EufyMega extends EventEmitter {
   /** A cached reconciliation supersedes the context of an older asynchronous read adoption. */
   private readonly polledReads = new WeakMap<Device, symbol>();
   private readonly readContexts = new WeakMap<Device, ReadContext>();
-  /** Per-SKU DP catalog cache â€” keyed on model/T-code, fetched lazily via `get_product_data_point`. */
+  /** Per-SKU DP catalog cache — keyed on model/T-code, fetched lazily via `get_product_data_point`. */
   private readonly dpCatalogCache = new Map<string, DpCatalog>();
   /** Semantic event names that speculatively pre-warm P2P (resolved once from the options; empty = off). */
   private readonly prewarmEvents: ReadonlySet<string>;
@@ -413,7 +425,7 @@ export class EufyMega extends EventEmitter {
   /** Latest authoritative availability observation per device; no heuristic path writes this map. */
   private readonly availabilityObservations = new Map<string, AvailabilityObservation>();
   /**
-   * One map per clean-line device, assembled from the pieces its `biz/â€¦/res` frames carry.
+   * One map per clean-line device, assembled from the pieces its `biz/…/res` frames carry.
    *
    * Created on the first frame that decodes rather than per device: a store for a robot that has never
    * sent a map would answer `undefined` to everything, so allocating one buys nothing.
@@ -427,6 +439,7 @@ export class EufyMega extends EventEmitter {
   private readonly stateRefreshTimer = new Timer();
   private readonly commandIntents = new CommandIntentRegistry();
   private readonly propertyPreparations = new Set<AbortController>();
+  private readonly cameraHealthIngress: CameraHealthIngress;
   private readonly commandHealth = new CommandHealthGate((event) => {
     if (event.status === "command_degraded") this.lateEffects.suppressAutomatic(event.device, event.property);
     this.emit("commandHealth", event);
@@ -499,8 +512,17 @@ export class EufyMega extends EventEmitter {
   };
   /** Successful observations and finite failures in the current realtime generation. */
   private stateRefreshEvidence = emptyStateRefreshEvidence();
+  /** Current timer ownership and bounded retry evidence. */
+  private stateRefreshSchedule?: {
+    generation: RealtimeGeneration;
+    nextRetryAtMs: number | null;
+    reason: StateRefreshDiagnostics["retryReason"];
+  };
+  /** Teardown invalidates unfinished scheduled work even when the realtime epoch is retained. */
+  private stateRefreshLifecycle = 0;
   private eventRoutingRecorder = new EventRoutingRecorder();
   private rtcObservationRecorder = new RtcObservationRecorder();
+  private readonly propertyPreparationRecorder = new PropertyPreparationRecorder();
   /** Active post-command information reads, cancelled when the realtime epoch ends. */
   private readonly observationReads = new Set<AbortController>();
 
@@ -535,9 +557,18 @@ export class EufyMega extends EventEmitter {
     }
     this.registry = new DeviceRegistry({
       mega: this.mega,
-      onRoster: () => this.reconcileStationContexts(),
+      onRoster: () => {
+        this.reconcileStationContexts();
+        this.cameraHealthIngress?.roster(this.registry.list());
+      },
+      onCloudParams: (sn, params) => this.cameraHealthIngress?.params(sn, params, "cloud_params"),
       onError: (e) => this.reportError(e, "device_registry"),
       logger: opts.logger,
+    });
+    this.cameraHealthIngress = new CameraHealthIngress(opts.email, this.registry, (event) => {
+      try {
+        this.emit("cameraHealth", event);
+      } catch {}
     });
     this.p2p = new P2PCommandRouter({
       mega: this.mega,
@@ -553,8 +584,16 @@ export class EufyMega extends EventEmitter {
         await this.registry.getDevices();
         this.reconcileStorageTelemetryOwners();
       },
-      onConnect: (sn) => this.emit("p2pConnect", sn),
-      onClose: (sn) => this.emit("p2pClose", sn),
+      onConnect: (sn) => {
+        this.cameraHealthIngress.parent(sn, "connected", "p2p");
+        this.emit("p2pConnect", sn);
+      },
+      onClose: (sn) => {
+        this.cameraHealthIngress.parent(sn, "disconnected", "p2p");
+        this.emit("p2pClose", sn);
+      },
+      observeLiveMedia: (sn) => this.cameraHealthIngress.live(sn),
+      observeCommand: (sn) => this.cameraHealthIngress.command(sn),
       onError: (e) => this.reportError(e, "p2p"),
       onLevel2Ready: (sn, cipherId) => this.emit("p2pLevel2Ready", { stationSn: sn, cipherId }),
       onFrame: (stationSn, f) => this.onP2PFrame(stationSn, f),
@@ -576,6 +615,9 @@ export class EufyMega extends EventEmitter {
       commandKeepaliveMs: opts.rtc?.commandKeepaliveMs,
       maxCallRetries: opts.rtc?.maxCallRetries,
       onFrame: (stationSn, frame, identity) => this.onRtcFrame(stationSn, frame, identity),
+      observeCommand: (sn) => this.cameraHealthIngress.command(sn),
+      onTransport: (sn, state) => this.cameraHealthIngress.parent(sn, state, "rtc"),
+      observeLiveMedia: (sn) => this.cameraHealthIngress.live(sn),
       onSessionReplaced: (stationSn) => this.lateContrary.closeStation(stationSn),
       onSessionClosed: (stationSn) => {
         this.lateContrary.closeStation(stationSn);
@@ -599,7 +641,7 @@ export class EufyMega extends EventEmitter {
       },
       onCommandAck: (info) => this.emit("commandAck", info as EufyMegaEventMap["commandAck"][0]),
       onError: (e) => this.reportError(e, "mqtt"),
-      // The `a2` account id an `eufy_life` DP frame embeds â€” the owning member's `admin_user_id`,
+      // The `a2` account id an `eufy_life` DP frame embeds — the owning member's `admin_user_id`,
       // falling back to the logged-in account's user id (the confirmed script path does the same).
       resolveAccountId: (dev) => {
         const member = ((dev.raw ?? {}) as Record<string, unknown>).member as Record<string, unknown> | undefined;
@@ -611,7 +653,7 @@ export class EufyMega extends EventEmitter {
       // lives in the http layer (transport/http/light-catalog); the mqtt router owns the frame bytes.
       resolvePreset: (presetId) => resolveLightEffectHttp(this.mega, presetId),
       /**
-       * Publish over the persistent transport for THIS device's credential scope â€” one connection per
+       * Publish over the persistent transport for THIS device's credential scope — one connection per
        * product line carrying both legs, as the app does. CONFIRMED live (2026-07-28) that the
        * `eufy_life` credential grants the command leg as well as the reports.
        *
@@ -680,8 +722,8 @@ export class EufyMega extends EventEmitter {
   /**
    * Route an internal error to the host, without being able to kill it.
    *
-   * A {@link SessionExpiredError} â€” a kicked/expired token, the transport having already cleared the
-   * session â€” is emitted as the dedicated `sessionExpired` event; it is NOT also sent to `error`. Every
+   * A {@link SessionExpiredError} — a kicked/expired token, the transport having already cleared the
+   * session — is emitted as the dedicated `sessionExpired` event; it is NOT also sent to `error`. Every
    * other error goes to `error`.
    *
    * Either way it falls back to a logged warning when nothing listens, because `error` on an
@@ -689,7 +731,7 @@ export class EufyMega extends EventEmitter {
    * fire-and-forget path (a transport callback, an un-awaited re-bind) where that throw would land as an
    * unhandled rejection and abort the process.
    *
-   * Only reported-error paths reach here â€” an error thrown straight out of a direct call is the caller's
+   * Only reported-error paths reach here — an error thrown straight out of a direct call is the caller's
    * to handle.
    */
   private reportError(e: unknown, origin: SdkErrorOrigin): void {
@@ -705,15 +747,15 @@ export class EufyMega extends EventEmitter {
 
   /**
    * The single entry point that installs the persistent secure-MQTT transport for one credential
-   * scope â€” used by BOTH the auto-realtime bring-up ({@link ensureRealtime}) and an on-demand light-DP
+   * scope — used by BOTH the auto-realtime bring-up ({@link ensureRealtime}) and an on-demand light-DP
    * publish (the router's `publishSecure`, wired in the constructor). Memoised per scope on
    * {@link mqttReady} so the two can't race into two connections: whoever calls first starts it, the
    * other awaits the same promise. Resolves only once {@link startMqtt} has `connect()`-ed, the
-   * transport is installed, and every device on that scope is subscribed â€” so a publish that awaits it
+   * transport is installed, and every device on that scope is subscribed — so a publish that awaits it
    * always hits a live, subscribed client (never the silent no-op of firing into an unconnected
    * transport). Epoch-guarded: if a {@link disconnect} lands mid bring-up, the freshly-connected
    * transport is torn down instead of stranded. On failure the memo is cleared so a later call retries
-   * â€” but only if it is still THIS attempt's memo: a `disconnect()` clears the map and a later call can
+   * — but only if it is still THIS attempt's memo: a `disconnect()` clears the map and a later call can
    * install a second bring-up, so an abandoned attempt that rejects afterwards must not wipe its
    * successor (that would let two `connect()`s run concurrently and strand whichever installed first,
    * still subscribed and double-emitting).
@@ -745,12 +787,12 @@ export class EufyMega extends EventEmitter {
    * if it is resolved before its first report. Waiting here is the cheap path: the returned `Device`
    * already carries its reads, so a caller never has to watch for them appearing.
    *
-   * It is a head start, not the mechanism â€” {@link rebindReads} installs reads that arrive later, which
+   * It is a head start, not the mechanism — {@link rebindReads} installs reads that arrive later, which
    * is what covers a device too slow (or too idle) to answer inside the window. A docked robot is
    * exactly that.
    *
    * Skipped entirely for a device with a pollable cloud record, for an already-reporting device, and
-   * when realtime is off â€” so the common path adds nothing. Resolving on timeout leaves a silent device
+   * when realtime is off — so the common path adds nothing. Resolving on timeout leaves a silent device
    * read-less rather than failing the lookup.
    */
   private async awaitFirstRealtimeState(sn: string): Promise<void> {
@@ -802,11 +844,11 @@ export class EufyMega extends EventEmitter {
    * the new value without re-fetching). Announces every property whose value moved, then `deviceState`.
    *
    * Both writes matter: the registry alone would leave an existing `Device` stale until its freshness
-   * window expired, and that refresh re-reads the CLOUD record â€” which for a realtime-only line does
+   * window expired, and that refresh re-reads the CLOUD record — which for a realtime-only line does
    * not carry this state at all.
    *
    * This is three of the four inbound paths the security line has, and the ONLY one the clean and life
-   * lines have â€” a robot's cloud record carries none of its data points â€” so it is what brings those
+   * lines have — a robot's cloud record carries none of its data points — so it is what brings those
    * lines into scope for a property announcement at all. The announcement is edge-triggered for free:
    * {@link Device.applyParams} names only the properties whose value actually moved, so a device
    * re-reporting the same state is silent with no dedupe table to keep.
@@ -840,6 +882,7 @@ export class EufyMega extends EventEmitter {
     const observedAtMs = Date.now();
     if (rtcReportParameters(stationSn, frame, this.registry).size) this.scheduleReportRefresh(stationSn);
     for (const [sn, params] of rtcStateParameters(stationSn, frame, this.registry)) {
+      this.cameraHealthIngress.params(sn, params, "hub_report");
       this.applyRealtimeState(sn, params);
       this.lateEffects.observe(sn, params);
       if (identity) this.lateContrary.observe(sn, params, identity);
@@ -867,6 +910,7 @@ export class EufyMega extends EventEmitter {
       this.eventRoutingRecorder.record("rtc", inspected.decision, inspected.model, inspected.payload, [], frame.cmd);
       return;
     }
+    this.cameraHealthIngress.push(signal.deviceSn, signal.stationSn, signal.payload, signal.eventType);
     const outputs = decodeCapabilityEvent(signal, this.capsForEvent(signal.deviceSn));
     this.eventRoutingRecorder.record(
       "rtc",
@@ -1128,12 +1172,12 @@ export class EufyMega extends EventEmitter {
   /**
    * Re-install a bound device's read getters after a report widened the evidence.
    *
-   * The getters are built ONCE, and only for params the device had already reported â€” so a line whose
+   * The getters are built ONCE, and only for params the device had already reported — so a line whose
    * state arrives only over realtime binds with NO getters at all and would never grow them, no matter
    * how much state landed afterwards. A robot vacuum is exactly that: its cloud record carries none of
    * its data points, so the first report is what makes the reads exist.
    *
-   * Re-binding is how the capability-gain path handles the same problem, and it is idempotent â€” the
+   * Re-binding is how the capability-gain path handles the same problem, and it is idempotent — the
    * getters read live state through a closure over `getProperty`, so rebuilding them keeps every value
    * a caller can already see. Only widening triggers it, so a device reporting the same ids repeatedly
    * rebinds once.
@@ -1199,7 +1243,7 @@ export class EufyMega extends EventEmitter {
     }
   }
 
-  /** The distinct credential scopes the current MQTT roster needs â€” no devices on a scope, no connection. */
+  /** The distinct credential scopes the current MQTT roster needs — no devices on a scope, no connection. */
   private mqttScopesInUse(): MqttScope[] {
     return [...new Set(this.getMqttDevices().map(mqttScopeFor))];
   }
@@ -1207,7 +1251,7 @@ export class EufyMega extends EventEmitter {
   /**
    * Emit a semantic capability event whose name is only known at runtime (`decodeCapabilityEvent`
    * returns a plain-string `event` + `payload`). The typed `emit` overload requires a literal event
-   * key, so this is the ONE place that bridges the dynamic name to the typed surface â€” every
+   * key, so this is the ONE place that bridges the dynamic name to the typed surface — every
    * `emit:` string in a capability module is a member of {@link DeviceEventMap}, so the cast is
    * sound. Keeping it here means the four dispatch loops stay a single call, not a scattered cast.
    *
@@ -1245,8 +1289,8 @@ export class EufyMega extends EventEmitter {
     const repeat = this.noteState(event, payload);
     if (opts.edge && repeat) return;
     const emit = this.emit as (e: string, p: unknown) => boolean;
-    emit.call(this, event, payload); // the named listener (eufy.on("motion", â€¦))
-    emit.call(this, "event", { ...payload, eventName: event }); // the catch-all (eufy.on("event", â€¦)); avoids colliding with payload.name
+    emit.call(this, event, payload); // the named listener (eufy.on("motion", …))
+    emit.call(this, "event", { ...payload, eventName: event }); // the catch-all (eufy.on("event", …)); avoids colliding with payload.name
   }
 
   /**
@@ -1256,14 +1300,14 @@ export class EufyMega extends EventEmitter {
    * value to compare against: a device that reports the written param on its own session lands it through
    * {@link applyRealtimeState} within seconds, and polling the account device list to learn what the device has
    * already said costs a dozen requests to reach the same answer. Without an expectation, "converged" means
-   * only "differs from what was read before", which state already on hand can satisfy spuriously â€” and the
+   * only "differs from what was read before", which state already on hand can satisfy spuriously — and the
    * caller that has no expectation is the push path, where the signal itself is the news that a re-read is owed.
    *
    * An expected value on an RTC device requests at most one bounded information report before the cloud
    * fallback. It shares the station session, sends no write, and is cancelled when the epoch ends.
    *
    * The cloud half is asked for through {@link DeviceRegistry.refreshedList}, never by fetching the account
-   * list outright. The fetch is account-wide â€” one house list plus one device list per house â€” so a param that
+   * list outright. The fetch is account-wide — one house list plus one device list per house — so a param that
    * never converges would otherwise spend a whole burst of those every iteration of this loop, and concurrent
    * transitions would multiply it by however many are in flight. The registry's reuse window and its
    * single in-flight fetch collapse all of that to one list per window, shared across every waiter. The loop
@@ -1369,7 +1413,7 @@ export class EufyMega extends EventEmitter {
    * {@link SESSION_RECYCLE_WAIT_MS} for it.
    *
    * The recycle itself waits for every viewer to detach, so that a write does not drop a live stream.
-   * That wait is unbounded by design â€” a viewer may watch indefinitely â€” and it happens INSIDE the keyed
+   * That wait is unbounded by design — a viewer may watch indefinitely — and it happens INSIDE the keyed
    * transaction, so the next write to the same member queues behind it. Racing it decouples the two: the
    * losing recycle stays pending and still runs when the station falls idle, it just stops gating an
    * unrelated write.
@@ -1383,7 +1427,7 @@ export class EufyMega extends EventEmitter {
       this.p2p.resetStandaloneSession(sn),
       releaseWrite.then(() =>
         this.opts.logger?.debug(
-          `[session ${sn}] recycle still waiting on an attached viewer â€” releasing the write that asked for it`,
+          `[session ${sn}] recycle still waiting on an attached viewer — releasing the write that asked for it`,
         ),
       ),
     ]);
@@ -1395,7 +1439,7 @@ export class EufyMega extends EventEmitter {
    * Compared against {@link CommandObservation.observed} where the property's decode is not the identity, and
    * against the raw expectation only where the two coincide. A disable-bit param reports `0` for a property
    * that reads `true`, so comparing the decoded value against the raw expectation would reject a write that
-   * had landed â€” the value converged and the transition event never fired.
+   * had landed — the value converged and the transition event never fired.
    */
   private matchesObservation(
     value: unknown,
@@ -1434,7 +1478,7 @@ export class EufyMega extends EventEmitter {
    * Fan one inbound P2P frame out: raw escape hatch, device state, then semantic events.
    *
    * The frame is decoded against the capabilities of the device it came FROM, resolved from the
-   * `(station, channel)` pair â€” a shared command id (1700 serves pan-tilt, spotlight and privacy)
+   * `(station, channel)` pair — a shared command id (1700 serves pan-tilt, spotlight and privacy)
    * would otherwise let an unrelated module's parser fabricate an event. The decode is a model
    * concern kept on this side of the boundary, so the router never imports model.
    *
@@ -1443,7 +1487,7 @@ export class EufyMega extends EventEmitter {
    * fields still win on conflict.
    *
    * Params the station volunteered land as device state first. They arrive in the cloud record's own
-   * `param_type â†’ value` shape, so no capability has to claim an id it does not own, and the reads
+   * `param_type → value` shape, so no capability has to claim an id it does not own, and the reads
    * they back stop waiting for the next cloud poll. A capability decode follows for the frames that
    * report a bare value rather than that array, which the generic unwrap cannot recognise. Semantic
    * events are edge-triggered: the same change also arrives as a push seconds later, and is announced
@@ -1454,7 +1498,11 @@ export class EufyMega extends EventEmitter {
     const caps = this.registry.capabilitiesForFrame(stationSn, f.channel);
     const deviceSn = this.registry.serialForFrame(stationSn, f.channel);
     const signal = { source: "p2p-frame" as const, ...f };
-    if (f.params) this.applyRealtimeState(deviceSn, f.params);
+    if (f.params) {
+      if (deviceSn)
+        this.cameraHealthIngress.params(deviceSn, f.params, stationSn === deviceSn ? undefined : "hub_report");
+      this.applyRealtimeState(deviceSn, f.params);
+    }
     this.applyRealtimeReport(deviceSn, decodeCapabilityState(signal, caps));
     for (const ev of decodeCapabilityEvent(signal, caps))
       this.emitSemantic(ev.event, deviceSn ? { deviceSn, ...ev.payload } : ev.payload, {
@@ -1466,14 +1514,14 @@ export class EufyMega extends EventEmitter {
   /**
    * Record the state this signal reports, and say whether it merely repeats the last one announced.
    *
-   * One physical change reaches the SDK on several transports â€” an entry sensor's contact arrives as
-   * a station notify ~2 s before the identical FCM push â€” and is announced once. The comparison is
+   * One physical change reaches the SDK on several transports — an entry sensor's contact arrives as
+   * a station notify ~2 s before the identical FCM push — and is announced once. The comparison is
    * edge-triggered on the field a capability declared
-   * ({@link CapabilityModule.stateEvents}) rather than time-windowed: a genuine openâ†’closeâ†’open burst
+   * ({@link CapabilityModule.stateEvents}) rather than time-windowed: a genuine open→close→open burst
    * differs from the last value at every step and passes intact, where any window wide enough to
    * cover the transport spread would have swallowed the second open.
    *
-   * Returns `false` â€” never a repeat â€” in the three cases where suppressing would lose information:
+   * Returns `false` — never a repeat — in the three cases where suppressing would lose information:
    * an event no module declared as state-carrying (a pulse: motion, a doorbell press, whose
    * consecutive occurrences are all real), a signal carrying no value for the field (it says nothing
    * about the state, so it can neither duplicate nor overwrite it), and one that can't be attributed
@@ -1493,10 +1541,10 @@ export class EufyMega extends EventEmitter {
   }
 
   /**
-   * Begin (or resume) login. Returns a `LoginResult` â€” switch on `status`:
-   *  - `ok` â†’ authenticated (`result.session`).
-   *  - `captcha` â†’ show `result.image`, then {@link solveCaptcha}(answer).
-   *  - `2fa` â†’ a code was sent; {@link submitVerifyCode}(code).
+   * Begin (or resume) login. Returns a `LoginResult` — switch on `status`:
+   *  - `ok` → authenticated (`result.session`).
+   *  - `captcha` → show `result.image`, then {@link solveCaptcha}(answer).
+   *  - `2fa` → a code was sent; {@link submitVerifyCode}(code).
    *
    * A restored session resolves straight to `ok`. No exceptions for the expected captcha/2FA flow.
    *
@@ -1523,7 +1571,7 @@ export class EufyMega extends EventEmitter {
 
   /**
    * On a successful login, kick off auto-realtime (unless `autoRealtime:false`). Fire-and-forget so
-   * `login()` returns as soon as the session is ready â€” realtime channels come up in the background and
+   * `login()` returns as soon as the session is ready — realtime channels come up in the background and
    * surface failures via `error`. Idempotent through the retained generation promise.
    */
   private afterLogin(result: LoginResult): LoginResult {
@@ -1578,7 +1626,7 @@ export class EufyMega extends EventEmitter {
 
   /**
    * Fetch the per-user secure-MQTT credentials for realtime appliance control. Pass `appName` to
-   * request a specific capability scope on the current session without re-logging in â€” security
+   * request a specific capability scope on the current session without re-logging in — security
    * devices (locks/garage) need the `eufy_security` scope, which the default scope can't reach.
    */
   getUserMqttInfo(appName?: string): Promise<SecureMqttCredentials> {
@@ -1589,10 +1637,10 @@ export class EufyMega extends EventEmitter {
 
   /**
    * A {@link CommandSink} bound to one device serial. This is the one place a device's commands fan out
-   * to whichever transport it actually has â€” so capability modules and `getDevice` callers never need to
+   * to whichever transport it actually has — so capability modules and `getDevice` callers never need to
    * know which, and this facade names no capability and builds no wire bytes itself. The `ff09-*` kinds
    * ride ONE shared frame over BOTH P2P and secure-MQTT, so they're routed by the device's topology
-   * (`p2p_did` present â†’ P2P, else MQTT); the chosen router re-resolves its own routing tail. Every
+   * (`p2p_did` present → P2P, else MQTT); the chosen router re-resolves its own routing tail. Every
    * other kind is P2P.
    */
   private commandSinkFor(sn: string, invocation?: PropertyInvocation): CommandSink {
@@ -1741,8 +1789,8 @@ export class EufyMega extends EventEmitter {
    * Combine explicit P2P media with the optional passive push-thumbnail provider.
    *
    * The retained still also becomes the answer for a live still that could not be captured. One session
-   * serves one camera at a time and a live view outranks a tile â€” a still does not open a connection of its
-   * own â€” so a still asked for while a sibling is being watched is refused at the transport. Answering the retained bytes answers the read rather than
+   * serves one camera at a time and a live view outranks a tile — a still does not open a connection of its
+   * own — so a still asked for while a sibling is being watched is refused at the transport. Answering the retained bytes answers the read rather than
    * failing it, marked {@link MediaProvider.snapshotLive} `retained` so the caller knows they are not
    * current. With nothing retained the refusal stands.
    */
@@ -1772,7 +1820,7 @@ export class EufyMega extends EventEmitter {
           const geometry = retained && jpegGeometry(retained);
           if (!retained || !geometry) throw error;
           (this.opts.logger ?? noopLogger).debug(
-            `[media] a live still was unavailable (${error.reason}) â€” answering the retained one instead`,
+            `[media] a live still was unavailable (${error.reason}) — answering the retained one instead`,
           );
           return { jpeg: retained, ...geometry, retained: true };
         }
@@ -1781,14 +1829,14 @@ export class EufyMega extends EventEmitter {
   }
 
   /**
-   * Choose the transport stack for one command â€” the routing half of {@link commandSinkFor}.
+   * Choose the transport stack for one command — the routing half of {@link commandSinkFor}.
    *
    * The `ff09-*` kinds share ONE frame that rides either transport, so each stack is asked whether it
    * drives this device (`claimsDevice`) rather than inferring from the kind. `registry.require` throws
    * on an unloaded serial, so a routing decision never silently falls through to the wrong transport.
    * The `eufy_life` DP writes (smart lights) are secure-MQTT-only. `aiot-dp` routes to either the
    * Anker AIoT MQTT stack or the legacy Tuya REST router depending on the device's category
-   * (`eufy_home_tuya` â†’ Tuya, everything else â†’ MQTT). The capability layer emits a single `aiot-dp`
+   * (`eufy_home_tuya` → Tuya, everything else → MQTT). The capability layer emits a single `aiot-dp`
    * kind and stays transport-agnostic; only the facade sees both sides and decides here. Everything
    * else is RTC for a supported station and its attached devices, or P2P for other stations.
    */
@@ -1809,18 +1857,45 @@ export class EufyMega extends EventEmitter {
   ): { dispatch: (deadlineAtMs?: number) => Promise<void>; passiveReadback?: boolean } {
     if (cmd.kind === "ff09-actuate" || cmd.kind === "ff09-autolock" || cmd.kind === "ff09-setting-toggle") {
       const dev = this.registry.require(sn);
-      if (P2PCommandRouter.claimsDevice(dev)) return { dispatch: () => this.p2p.dispatchCommand(sn, cmd) };
-      if (MqttCommandRouter.claimsDevice(dev)) return { dispatch: () => this.mqtt.dispatchCommand(sn, cmd) };
+      if (P2PCommandRouter.claimsDevice(dev))
+        return {
+          dispatch: () => {
+            invocation?.preparation?.finish("transport_handoff");
+            return this.p2p.dispatchCommand(sn, cmd);
+          },
+        };
+      if (MqttCommandRouter.claimsDevice(dev))
+        return {
+          dispatch: () => {
+            invocation?.preparation?.finish("transport_handoff");
+            return this.mqtt.dispatchCommand(sn, cmd);
+          },
+        };
       throw new Error(`no transport stack claims device ${sn} for a ${cmd.kind} command`);
     }
     if (cmd.kind === "mqtt-dp" || cmd.kind === "mqtt-dp-preset" || cmd.kind === "mqtt-dp-color") {
-      return { dispatch: () => this.mqtt.dispatchCommand(sn, cmd) };
+      return {
+        dispatch: () => {
+          invocation?.preparation?.finish("transport_handoff");
+          return this.mqtt.dispatchCommand(sn, cmd);
+        },
+      };
     }
     if (cmd.kind === "aiot-dp") {
       const dev = this.registry.require(sn);
       return dev.category === "eufy_home_tuya"
-        ? { dispatch: () => this.tuya.dispatchCommand(sn, cmd) }
-        : { dispatch: () => this.mqtt.dispatchCommand(sn, cmd) };
+        ? {
+            dispatch: () => {
+              invocation?.preparation?.finish("transport_handoff");
+              return this.tuya.dispatchCommand(sn, cmd);
+            },
+          }
+        : {
+            dispatch: () => {
+              invocation?.preparation?.finish("transport_handoff");
+              return this.mqtt.dispatchCommand(sn, cmd);
+            },
+          };
     }
     const target = this.rtcDevice(sn);
     if (target) {
@@ -1863,6 +1938,7 @@ export class EufyMega extends EventEmitter {
                 )
               : undefined;
           try {
+            invocation?.preparation?.finish("transport_handoff");
             if (invocation?.receiptRequested) {
               invocation.transportAttempted = true;
               const receipt = await this.rtc.dispatchCommandWithReceipt(sn, cmd, {
@@ -1962,7 +2038,12 @@ export class EufyMega extends EventEmitter {
         },
       };
     }
-    return { dispatch: () => this.p2p.dispatchCommand(sn, cmd) };
+    return {
+      dispatch: () => {
+        invocation?.preparation?.finish("transport_handoff");
+        return this.p2p.dispatchCommand(sn, cmd);
+      },
+    };
   }
 
   /** Resolve a cached device sharing a supported RTC station's control channel. */
@@ -2056,11 +2137,11 @@ export class EufyMega extends EventEmitter {
    * P2P. Delegates to `DeviceRegistry` (the house-scoped merge/dedupe lives there).
    *
    * Side-effect: registers `eufy_home_tuya` devices with the Tuya command router so
-   * the command dispatcher can resolve a eufy SN â†’ Tuya devId without a separate lookup.
+   * the command dispatcher can resolve a eufy SN → Tuya devId without a separate lookup.
    * The Tuya id is extracted from the device's raw cloud record (`tuya_uuid`, `tuya_virtual_id`,
-   * `tuya_device_id`, or `virtualId` fields â€” whichever is non-empty).
+   * `tuya_device_id`, or `virtualId` fields — whichever is non-empty).
    *
-   * A partial cloud outage still resolves, with the devices that answered plus the ones already known â€” but a
+   * A partial cloud outage still resolves, with the devices that answered plus the ones already known — but a
    * session the cloud has rejected REJECTS, with {@link SessionExpiredError}. An empty list would be
    * indistinguishable from an account with no devices.
    */
@@ -2076,13 +2157,13 @@ export class EufyMega extends EventEmitter {
     return devices;
   }
 
-  /** Devices that this client drives over MQTT (transport â‰  p2p). */
+  /** Devices that this client drives over MQTT (transport ≠ p2p). */
   getMqttDevices(): EufyDevice[] {
     return this.registry.mqttDevices();
   }
 
   /**
-   * One page of a robot vacuum's **cleaning history**, in whatever order the cloud returns it â€”
+   * One page of a robot vacuum's **cleaning history**, in whatever order the cloud returns it —
    * newest first in practice, but that is the gateway's contract and the SDK does not re-sort.
    *
    * `pageSize` is how many records to return and `page` is 1-based; page through until the returned
@@ -2090,7 +2171,7 @@ export class EufyMega extends EventEmitter {
    * the device or the response cannot be read.
    *
    * Each record carries a `downloadUrl` for the run's binary detail blob (map and per-run statistics).
-   * The SDK hands that URL over rather than fetching it â€” the host is unconfirmed and the blob's format
+   * The SDK hands that URL over rather than fetching it — the host is unconfirmed and the blob's format
    * is not evidenced yet.
    */
   async getCleanRecords(deviceSn: string, pageSize = 20, page = 1): Promise<CleanRecordPage> {
@@ -2113,8 +2194,8 @@ export class EufyMega extends EventEmitter {
   }
 
   /**
-   * The device's LIVE, authoritative `rtsp://` URL â€” host, path, and the credentials it is
-   * enforcing right now â€” or `undefined` when none is pushed within the read window.
+   * The device's LIVE, authoritative `rtsp://` URL — host, path, and the credentials it is
+   * enforcing right now — or `undefined` when none is pushed within the read window.
    *
    * A thin public door onto the P2P transport (which stays internal otherwise): opens the
    * station's session on demand, so a viewer adopting a tile can call this directly without one
@@ -2123,13 +2204,13 @@ export class EufyMega extends EventEmitter {
    *
    * This is the CANONICAL way to fetch the URL: it provokes and returns it. The `rtsp` capability's
    * `url` member surfaces the SAME value as inbound state for code that already holds a `dev.rtsp()`
-   * and reacts to `propertyChanged` â€” not a second way to fetch it.
+   * and reacts to `propertyChanged` — not a second way to fetch it.
    *
-   * Every failure â€” no route, no account id, level-2 not ready, no push before the deadline â€” collapses
+   * Every failure — no route, no account id, level-2 not ready, no push before the deadline — collapses
    * to `undefined`. The distinction the caller might want (terminal "no RTSP" vs a transient "session
    * not warm yet") is not drawn here yet; a caller that retries on `undefined` recovers from the
-   * transient case. The read window is a fixed 12 s â€” long enough for a cold HomeBase to wake and
-   * answer, and about the ceiling a UI adopting a tile will wait â€” deliberately not caller-tunable.
+   * transient case. The read window is a fixed 12 s — long enough for a cold HomeBase to wake and
+   * answer, and about the ceiling a UI adopting a tile will wait — deliberately not caller-tunable.
    */
   async reportedRtspUrl(sn: string): Promise<string | undefined> {
     return this.p2p.readReportedRtspUrl(sn);
@@ -2138,7 +2219,7 @@ export class EufyMega extends EventEmitter {
   /**
    * Build a live {@link Device} model object for one serial: the resolved codec/capabilities with
    * its current param values applied (named via the param dictionary; unknown ids kept as
-   * `unknown_<pt>`). This is the device primitive â€” `dev.getProperties()`, `dev.has(cap)`, etc.
+   * `unknown_<pt>`). This is the device primitive — `dev.getProperties()`, `dev.has(cap)`, etc.
    * Prefers fresh `get_device_param_list`, falls back to the device-list params.
    * Under auto-realtime the returned Device is wired with a read-through freshness cache (see
    * {@link Device.setFreshnessPolicy}), so repeat reads are served from cache instead of re-fetching,
@@ -2146,7 +2227,7 @@ export class EufyMega extends EventEmitter {
    *
    * That refresh ANNOUNCES what it lands, like the other two inbound paths. Under frequent reads it
    * fires every `cacheTtlMs` where the poll fires every ten minutes, so it is where most fresh cloud values
-   * arrive â€” and each announcing path is edge-triggered on the same live state, so whichever sees a change
+   * arrive — and each announcing path is edge-triggered on the same live state, so whichever sees a change
    * first announces it and the others stay silent. Its timing says only when a caller happened to read; the
    * value is the news. It applies what the device volunteered over realtime on top of the cloud half, which
    * the registry keeps apart, so it can neither revert nor announce a revert of a report already landed.
@@ -2212,15 +2293,15 @@ export class EufyMega extends EventEmitter {
   }
 
   /**
-   * The {@link Ff09SettingsReader} behind `dev.lock()?.getAutoLockState()` â€” picks P2P vs MQTT the same
+   * The {@link Ff09SettingsReader} behind `dev.lock()?.getAutoLockState()` — picks P2P vs MQTT the same
    * way {@link commandSinkFor} does for writes, so `lock.ts` never has to know which transport this
-   * device has. `undefined` when `ctx.adminUserId` is missing (not a lock-family device â€” mirrors
+   * device has. `undefined` when `ctx.adminUserId` is missing (not a lock-family device — mirrors
    * `CommandContext.adminUserId`'s own doc: "present on lock-family devices, absent elsewhere").
    *
    * It earns its own boundary because `GET_SETTINGS` is a request/reply query that neither
    * `CommandSink` (write-only) nor `MediaProvider.p2pQuery` (P2P-only, no decrypt) fits. Named for the
    * frame family rather than the capability, so this facade stays capability-neutral like the layers
-   * below it â€” see `CapabilityModule.actions`'s doc before adding another.
+   * below it — see `CapabilityModule.actions`'s doc before adding another.
    */
   private ff09SettingsReaderFor(sn: string, ctx: CommandContext): Ff09SettingsReader | undefined {
     if (!ctx.adminUserId) return undefined;
@@ -2235,9 +2316,9 @@ export class EufyMega extends EventEmitter {
   }
 
   /**
-   * Auto-realtime bring-up â€” the SDK owns connectivity so the host calls no `connect*`. Runs once per
+   * Auto-realtime bring-up — the SDK owns connectivity so the host calls no `connect*`. Runs once per
    * session after a successful login (unless `autoRealtime:false`). Starts the **always-on, battery-safe**
-   * channels â€” FCM push (account-wide events) + secure MQTT (iff appliances present) â€” and eagerly warms
+   * channels — FCM push (account-wide events) + secure MQTT (iff appliances present) — and eagerly warms
    * P2P **only for wired stations** (HomeBases / mains cameras, which don't drain). Battery cameras are
    * left detached: their P2P opens on demand (command / stream, or an opted-in event pre-warm) and
    * idle-detaches. All channels start concurrently; a single failure surfaces via `error` without
@@ -2355,6 +2436,9 @@ export class EufyMega extends EventEmitter {
    */
   getStateRefreshDiagnostics(): StateRefreshDiagnostics {
     const generation = this.realtimeGeneration;
+    const active = generation?.epoch === this.realtimeEpoch && !generation.abort.signal.aborted;
+    const retryAttempt = active ? Math.max(0, (generation.stateRefreshFailures ?? 0) - 2) : 0;
+    const schedule = this.stateRefreshSchedule;
     return {
       ...this.stateRefreshEvidence,
       cloudPoll: this.getCloudPollDiagnostics(),
@@ -2364,12 +2448,19 @@ export class EufyMega extends EventEmitter {
         ? { ...this.stateRefreshEvidence.lastOperationFailure }
         : null,
       schedules: this.stateRefreshEvidence.schedules.map((entry) => ({ ...entry })),
-      active: generation?.epoch === this.realtimeEpoch && !generation.abort.signal.aborted,
+      active,
       inFlight: this.stateRefreshSweep?.epoch === this.realtimeEpoch,
       scheduledPaused:
+        active &&
         (generation?.stateRefreshFailures ?? 0) >= 3 &&
         !this.stateRefreshTimer.pending &&
         this.stateRefreshSweep?.epoch !== this.realtimeEpoch,
+      nextRetryAtMs:
+        retryAttempt > 0 && this.stateRefreshTimer.pending && schedule && schedule.generation === generation
+          ? schedule.nextRetryAtMs
+          : null,
+      retryAttempt,
+      retryReason: retryAttempt > 0 && schedule && schedule.generation === generation ? schedule.reason : null,
       intervalMs: this.opts.rtc?.stateRefreshMs ?? 0,
       targetStations: new Set(
         this.registry
@@ -2431,13 +2522,14 @@ export class EufyMega extends EventEmitter {
   ): Promise<StateRefreshResult> {
     const { epoch, abort } = generation;
     if (this.opts.autoRealtime === false || epoch !== this.realtimeEpoch || abort.signal.aborted)
-      return Promise.resolve({ refreshed: true, retiredSession: false, connectionDeadline: false });
+      return Promise.resolve({ refreshed: true, retiredSession: false });
     if (this.stateRefreshSweep?.epoch === epoch) {
       const key =
         trigger === "startup" ? "startupJoins" : trigger === "scheduled" ? "scheduledJoins" : "cloudPollJoins";
       this.stateRefreshSweep.evidence[key]++;
       return this.stateRefreshSweep.promise;
     }
+    generation.stateRefreshDeferrals = undefined;
     const evidence: StateRefreshSweepEvidence = {
       startedAtMs: Date.now(),
       finishedAtMs: 0,
@@ -2451,14 +2543,13 @@ export class EufyMega extends EventEmitter {
     };
     const sweep = {
       epoch,
-      promise: Promise.resolve({ refreshed: true, retiredSession: false, connectionDeadline: false }),
+      promise: Promise.resolve({ refreshed: true, retiredSession: false }),
       evidence,
     };
     sweep.promise = Promise.resolve()
       .then(async () => {
         let refreshed = true;
         let retiredSession = false;
-        let connectionDeadline = false;
         let qualified = true;
         let failure: StateRefreshFailure | null = null;
         let parameters = 0;
@@ -2468,20 +2559,18 @@ export class EufyMega extends EventEmitter {
             .filter(RtcCommandRouter.claimsDevice)
             .map((device) => device.sn),
         );
-        if (epoch !== this.realtimeEpoch || abort.signal.aborted)
-          return { refreshed: false, retiredSession: false, connectionDeadline: false };
+        if (epoch !== this.realtimeEpoch || abort.signal.aborted) return { refreshed: false, retiredSession: false };
         if (stations.size) {
           this.stateRefreshEvidence.attempts++;
           this.stateRefreshEvidence.lastAttemptMs = Date.now();
         }
         for (const station of stations) {
-          if (epoch !== this.realtimeEpoch || abort.signal.aborted)
-            return { refreshed: false, retiredSession: false, connectionDeadline: false };
+          if (epoch !== this.realtimeEpoch || abort.signal.aborted) return { refreshed: false, retiredSession: false };
           try {
             const result = await (this.reportRefreshes.get(station)?.promise ??
               this.refreshDeviceState(station, { signal: abort.signal, timeoutMs: 15_000 }));
             if (epoch !== this.realtimeEpoch || abort.signal.aborted)
-              return { refreshed: false, retiredSession: false, connectionDeadline: false };
+              return { refreshed: false, retiredSession: false };
             parameters += result.parametersUpdated;
             if (result.parametersUpdated === 0) {
               refreshed = false;
@@ -2490,12 +2579,11 @@ export class EufyMega extends EventEmitter {
             }
           } catch (error) {
             if (epoch !== this.realtimeEpoch || abort.signal.aborted)
-              return { refreshed: false, retiredSession: false, connectionDeadline: false };
+              return { refreshed: false, retiredSession: false };
             refreshed = false;
             qualified = false;
             failure = stateRefreshFailure(error);
             retiredSession = consumeRetiredInformationRead(error) && stations.size === 1;
-            connectionDeadline = consumeConnectionDeadline(error) && stations.size === 1;
             this.reportError(error, "state_refresh");
           }
         }
@@ -2518,7 +2606,7 @@ export class EufyMega extends EventEmitter {
             this.stateRefreshEvidence.lastFailureKind = failure ?? "other";
           }
         }
-        return { refreshed, retiredSession, connectionDeadline };
+        return { refreshed, retiredSession };
       })
       .finally(() => {
         if (this.stateRefreshSweep === sweep) this.stateRefreshSweep = undefined;
@@ -2530,17 +2618,16 @@ export class EufyMega extends EventEmitter {
   /**
    * Schedule one optional station-state sweep after the previous work completes. The generation owns
    * cancellation and the existing sweep coalesces overlapping cloud/startup requests. Failures delay
-   * the next attempt exponentially, capped at ten minutes. Three consecutive failures pause this
-   * timer, except a single-station local connection deadline permits one final attempt after the
-   * configured interval. A fourth failure always pauses. The first failure may use a two-second wait
-   * only with proof of a retired information session in a single-station sweep.
-   * A successful cloud-poll sweep resets the budget. No property command or login is replayed here.
+   * the next attempt exponentially. After three failures, retries start at thirty seconds and double
+   * to five minutes, with up to one second of positive jitter below the cap. The configured interval
+   * is always the minimum wait, including after a proven session retirement. Successful reads reset
+   * the cadence. No property command or login is replayed here.
    */
   private scheduleStateRefresh(
     generation: RealtimeGeneration,
     reset = false,
     retiredSession = false,
-    connectionDeadline = false,
+    reason: StateRefreshDiagnostics["retryReason"] = "failure_backoff",
   ): void {
     const interval = this.opts.rtc?.stateRefreshMs ?? 0;
     if (
@@ -2550,44 +2637,90 @@ export class EufyMega extends EventEmitter {
       generation.abort.signal.aborted
     )
       return;
-    if (reset) generation.stateRefreshFailures = 0;
+    if (reset) {
+      generation.stateRefreshFailures = 0;
+      generation.stateRefreshDeferrals = undefined;
+    }
     const failures = generation.stateRefreshFailures ?? 0;
     const delayMs =
-      failures === 3 && connectionDeadline
-        ? interval
-        : failures >= 3
-          ? null
-          : failures === 1 && retiredSession
-            ? 2_000
-            : Math.min(interval * 2 ** failures, 600_000);
+      failures >= 3
+        ? Math.max(
+            interval,
+            Math.min(30_000 * 2 ** Math.min(failures - 3, 4) + Math.floor(Math.random() * 1_001), 300_000),
+          )
+        : failures === 1 && retiredSession
+          ? interval
+          : Math.min(interval * 2 ** failures, 600_000);
+    const scheduledAtMs = Date.now();
     this.stateRefreshEvidence.schedules.push({
-      scheduledAtMs: Date.now(),
+      scheduledAtMs,
       delayMs,
       consecutiveFailures: failures,
       reset,
     });
     if (this.stateRefreshEvidence.schedules.length > 20) this.stateRefreshEvidence.schedules.shift();
-    if (delayMs === null) return;
+    const due = scheduledAtMs + delayMs;
+    const schedule = {
+      generation,
+      nextRetryAtMs:
+        Number.isSafeInteger(scheduledAtMs) && scheduledAtMs >= 0 && Number.isSafeInteger(due) ? due : null,
+      reason: failures >= 3 ? reason : null,
+    };
+    this.stateRefreshSchedule = schedule;
     this.stateRefreshTimer.arm(delayMs, () => {
-      void this.runScheduledStateRefresh(generation);
+      if (this.stateRefreshSchedule === schedule) void this.runScheduledStateRefresh(generation);
     });
   }
 
-  /** Complete one scheduled read before rearming; obsolete generations cannot restart the timer. */
+  /**
+   * Join an existing sweep before considering protection holds. Recovery retries yield to unfinished
+   * renewal and active or queued station work without changing failure evidence. Each retry ordinal
+   * allows two consecutive work deferrals or four while renewal is unfinished, sharing one count
+   * across both reasons. The next opportunity submits the read to the normal station queue.
+   * Aggregate work counters conservatively protect all stations; acquisition and cooldowns stay
+   * router-owned. A real sweep, cadence reset or teardown clears the deferral count.
+   * Complete the read before rearming; teardown and obsolete epochs cannot restart the timer.
+   */
   private async runScheduledStateRefresh(generation: RealtimeGeneration): Promise<void> {
     if (generation.epoch !== this.realtimeEpoch || generation.abort.signal.aborted) return;
+    const schedule = this.stateRefreshSchedule;
+    const lifecycle = this.stateRefreshLifecycle;
     const failuresAtStart = generation.stateRefreshFailures ?? 0;
-    let result: StateRefreshResult = { refreshed: false, retiredSession: false, connectionDeadline: false };
+    if (failuresAtStart >= 3 && this.stateRefreshSweep?.epoch !== generation.epoch) {
+      const renewal = this.rtc.getSessionRefreshDiagnostics();
+      const work = this.rtc.getCommandDiagnostics().schedulerTotals;
+      const reason =
+        renewal.attempts > renewal.successes + renewal.failures
+          ? "session_recovery"
+          : work.active > 0 || work.queued > 0
+            ? "station_work"
+            : null;
+      const retryAttempt = failuresAtStart - 2;
+      const deferrals =
+        generation.stateRefreshDeferrals?.retryAttempt === retryAttempt ? generation.stateRefreshDeferrals.count : 0;
+      const limit = reason === "session_recovery" ? 4 : 2;
+      if (reason && deferrals < limit) {
+        generation.stateRefreshDeferrals = { retryAttempt, count: deferrals + 1 };
+        this.scheduleStateRefresh(generation, false, false, reason);
+        return;
+      }
+    }
+    let result: StateRefreshResult = { refreshed: false, retiredSession: false };
     try {
       result = await this.refreshRealtimeStates(generation, "scheduled");
     } catch (error) {
       this.reportError(error, "state_refresh");
     } finally {
-      if (generation.epoch === this.realtimeEpoch && !generation.abort.signal.aborted) {
+      if (
+        generation.epoch === this.realtimeEpoch &&
+        !generation.abort.signal.aborted &&
+        this.stateRefreshLifecycle === lifecycle &&
+        (this.stateRefreshSchedule === schedule || result.refreshed)
+      ) {
         generation.stateRefreshFailures = result.refreshed
           ? 0
           : Math.max(failuresAtStart + 1, generation.stateRefreshFailures ?? 0);
-        this.scheduleStateRefresh(generation, false, result.retiredSession, result.connectionDeadline);
+        this.scheduleStateRefresh(generation, false, result.retiredSession);
       }
     }
   }
@@ -2597,7 +2730,7 @@ export class EufyMega extends EventEmitter {
    * so a slow list fetch can never stack overlapping polls, and re-arms in `finally` so a failed poll
    * (a transient cloud error) doesn't silently kill the loop for the session's remaining life.
    *
-   * Disabled by `pollMs: 0`, and never started when `autoRealtime:false` â€” a host that opted out of
+   * Disabled by `pollMs: 0`, and never started when `autoRealtime:false` — a host that opted out of
    * SDK-managed connectivity gets no background traffic. Also declines to re-arm once the bring-up
    * that armed it has been superseded, so a poll that fires as the client shuts down can't resurrect
    * the loop after teardown.
@@ -2641,7 +2774,7 @@ export class EufyMega extends EventEmitter {
     };
   }
 
-  /** The effective cloud poll interval in ms â€” the configured {@link EufyMegaOptions.pollMs} or the default. */
+  /** The effective cloud poll interval in ms — the configured {@link EufyMegaOptions.pollMs} or the default. */
   get pollIntervalMs(): number {
     return this.opts.pollMs ?? DEFAULT_POLL_MS;
   }
@@ -2677,7 +2810,7 @@ export class EufyMega extends EventEmitter {
    * Also emits `deviceState` for each device the diff reports as having re-reported. That is tracked
    * apart from the param diff because the two are different facts: the cloud can re-stamp a param with
    * an unchanged VALUE, which is no state change to report but is fresh proof the device is alive. A
-   * device absent from the previous pass is skipped â€” first sight is discovery, not a transition;
+   * device absent from the previous pass is skipped — first sight is discovery, not a transition;
    * {@link deviceState} answers an initial reading.
    */
   private async pollOnce(epoch = this.realtimeEpoch): Promise<void> {
@@ -2801,18 +2934,18 @@ export class EufyMega extends EventEmitter {
    *
    * Ordered that way because live state is the map every capability getter reads: a listener reading a
    * getter inside a poll event handler has to see the value that event is about. The read-through
-   * freshness policy cannot stand in for this â€” it fires on a READ of a stale value and hands that read
+   * freshness policy cannot stand in for this — it fires on a READ of a stale value and hands that read
    * the stale one, so a value nothing happens to read is never refreshed by it.
    *
    * The CHANGES, not the whole post-change map {@link ParamChange} also carries. That map is there so an
    * event decode can read sibling params; applying it would revert every id a realtime report made
    * fresher, because {@link DeviceRegistry.applyRealtimeParams} keeps a report apart from the cloud
-   * record's params â€” the cloud list carries the pre-report value long after the device volunteered the
+   * record's params — the cloud list carries the pre-report value long after the device volunteered the
    * new one, so an open door reads as closed on the next pass that sees anything on that device move.
    *
    * That precedence is the reason a moved id is also RETIRED from the report map
    * ({@link DeviceRegistry.retireRealtimeParams}). The report outranks the cloud only while it is the
-   * fresher half, and a diff on that id is the cloud stating a transition of its own â€” so left in place
+   * fresher half, and a diff on that id is the cloud stating a transition of its own — so left in place
    * the report would outrank it forever, and the next join of the two halves would revert this pass's
    * value and announce the revert. Retired for EVERY device the diff touched, not only a live one: the
    * join also feeds the `Device` a later {@link getDevice} builds, which no live entry exists for yet.
@@ -2835,11 +2968,11 @@ export class EufyMega extends EventEmitter {
   }
 
   /**
-   * The live {@link Device} for a serial, for a path that is about to ANNOUNCE against it â€” reporting
+   * The live {@link Device} for a serial, for a path that is about to ANNOUNCE against it — reporting
    * once when one the caller asked for has since been collected.
    *
    * An announcement carries the value read out of that device's own live state, so a collected device
-   * cannot be announced for, and the caller is the only thing keeping one alive â€” {@link liveDevices} is
+   * cannot be announced for, and the caller is the only thing keeping one alive — {@link liveDevices} is
    * weak by contract. Losing announcements that way fails in the three worst ways at once: it is
    * non-deterministic (it turns on when the collector runs, so it holds in development and stops under
    * memory pressure), silent (no error, the events simply cease), and non-local (the obligation is on
@@ -2850,7 +2983,7 @@ export class EufyMega extends EventEmitter {
    * here reverses this map's own invariant. So it is LOUD.
    *
    * Reported only for a serial the caller DID ask for, since one never fetched has no object by definition
-   * and was never owed an announcement â€” reporting those would name most of the account on every pass. The
+   * and was never owed an announcement — reporting those would name most of the account on every pass. The
    * dead entry is dropped as it is reported, which is what makes it once: a device let go on purpose must
    * not narrate every inbound signal for the rest of the session, and a later {@link getDevice} re-registers
    * the serial and resumes announcing.
@@ -2889,7 +3022,7 @@ export class EufyMega extends EventEmitter {
    * Echoes of the SDK's own writes are announced rather than suppressed. An inbound path cannot tell a
    * change it caused from one an external actor caused, and suppressing on that guess is unsound, not
    * merely conservative: if a user also changes the value in the vendor app inside the window, the real
-   * external change is the one lost â€” a wrong state held indefinitely, against one redundant idempotent
+   * external change is the one lost — a wrong state held indefinitely, against one redundant idempotent
    * re-read.
    */
   private applyAndAnnounce(device: Device, params: RawParams): void {
@@ -2901,7 +3034,7 @@ export class EufyMega extends EventEmitter {
    * Re-resolve a device a caller is holding, in case fresher evidence granted it a capability.
    *
    * A capability is granted on evidence the device reports, so one resolved before it had reported a
-   * param lacks the capability that param proves â€” permanently, for that object, even once the value
+   * param lacks the capability that param proves — permanently, for that object, even once the value
    * starts arriving. This closes the gap for the `Device` instances already handed out: on new
    * evidence they gain the accessor, bound, without the caller re-fetching.
    *
@@ -2910,7 +3043,7 @@ export class EufyMega extends EventEmitter {
    * fails, must not break the poll loop for every other device.
    *
    * The whole record goes in, never a field-by-field copy of it: since this path only ever ADDS, a
-   * field left behind here re-grants what the first resolution deliberately withheld â€” an attached
+   * field left behind here re-grants what the first resolution deliberately withheld — an attached
    * camera would take back the hub's guard mode on the first param change the poll saw.
    */
   private async widenCapabilities(sn: string): Promise<void> {
@@ -2945,14 +3078,14 @@ export class EufyMega extends EventEmitter {
    * with `autoRealtime: false` to open only what is being used.
    *
    * Resolves when the station is connected; rejects on its connect timeout. Best-effort and idempotent
-   * â€” an already-open session resolves immediately.
+   * — an already-open session resolves immediately.
    */
   async connectStation(deviceSn: string, signal?: AbortSignal): Promise<void> {
     if (!this.registry.list().length) await this.getDevices();
     await this.p2p.ensureStation(this.p2p.stationKeyOf(deviceSn), signal);
   }
 
-  /** Eagerly open P2P sessions for WIRED stations only (persistent â€” they don't drain). Battery
+  /** Eagerly open P2P sessions for WIRED stations only (persistent — they don't drain). Battery
    *  stations stay closed until an on-demand open. Best-effort per station. */
   private async warmWiredP2P(
     readiness = createPlaneReadiness(),
@@ -2990,7 +3123,7 @@ export class EufyMega extends EventEmitter {
    * A station's power tier for the P2P lifecycle: a HomeBase/station is `"wired"` (persistent); a
    * standalone device uses {@link cameraPowerTier}, including its mains-only model evidence.
    * Keyed on the STATION's own power, never a child's (a battery cam attached to a wired HomeBase draws
-   * from the base's persistent session). Reads capabilities on the client side â€” no model type leaks to
+   * from the base's persistent session). Reads capabilities on the client side — no model type leaks to
    * transport (the router only ever sees the `"wired"|"battery"` string).
    */
   private stationPower(parentSn: string): PowerTier {
@@ -3009,7 +3142,7 @@ export class EufyMega extends EventEmitter {
 
   /**
    * Speculatively open the P2P session of the station behind `deviceSn`, if the caller opted this
-   * semantic event in â€” so a stream or talkback opened right after a doorbell ring or a detection starts
+   * semantic event in — so a stream or talkback opened right after a doorbell ring or a detection starts
    * warm instead of paying a cold open.
    *
    * Four gates. `autoRealtime: false` means the SDK opens nothing on its own initiative at all;
@@ -3018,10 +3151,10 @@ export class EufyMega extends EventEmitter {
    * must be one {@link EufyMegaOptions.prewarmTiers} allows.
    *
    * The tier is resolved for the STATION whose session would open, which is why an attached camera is
-   * judged by its base â€” {@link P2PCommandRouter.stationKeyOf} is the single source of that mapping, and
+   * judged by its base — {@link P2PCommandRouter.stationKeyOf} is the single source of that mapping, and
    * {@link stationPower} of the tier. A station with no record of its own is declined rather than
    * pre-warmed: {@link stationPower} answers `"wired"` for one it cannot find, because the tier it feeds
-   * the session lifecycle must always be an answer â€” and taking that answer here is how a battery camera
+   * the session lifecycle must always be an answer — and taking that answer here is how a battery camera
    * gets pre-warmed under a `"wired"`-only opt-in.
    *
    * Best-effort and unawaited: a pre-warm nobody uses must cost the caller nothing, so a failed open
@@ -3049,13 +3182,13 @@ export class EufyMega extends EventEmitter {
    * the broker grants on the `eufy_security` credential.
    *
    * It separates two clients exactly as far as their `openudid` does: a caller that supplies none
-   * gets the value derived from the account, which every such client shares â€” the same condition
+   * gets the value derived from the account, which every such client shares — the same condition
    * under which their logins already displace each other (`MegaClientConfig.openudid`).
    *
    * A client id the broker REFUSES falls back to the certificate's name, since a shared channel beats
    * none, and that transport then keeps that name until {@link disconnect}. Only a refusal: a connect
    * that fails for any other reason rejects the bring-up, which clears its memo in
-   * {@link ensureMqttStarted} so the next one asks under this client's own id again â€” a dropped
+   * {@link ensureMqttStarted} so the next one asks under this client's own id again — a dropped
    * socket must not be what moves a process onto the shared name for good.
    */
   private async startMqtt(scope: MqttScope): Promise<SecureMqtt> {
@@ -3086,15 +3219,15 @@ export class EufyMega extends EventEmitter {
    * Connect one secure-MQTT transport under `clientId`, or under the certificate's own name when it is
    * omitted, and wire its decode and fan-out. See {@link startMqtt} for which id is used and why.
    *
-   * The fan-out is wired once the connection stands, so an attempt that is discarded â€” a client id the
-   * broker refuses, a socket that dies mid-handshake â€” never reports a connection a consumer never had;
+   * The fan-out is wired once the connection stands, so an attempt that is discarded — a client id the
+   * broker refuses, a socket that dies mid-handshake — never reports a connection a consumer never had;
    * the connect it just completed is announced here instead. Errors raised while connecting are held
    * only to keep an emitter without an `error` listener from throwing, and are reported once the
    * transport is one a consumer owns.
    *
    * The inbound decode is gated by the reporting device's own capabilities, so one line's decoder never
-   * runs against another's traffic, and the DP frame is unwrapped here â€” the layer that may import the
-   * transport â€” so a capability reads tags without owning any framing.
+   * runs against another's traffic, and the DP frame is unwrapped here — the layer that may import the
+   * transport — so a capability reads tags without owning any framing.
    */
   private async connectMqtt(creds: SecureMqttCredentials, clientId?: string): Promise<SecureMqtt> {
     const transport = new SecureMqtt({ credentials: creds, clientId, logger: this.opts.logger });
@@ -3176,7 +3309,7 @@ export class EufyMega extends EventEmitter {
   }
 
   /**
-   * Send whatever a device's capabilities want sent once its realtime channel is up â€” for a line whose
+   * Send whatever a device's capabilities want sent once its realtime channel is up — for a line whose
    * state is pushed on change with no heartbeat, the request that makes its state readable before the
    * first write. Best-effort: reported, never fatal, since a device that ignores it is only left with
    * the state it would have had anyway.
@@ -3192,12 +3325,12 @@ export class EufyMega extends EventEmitter {
 
   /**
    * The open P2P sessions, by key. P2P is auto-managed: wired stations are warmed at login, battery
-   * stations open on demand (command / stream, or an opted-in event pre-warm) and idle-detach â€” so this
+   * stations open on demand (command / stream, or an opted-in event pre-warm) and idle-detach — so this
    * map grows and shrinks over time.
    *
    * A station's own session is keyed by its serial, and `p2pConnect(stationSn)` / `p2pClose(stationSn)`
    * track those. A station serving more than one camera at once also holds a session per extra camera,
-   * keyed `<stationSn>#live:<channel>` â€” these carry media alone and raise no connection events, because
+   * keyed `<stationSn>#live:<channel>` — these carry media alone and raise no connection events, because
    * a station announces its state to every client that connects and reporting each copy would double
    * every event the station's own session already delivers.
    */
@@ -3206,7 +3339,7 @@ export class EufyMega extends EventEmitter {
   }
 
   /**
-   * The liveness facts for one device â€” see {@link DeviceState}. Facts, not an `online` verdict: "how
+   * The liveness facts for one device — see {@link DeviceState}. Facts, not an `online` verdict: "how
    * long is too long" is a threshold that belongs to the caller, and it differs per device class.
    *
    * The `deviceState` event announces when a device reports in.
@@ -3279,7 +3412,7 @@ export class EufyMega extends EventEmitter {
   }
 
   /**
-   * The {@link DeviceState} for a device record already in hand â€” the shape {@link deviceState} returns
+   * The {@link DeviceState} for a device record already in hand — the shape {@link deviceState} returns
    * once it has resolved the serial, reused by the poll loop so emitting for a batch of devices doesn't
    * re-scan the roster per device.
    */
@@ -3299,9 +3432,9 @@ export class EufyMega extends EventEmitter {
 
   /**
    * **Write** a device property. Asks the capability modules to build the command for this
-   * `(name, value)` â€” the module owns how THIS device applies it. No `(name, value)` recipe â†’ the
+   * `(name, value)` — the module owns how THIS device applies it. No `(name, value)` recipe → the
    * device doesn't support the property, so we throw {@link CapabilityNotSupportedError} rather than
-   * a silent no-op. On success the device echoes the new state back as a param update â€” read it with
+   * a silent no-op. On success the device echoes the new state back as a param update — read it with
    * {@link getDevice} to confirm.
    *
    * @param sn device serial.
@@ -3328,6 +3461,11 @@ export class EufyMega extends EventEmitter {
     return this.executeProperty(sn, name, value, options);
   }
 
+  /** Cache-only, observe-only assessment of this camera's connectivity evidence. */
+  cameraHealth(sn: string) {
+    return this.cameraHealthIngress.status(sn);
+  }
+
   /** Passive local automatic-send permission; neither a read nor proof of device availability. */
   propertyCommandHealth(sn: string, property: string) {
     return this.commandHealth.status(sn, property);
@@ -3347,21 +3485,54 @@ export class EufyMega extends EventEmitter {
     this.lateContrary.cancel(sn, intent);
   }
 
-  /** Preparation and dispatch share invocation ordering and one frozen profile lifetime. */
+  /** Sanitized physical cloud POST observations; this getter starts no work. */
+  getCloudHttpDiagnostics() {
+    return this.mega.getCloudHttpDiagnostics();
+  }
+
+  /** Invocation-local preparation only, ending before the selected transport's own stages. */
+  getPropertyPreparationDiagnostics(): PropertyPreparationDiagnostics {
+    return this.propertyPreparationRecorder.diagnostics();
+  }
+
+  /** Observe preparation without changing the property invocation's outcome or transport policy. */
   private async executeProperty(
     sn: string,
     name: string,
     value: boolean | number | string,
     options?: PropertyExecutionOptions,
   ): Promise<CommandReceipt> {
+    const observation = this.propertyPreparationRecorder.begin(name === "armingMode" ? "guard_mode" : "other");
+    try {
+      return await observation.run(() => this.executePreparedProperty(sn, name, value, options, observation));
+    } finally {
+      observation.finish("failed");
+    }
+  }
+
+  /** Preparation and dispatch share invocation ordering and one frozen profile lifetime. */
+  private async executePreparedProperty(
+    sn: string,
+    name: string,
+    value: boolean | number | string,
+    options?: PropertyExecutionOptions,
+    observation?: PropertyPreparationObservation,
+  ): Promise<CommandReceipt> {
     const ordinal = this.commandIntents.allocate();
     const bornAtMs = performance.now();
     const wallAtEntry = Date.now();
-    const invocation: PropertyInvocation = { ordinal, receiptRequested: options !== undefined };
-    const terminal = (status: CommandReceipt["status"]): CommandReceipt =>
-      invocation.execution
+    const invocation: PropertyInvocation = {
+      ordinal,
+      receiptRequested: options !== undefined,
+      preparation: observation,
+    };
+    const terminal = (status: CommandReceipt["status"]): CommandReceipt => {
+      const receipt: CommandReceipt = invocation.execution
         ? this.rtc.recordUnsentReceipt(status, invocation.execution)
         : Object.freeze({ status, sendAttempted: false, effect: "unconfirmed", intent: ordinal });
+      this.cameraHealthIngress.command(sn)?.finish(receipt);
+      return receipt;
+    };
     if (options?.profile !== undefined && options.profile !== "bounded-state-v1") return terminal("validation_failed");
     if (options?.automatic !== undefined && typeof options.automatic !== "boolean")
       return terminal("validation_failed");
@@ -3425,6 +3596,7 @@ export class EufyMega extends EventEmitter {
     }
     try {
       invocation.execution?.signal?.throwIfAborted();
+      observation?.mark("command_context");
       const preparation = this.commandContext(sn);
       const ctx = invocation.execution
         ? await Promise.race([
@@ -3448,6 +3620,7 @@ export class EufyMega extends EventEmitter {
       invocation.execution?.signal?.throwIfAborted();
       if (invocation.execution && performance.now() >= invocation.execution.sendByMs)
         return terminal("expired_before_send");
+      observation?.mark("command_build");
       const cmd = buildCapabilityCommand(name, value, ctx);
       if (!cmd) throw new CapabilityNotSupportedError(sn, name);
       if (invocation.execution) {
@@ -3463,7 +3636,10 @@ export class EufyMega extends EventEmitter {
         invocation.execution = { ...invocation.execution, preparationWaitMs: performance.now() - bornAtMs };
       }
       if (options?.correction === true) this.lateContrary.prepareCorrection(sn, ordinal, value);
+      observation?.mark("dispatch_preparation");
       await this.commandSinkFor(sn, invocation).dispatch(cmd);
+      if (invocation.receipt && !invocation.transportAttempted)
+        this.cameraHealthIngress.command(sn)?.finish(invocation.receipt);
       return (
         invocation.receipt ??
         Object.freeze({ status: "acknowledged", sendAttempted: true, effect: "unconfirmed", intent: ordinal })
@@ -3498,7 +3674,7 @@ export class EufyMega extends EventEmitter {
   /**
    * Restart a HomeBase.
    *
-   * **HomeBases only** â€” restart is a hub operation, so a non-HomeBase serial (a camera, an NVR)
+   * **HomeBases only** — restart is a hub operation, so a non-HomeBase serial (a camera, an NVR)
    * throws rather than doing nothing. The hub drops its connection and returns after a minute or two,
    * so everything behind it is briefly offline. Verified on real hardware.
    */
@@ -3506,7 +3682,7 @@ export class EufyMega extends EventEmitter {
     const ctx = await this.commandContext(sn);
     if (!isHomeBase({ deviceType: ctx.deviceType, model: ctx.model })) {
       throw new Error(
-        `reboot: ${sn} is not a HomeBase (deviceType ${ctx.deviceType ?? "?"}, model ${ctx.model ?? "?"}) â€” ` +
+        `reboot: ${sn} is not a HomeBase (deviceType ${ctx.deviceType ?? "?"}, model ${ctx.model ?? "?"}) — ` +
           `restart is a hub-only operation`,
       );
     }
@@ -3520,10 +3696,10 @@ export class EufyMega extends EventEmitter {
    *
    * Resolves from the same fresh `DeviceRegistry.record` (`get_device_param_list` overlay +
    * category) and `resolveDevice` that {@link getDevice} uses, so the capability set here is byte-for-byte
-   * what `device.has(cap)` / `buildActions` saw â€” a command is never rejected for a capability the
+   * what `device.has(cap)` / `buildActions` saw — a command is never rejected for a capability the
    * device model advertises.
    *
-   * `paramIds` is cloud params UNION whatever the device reported over realtime â€” it is the evidence
+   * `paramIds` is cloud params UNION whatever the device reported over realtime — it is the evidence
    * gate behind the typed read getters, so a line whose state only ever arrives live still advertises
    * exactly the reads it has.
    */
@@ -3577,7 +3753,7 @@ export class EufyMega extends EventEmitter {
 
   /** The same context derivation for fetched records and cached polls; this half performs no I/O. */
   private contextForRecord(sn: string, rec: DeviceRecord, dpCatalog?: DpCatalog): ReadContext {
-    // Resolve the record synchronously from the registry (already loaded by `record()`) â€” the same
+    // Resolve the record synchronously from the registry (already loaded by `record()`) — the same
     // single lookup the command sink uses, and it never opens a transport just to read a record.
     const dev = this.registry.require(sn);
     const raw = (dev.raw ?? {}) as Record<string, any>;
@@ -3595,7 +3771,7 @@ export class EufyMega extends EventEmitter {
       stationSerial: rec.parentSn,
       // Identity metadata for `info`, for a host's device-registry surface. `name` = the app-shown
       // device_name (registry's `name`), not the resolved codec/inferred name. firmware/hardware come
-      // straight off the device record: `main_sw_version` / `main_hw_version` â€” the same fields the v6
+      // straight off the device record: `main_sw_version` / `main_hw_version` — the same fields the v6
       // app maps to `firmware_main_version` / `hardware_version`. `undefined` when the record omits them.
       name: dev.name,
       firmwareVersion: recordString(raw, "main_sw_version"),
@@ -3609,7 +3785,7 @@ export class EufyMega extends EventEmitter {
       adminUserId: typeof member.admin_user_id === "string" ? member.admin_user_id : undefined,
       shortUserId: typeof member.short_user_id === "string" ? member.short_user_id : undefined,
       accountName: this.mega.accountName || undefined,
-      // The same claim the command sink routes on â€” a capability gates its P2P-only variants (e.g.
+      // The same claim the command sink routes on — a capability gates its P2P-only variants (e.g.
       // setRainMode) on this. Keyed on the P2P stack's own predicate (a usable `p2p_did` endpoint).
       hasP2p: P2PCommandRouter.claimsDevice(dev),
       // Topology as the record states it: a parent that isn't the device itself means HomeBase-attached.
@@ -3620,7 +3796,7 @@ export class EufyMega extends EventEmitter {
   }
 
   /**
-   * **Generic P2P request/reply query** â€” sends a `SET_PAYLOAD` sub-command and resolves with the
+   * **Generic P2P request/reply query** — sends a `SET_PAYLOAD` sub-command and resolves with the
    * reply frame's `payload`. Transport-only escape hatch (the router owns the wire); the caller owns
    * the sub-command id and the reply shape (e.g. the doorbell's 6237 quick-response list).
    * @internal
@@ -3631,6 +3807,7 @@ export class EufyMega extends EventEmitter {
 
   /** Dispatch a normalized cloud push without taking ownership of its session persistence. */
   private onCloudPush(ev: PushEvent): void {
+    this.cameraHealthIngress.cloudPush(ev);
     this.thumbnailEvidence.push(ev);
     if (ev.eventName === undefined && ev.eventType != null) ev.eventName = detectionName(ev.eventType);
     if (ev.thumbnailCandidate) void this.observeStoredImage(ev.thumbnailCandidate);
@@ -3665,23 +3842,23 @@ export class EufyMega extends EventEmitter {
   }
 
   /**
-   * Connect FCM push â€” the always-on, server-initiated channel that delivers event + **thumbnail**
+   * Connect FCM push — the always-on, server-initiated channel that delivers event + **thumbnail**
    * notifications (motion/person/doorbell/package, each with a thumbnail URL). Independent of
    * MQTT/P2P. On first run it registers a push token, tells the eufy cloud to push to it, then holds
    * the socket. With a `pushStore`, the token + seen ids persist so later runs just reconnect. Emits:
-   *   - `push(event)` â€” normalised `PushEvent` (deviceSn, eventType, eventName,
+   *   - `push(event)` — normalised `PushEvent` (deviceSn, eventType, eventName,
    *     thumbnailUrl, cipher, payload, raw)
-   *   - `pushRaw(raw)` â€” the raw `RawPushMessage`
+   *   - `pushRaw(raw)` — the raw `RawPushMessage`
    *   - `pushConnect` / `pushDisconnect`
    *
    * Started automatically by {@link ensureRealtime} after login. A semantic event the caller opted into
-   * via {@link EufyMegaOptions.prewarmEvents} â€” none by default â€” also speculatively pre-warms that
+   * via {@link EufyMegaOptions.prewarmEvents} — none by default — also speculatively pre-warms that
    * camera's P2P session, so a following stream or talkback starts warm; {@link prewarmForEvent} owns that
    * decision, and the router stays event-agnostic.
    *
    * Returns the connected client rather than installing it. Registration can outlive a `disconnect()`,
    * and {@link ensureRealtime} owns the decision of whether a finished bring-up is still the current
-   * one â€” so this never overwrites a channel a later login already brought up.
+   * one — so this never overwrites a channel a later login already brought up.
    */
   private async startPush(signal?: AbortSignal): Promise<PushClient> {
     if (!this.mega.auth) throw new Error("login() first");
@@ -3695,7 +3872,7 @@ export class EufyMega extends EventEmitter {
     const persistedCreds = persisted.creds;
 
     // Tell the eufy cloud to push this account's events to our token (best-effort
-    // â€” the MCS socket still receives even if this call's exact shape drifts).
+    // — the MCS socket still receives even if this call's exact shape drifts).
     try {
       await this.mega.registerPushToken(persisted.creds.fcmToken);
     } catch (e) {
@@ -3776,7 +3953,7 @@ export class EufyMega extends EventEmitter {
 
   /**
    * Tear down every realtime channel: close the secure-MQTT transport, all P2P sessions, and the FCM
-   * push socket. Idempotent â€” safe to call when nothing is connected. Leaves the login session intact
+   * push socket. Idempotent — safe to call when nothing is connected. Leaves the login session intact
    * (call {@link login} again to reconnect without re-authenticating).
    */
   async disconnect(): Promise<void> {
@@ -3788,6 +3965,10 @@ export class EufyMega extends EventEmitter {
     this.lateContrary.close();
     this.lateEffects.close();
     this.commandHealth.close();
+    for (const device of this.registry.list()) {
+      this.cameraHealthIngress.parent(device.stationSn || device.sn, "disconnected", "rtc");
+      this.cameraHealthIngress.parent(device.stationSn || device.sn, "disconnected", "p2p");
+    }
     for (const sn of [...this.storageTelemetryOwners.keys()]) this.invalidateStorageTelemetryOwner(sn);
     this.stateRefreshEvidence = emptyStateRefreshEvidence();
     this.eventRoutingRecorder = new EventRoutingRecorder();
@@ -3828,13 +4009,16 @@ export class EufyMega extends EventEmitter {
    *
    * Safe to run twice: owned channels are detached before awaiting disposal. The edge-trigger's memory
    * of announced states goes with them: it describes what was announced over a connection that no longer exists,
-   * and keeping it would suppress the first report after a reconnect as a duplicate â€” leaving nothing
+   * and keeping it would suppress the first report after a reconnect as a duplicate — leaving nothing
    * announced until the state next physically changes.
    */
   private async teardownRealtime(): Promise<void> {
     this.pollTimer.cancel();
     this.cloudPollSchedule = undefined;
     this.stateRefreshTimer.cancel();
+    this.stateRefreshSchedule = undefined;
+    this.stateRefreshLifecycle++;
+    if (this.realtimeGeneration) this.realtimeGeneration.stateRefreshDeferrals = undefined;
     for (const entry of this.reportRefreshes.values()) clearTimeout(entry.timer);
     this.reportRefreshes.clear();
     this.lastStateAnnounced.clear();
@@ -3867,6 +4051,7 @@ export class EufyMega extends EventEmitter {
     for (const sn of [...this.storageTelemetryOwners.keys()]) this.invalidateStorageTelemetryOwner(sn);
     this.storedImages?.clear();
     this.storedImageAccount = undefined;
+    this.cameraHealthIngress.roster([]);
     this.mega.clearSession();
   }
 }

@@ -100,6 +100,11 @@ export class PushClient extends EventEmitter {
   private closing = false;
   /** Consecutive MCS login rejections — transient ones self-heal via reconnect (see {@link onMessage}). */
   private loginFailures = 0;
+  /**
+   * How many of {@link persistentIds} the last `LoginRequest` reported; a successful `LoginResponse`
+   * acknowledges them, so they are dropped then.
+   */
+  private reportedIds = 0;
 
   constructor(
     private readonly creds: FcmCredentials,
@@ -146,7 +151,18 @@ export class PushClient extends EventEmitter {
       this.logger.debug("[push] TLS connected, sending login");
       socket.write(this.buildLoginRequest());
     });
-    socket.on("data", (d: Buffer) => this.parser.handleData(d));
+    let frameFailed = false;
+    socket.on("data", (d: Buffer) => {
+      if (socket !== this.socket || frameFailed) return;
+      this.parser.handleData(d, () => {
+        frameFailed = true;
+        this.lifecycle.record("frame_parse_failed", attempt, {
+          loggedIn: this.loggedIn,
+          closing: this.closing,
+        });
+        socket.destroy();
+      });
+    });
     socket.on("close", (hadError: boolean) => {
       this.lifecycle.record(
         "socket_closed",
@@ -193,6 +209,7 @@ export class PushClient extends EventEmitter {
       clientEvent: [],
       receivedPersistentId: this.persistentIds,
     };
+    this.reportedIds = this.persistentIds.length;
     const buf = LoginRequest.encodeDelimited(obj).finish();
     return Buffer.concat([Buffer.from([MCS_VERSION, MessageTag.LoginRequest]), buf]);
   }
@@ -220,6 +237,8 @@ export class PushClient extends EventEmitter {
           this.lifecycle.record("login_accepted", this.attempt, { loggedIn: this.loggedIn, closing: this.closing });
           this.currentDelay = 0;
           this.loginFailures = 0;
+          this.persistentIds = this.persistentIds.slice(this.reportedIds);
+          this.reportedIds = 0;
           this.startHeartbeat();
           this.logger.debug("[push] logged in");
           this.emit("connect");

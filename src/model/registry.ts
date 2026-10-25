@@ -69,8 +69,9 @@ export const MODEL_REGISTRY: Readonly<Record<string, RegistryEntry>> = {
   // (6090/6091/6092, 6210); Indoor-PT (T8410) via its vendor deviceType 31 = INDOOR_PT_CAMERA.
   // The rotate command (6030) is write-only and leaves no param trace, so it is never the signal.
   // `light` (spotlight) is NOT hardcoded — it's detected from real spotlight params (light.ts),
-  // so devices with a spotlight (T8170: 1400/1401/1403; T8442: 6080/6082) get it
-  // and LED-only cams (T8171/T8400/T8410) correctly do NOT. The status LED (1045) is `camera`.
+  // so devices with a spotlight (T8170: 1400/1401/1403; T8442: 6080/6082) get it.
+  // T8171 reports 1400/1401/1403 on firmware 1.2.1.6 but has no physical spotlight, so detection
+  // excludes it. The status LED (1045) on LED-only cameras is `camera`.
   // `arming` here is the STANDALONE case only — `ownedByStation` withholds it again once the record
   // shows a parent, so an attached cam never advertises the hub's guard mode.
   T8170: { codec: "camera", caps: ["battery", "arming"], name: "SoloCam" },

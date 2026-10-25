@@ -19,6 +19,7 @@ import type { PushEvent, RawPushMessage } from "../transport/push/types.js";
 import type { AvailabilityObservation, EufyDevice, RealtimeMessage } from "../core/types.js";
 import type { LateEffectEvent } from "./rtc-late-effect.js";
 import type { LateContraryEffect } from "./rtc-late-contrary.js";
+import type { CameraHealthEvent } from "./camera-health.js";
 import type { CommandHealthEvent } from "./command-health.js";
 
 /**
@@ -338,6 +339,7 @@ export type EufyMegaEventMap = {
   rtcLateEffect: [event: LateEffectEvent];
   lateContraryEffect: [event: LateContraryEffect];
   commandHealth: [event: CommandHealthEvent];
+  cameraHealth: [event: CameraHealthEvent];
   /** Catch-all: fires for EVERY semantic event, payload tagged with its `eventName`. */
   event: [AnyDeviceEvent];
   /**

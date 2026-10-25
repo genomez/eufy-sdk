@@ -24,6 +24,20 @@ describe("passive cloud poll scheduling evidence", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps disabled retry evidence empty while cloud polling runs", async () => {
+    const f = fixture();
+    f.client.schedulePoll();
+    await vi.advanceTimersByTimeAsync(300);
+    expect(f.eufy.getStateRefreshDiagnostics()).toMatchObject({
+      nextRetryAtMs: null,
+      retryAttempt: 0,
+      retryReason: null,
+      scheduledPaused: false,
+      cloudPoll: { enabled: true },
+    });
+    await f.eufy.disconnect();
+  });
+
   it("reports actual arm/fire/end/rearm and detached reads without extra work or timers", async () => {
     const f = fixture();
     expect(f.diagnostics()).toEqual({

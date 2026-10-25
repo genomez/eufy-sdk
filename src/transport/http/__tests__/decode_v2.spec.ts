@@ -10,7 +10,7 @@ import { normalizePushImage } from "../decodeImageV1.js";
 const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 const readFixture = (name: string) => Buffer.from(readFileSync(join(FIXTURE_DIR, name), "utf-8"), "base64");
 const v2Blob = readFixture("v2_thumbnail_176x144.b64");
-/** Synthetic non-ladder geometry (264Ã—200 was never a rung on the old coarse ladder). */
+/** Synthetic non-ladder geometry (264×200 was never a rung on the old coarse ladder). */
 const v2Blob264 = readFixture("v2_thumbnail_264x200.b64");
 
 /** Read a baseline JPEG's SOF0 dimensions, to check the reconstructed geometry. */
@@ -40,7 +40,7 @@ function channels(img: { width: number; height: number; data: Uint8Array }) {
  * The picture the fixture was built from.
  *
  * A synthetic fixture's head is a PLAIN baseline JPEG (the generator does not obfuscate it), so the
- * original image is right there to compare a reconstruction against â€” which is a stronger statement
+ * original image is right there to compare a reconstruction against — which is a stronger statement
  * than a pinned number: the reconstruction is not merely stable, it reproduces the source.
  */
 function original(blob: Buffer) {
@@ -62,7 +62,7 @@ describe("decodeImageV2 (keyless v2_eufysecurity)", () => {
     expect(jpegSize(jpeg!)).toEqual({ width: 176, height: 144 });
   });
 
-  it("recovers an off-ladder geometry from a synthetic blob (264Ã—200)", () => {
+  it("recovers an off-ladder geometry from a synthetic blob (264×200)", () => {
     const jpeg = decodeImageV2(v2Blob264);
     expect(jpeg).not.toBeNull();
     expect(jpeg!.subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8]));
@@ -70,11 +70,11 @@ describe("decodeImageV2 (keyless v2_eufysecurity)", () => {
     expect(jpegSize(jpeg!)).toEqual({ width: 264, height: 200 });
   });
 
-  it("recovers 4:2:0 chroma subsampling, whose MCU is 16Ã—16 rather than 8Ã—8", () => {
+  it("recovers 4:2:0 chroma subsampling, whose MCU is 16×16 rather than 8×8", () => {
     const jpeg = decodeImageV2(readFixture("v2_thumbnail_320x240_420.b64"));
     expect(jpeg).not.toBeNull();
     expect(jpegSize(jpeg!)).toEqual({ width: 320, height: 240 });
-    // 0x22 luma sampling factors in the reconstructed SOF0 â€” a 4:4:4 header would read 0x11 and the
+    // 0x22 luma sampling factors in the reconstructed SOF0 — a 4:4:4 header would read 0x11 and the
     // picture would be scrambled rather than merely mis-sized.
     const sof = jpeg!.indexOf(Buffer.from([0xff, 0xc0]));
     expect(jpeg![sof + 11]).toBe(0x22);
@@ -133,7 +133,7 @@ describe("decodeImageV2 reproduces the source picture", () => {
 describe("decodeImageV2 contrast recovery (the lost quant tables)", () => {
   /**
    * The camera's quant tables go with the encrypted head, so the reconstruction reads the scan through
-   * substitute tables â€” and a thumbnail encoded well below their quality decodes washed out ("foggy").
+   * substitute tables — and a thumbnail encoded well below their quality decodes washed out ("foggy").
    * This fixture is quality 30 against a reference table of 85: spliced as-is it spans about 103..152
    * of the 0..255 range. The decoder measures that and rewrites the DQT, which is a contrast correction
    * that costs a header rather than a re-encoded picture.
