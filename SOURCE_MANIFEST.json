@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "version": "0.2.1-s1.experimental.8",
-  "status": "prepared-locally-unpublished",
+  "status": "published-source-delivery",
   "publicBaselineCommit": "4e4f572536a6d3af1235d84019b06e0032e23652",
   "exactInputCommit": "b13c23cb3ecc270d07107b726264faea37d998ce",
   "files": {
@@ -46,8 +46,8 @@
       "sha256": "b3e79451e7c4e4006600d8c203218d2cdf90cd3fa8522c5af37f6b82c0336e86"
     },
     "EXPERIMENTAL.md": {
-      "bytes": 20852,
-      "sha256": "234d63397d55f1a28578d0b088225186c0fe684bbef7c9a45bcc4128b3620d9d"
+      "bytes": 21851,
+      "sha256": "7cc62476931323559311148b750bdb8a865904677ca11de175dab0fe3fad9884"
     },
     "LICENSE": {
       "bytes": 11339,
@@ -58,12 +58,12 @@
       "sha256": "7b848ae67265a9dd4e8e650a69ce8d94beafa7e84db4926773fd8f01aea89311"
     },
     "PUBLICATION.json": {
-      "bytes": 4184,
-      "sha256": "23ef90be9f7680e7ce45bb2f90f7e88b7cab38b1dac3b1376b5658915427e0df"
+      "bytes": 4934,
+      "sha256": "d2bef5a14624421b2951bf8ebad6c2979bd75c50bc2588d0a2984e86d3476ea2"
     },
     "README.md": {
-      "bytes": 9887,
-      "sha256": "5d6d3a508fbe6b1e4bc62c66fb28f2c3c73b4f39902bfb42a3503915526327cc"
+      "bytes": 10886,
+      "sha256": "369cf52e380262b2a47a25b4e58bab7955ea2374976c3783d70daf970fe9b22e"
     },
     "docs/architecture.md": {
       "bytes": 7091,
@@ -2233,5 +2233,6 @@
       "bytes": 892,
       "sha256": "6dca24173ddebbfac4b47e287c782122e6f1f7817555d78e82f4a870b4c96082"
     }
-  }
+  },
+  "preparationRecordsHistorical": true
 }
