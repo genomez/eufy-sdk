@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EufyMega } from "../eufy-mega.js";
+import { SessionExpiredError } from "../../transport/http/mega-client.js";
 
 /**
  * The read-through freshness refresh as an INBOUND PATH.
@@ -140,5 +141,58 @@ describe("the read-through freshness refresh announces what it lands", () => {
 
     expect(dev.getProperty("contact")?.value).toBe(true);
     expect(seen).toHaveLength(1); // the poll's announcement, and no revert after it
+  });
+});
+
+describe("a failed read-through refresh", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it.each([
+    { name: "an ordinary error", failure: new Error("record unavailable"), sessionExpired: false },
+    {
+      name: "an expired session",
+      failure: new SessionExpiredError("/app/devicemanage/get_device_param_list failed (401/401): token error"),
+      sessionExpired: true,
+    },
+  ])("reports $name without leaking a rejection and permits a later refresh", async ({ failure, sessionExpired }) => {
+    const { eufy, record, seen } = withFreshnessPolicy();
+    const dev = await eufy.getDevice("T8000P0000000000");
+    const refresh = vi
+      .spyOn((eufy as any).registry, "record")
+      .mockClear()
+      .mockRejectedValue(failure);
+    const errors: unknown[] = [];
+    const expired: unknown[] = [];
+    eufy.on("error", (error, context) => errors.push({ error, context }));
+    eufy.on("sessionExpired", (error) => expired.push(error));
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      makeStale(dev);
+      expect(dev.getProperty("contact")?.value).toBe(false);
+      expect(dev.getProperty("contact")?.value).toBe(false);
+      await settle();
+      await settle();
+
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(errors).toEqual(sessionExpired ? [] : [{ error: failure, context: { origin: "state_refresh" } }]);
+      expect(expired).toEqual(sessionExpired ? [failure] : []);
+      expect(seen).toEqual([]);
+      expect(unhandled).toEqual([]);
+
+      record.params = { ...record.params, 1550: "1" };
+      refresh.mockResolvedValue(record);
+      expect(dev.getProperty("contact")?.value).toBe(false);
+      await settle();
+      await settle();
+
+      expect(refresh).toHaveBeenCalledTimes(2);
+      expect(dev.getProperty("contact")?.value).toBe(true);
+      expect(seen).toEqual([{ deviceSn: "T8000P0000000000", property: "contact", value: true }]);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });

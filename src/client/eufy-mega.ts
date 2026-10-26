@@ -2231,6 +2231,8 @@ export class EufyMega extends EventEmitter {
    * first announces it and the others stay silent. Its timing says only when a caller happened to read; the
    * value is the news. It applies what the device volunteered over realtime on top of the cloud half, which
    * the registry keeps apart, so it can neither revert nor announce a revert of a report already landed.
+   * Nothing awaits that refresh, so its failure is reported like the other background paths' — a dead
+   * token as `sessionExpired`, anything else as `error` — and the read keeps its last-known value.
    *
    * The `Device` returned is held WEAKLY: it is what the inbound paths announce against, so a caller that
    * wants property changes for a serial keeps its own reference. Dropping it stops the announcements, not
@@ -2269,22 +2271,26 @@ export class EufyMega extends EventEmitter {
       dev.setFreshnessPolicy({
         staleAfterMs: this.opts.cacheTtlMs ?? 15_000,
         refresh: async () => {
-          const epoch = this.realtimeEpoch;
-          // A poll may supersede a useful per-device result without changing this value.
-          // Retry once from the new baseline; never adopt the rejected snapshot itself.
-          for (let attempt = 0; attempt < 2; attempt++) {
-            const polled = this.polledReads.get(dev);
-            const revisions = new Map(this.realtimeParamIds.get(dev));
-            const fresh = await this.registry.record(sn);
-            if (epoch !== this.realtimeEpoch) return;
-            if (polled !== this.polledReads.get(dev)) continue;
-            const params: RawParams = {};
-            for (const [key, value] of Object.entries({ ...fresh.params, ...fresh.dpParams })) {
-              const id = Number(key);
-              if (revisions.get(id) === this.realtimeParamIds.get(dev)?.get(id)) params[id] = value;
+          try {
+            const epoch = this.realtimeEpoch;
+            // A poll may supersede a useful per-device result without changing this value.
+            // Retry once from the new baseline; never adopt the rejected snapshot itself.
+            for (let attempt = 0; attempt < 2; attempt++) {
+              const polled = this.polledReads.get(dev);
+              const revisions = new Map(this.realtimeParamIds.get(dev));
+              const fresh = await this.registry.record(sn);
+              if (epoch !== this.realtimeEpoch) return;
+              if (polled !== this.polledReads.get(dev)) continue;
+              const params: RawParams = {};
+              for (const [key, value] of Object.entries({ ...fresh.params, ...fresh.dpParams })) {
+                const id = Number(key);
+                if (revisions.get(id) === this.realtimeParamIds.get(dev)?.get(id)) params[id] = value;
+              }
+              this.applyAndAnnounce(dev, params);
+              return;
             }
-            this.applyAndAnnounce(dev, params);
-            return;
+          } catch (e) {
+            this.reportError(e, "state_refresh");
           }
         },
       });
