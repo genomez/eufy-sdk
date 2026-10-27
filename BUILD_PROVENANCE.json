@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "version": "0.2.1-s1.experimental.8",
-  "publicBaseCommit": "4e4f572536a6d3af1235d84019b06e0032e23652",
+  "version": "0.2.1-s1.experimental.9",
+  "publicBaseCommit": "b5bea9611c3ee005527933a15868d59cdd4f0d01",
   "acceptedMonorepoCommit": "b13c23cb3ecc270d07107b726264faea37d998ce",
   "published": false,
   "changeDescription": "RTC late-viewer keyframe gating; bounded refresh backoff and recovery; isolated slow replies; camera connectivity and hub reply evidence; T8171 detection; opt-in floodlight safety with bounded confirmation and problem notices; observation-only media stall evidence.",
@@ -501,5 +501,6 @@
       "src/transport/tuya/sign.ts": "3196d48e8422440d960ac43b8143716db2bb27976845e8280941638d796be5eb"
     },
     "qualification": "Same runtime implementation as review.14 r3; exact release image qualification recorded separately."
-  }
+  },
+  "exactInputCommit": "8328df917f796b84fc96c6d29746e6314417010f"
 }

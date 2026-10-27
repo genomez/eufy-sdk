@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "version": "0.2.1-s1.experimental.8",
-  "status": "published-source-delivery",
-  "publicBaselineCommit": "4e4f572536a6d3af1235d84019b06e0032e23652",
-  "exactInputCommit": "b13c23cb3ecc270d07107b726264faea37d998ce",
+  "version": "0.2.1-s1.experimental.9",
+  "status": "prepared-locally-unpublished",
+  "publicBaselineCommit": "b5bea9611c3ee005527933a15868d59cdd4f0d01",
+  "exactInputCommit": "8328df917f796b84fc96c6d29746e6314417010f",
   "files": {
     ".editorconfig": {
       "bytes": 487,
@@ -38,32 +38,32 @@
       "sha256": "af49ab1d26bc29f756bbe4544cf5b6e956b516071ea4649119f53251cde6e65b"
     },
     "BUILD_PROVENANCE.json": {
-      "bytes": 59229,
-      "sha256": "fb53e70349baf0b5faa152a207b34b964b2231deba6e0eb1dc224c8fedac545b"
+      "bytes": 59295,
+      "sha256": "3ecc7af5b62e37aa72c14ac06d053994f101ab783c82e32e45f4720011eab1c4"
     },
     "CONTRIBUTING.md": {
       "bytes": 9910,
       "sha256": "b3e79451e7c4e4006600d8c203218d2cdf90cd3fa8522c5af37f6b82c0336e86"
     },
     "EXPERIMENTAL.md": {
-      "bytes": 21851,
-      "sha256": "7cc62476931323559311148b750bdb8a865904677ca11de175dab0fe3fad9884"
+      "bytes": 23359,
+      "sha256": "4d478be931b1a90e9b287e55448db031c3836e8b3b1d0fa0f76df62f8059eaf3"
     },
     "LICENSE": {
       "bytes": 11339,
       "sha256": "b208eae7041fb7818ebd636d0778b49e242543be9a980ac9dcbaf98449660a2b"
     },
     "MODIFICATIONS.md": {
-      "bytes": 57303,
-      "sha256": "7b848ae67265a9dd4e8e650a69ce8d94beafa7e84db4926773fd8f01aea89311"
+      "bytes": 58811,
+      "sha256": "080c9b8fc37e4724196a3439821b4da079073d1ec9614a8557a4f87844ab3e29"
     },
     "PUBLICATION.json": {
-      "bytes": 4934,
-      "sha256": "d2bef5a14624421b2951bf8ebad6c2979bd75c50bc2588d0a2984e86d3476ea2"
+      "bytes": 413,
+      "sha256": "e7570bca96e146ee21d5b4e2a0fb93f777745e8d75ccd8a1ab129f6516b13081"
     },
     "README.md": {
-      "bytes": 10886,
-      "sha256": "369cf52e380262b2a47a25b4e58bab7955ea2374976c3783d70daf970fe9b22e"
+      "bytes": 12394,
+      "sha256": "203f494503a82131cef4568a44f04081902691600ea45d856407df5eda8d623e"
     },
     "docs/architecture.md": {
       "bytes": 7091,
@@ -191,11 +191,11 @@
     },
     "package-lock.json": {
       "bytes": 88832,
-      "sha256": "90b4bb753aa01f1920e0b624a1a13b21d82f351a7ec8e8a1838da3353ea10465"
+      "sha256": "83b9e82bc8b219258c9a8f3c142a7f3b128495f92420ae39a6034ef21be0b03e"
     },
     "package.json": {
       "bytes": 2991,
-      "sha256": "49e2991e9be7c5da7184e07fc64bb351a08f2a8204d75f4ddd97e37e149d23ad"
+      "sha256": "ed87fe2253b3cb2b45b3657cad507c34b4849e89cad043e45db66197dc0ed332"
     },
     "scripts/bundle.mjs": {
       "bytes": 2577,
@@ -370,8 +370,8 @@
       "sha256": "6ba0a223628a2e7e177ac5d0eff6d3262d6b6359c198bed2383053711c413c28"
     },
     "src/client/__tests__/freshness-refresh-announces.spec.ts": {
-      "bytes": 7115,
-      "sha256": "33d6ad91a0ae3858f29665668bc2e5db04411d978cbb5bf7e56fe89442a47703"
+      "bytes": 9331,
+      "sha256": "f0924f1ac08eb9b94c84c0b52e0d80c6baefdc39827cbb912c59ef1ef0bedb27"
     },
     "src/client/__tests__/inventory-scope.spec.ts": {
       "bytes": 7980,
@@ -502,8 +502,8 @@
       "sha256": "ce5ced00cb22d5e97e280c9ff312a5ca016d805304dffb2c3e442a21ead5ce1b"
     },
     "src/client/eufy-mega.ts": {
-      "bytes": 192401,
-      "sha256": "c41063c7b675a88b6e4c3b7da15e1a85e6f14891d80112d04c5f8f2779b3ceb5"
+      "bytes": 192744,
+      "sha256": "09ed361ce1853f53c2a29635441223126a83b22b296ab92bd7b00475915eab4d"
     },
     "src/client/event-routing-diagnostics.ts": {
       "bytes": 4448,
@@ -2233,6 +2233,5 @@
       "bytes": 892,
       "sha256": "6dca24173ddebbfac4b47e287c782122e6f1f7817555d78e82f4a870b4c96082"
     }
-  },
-  "preparationRecordsHistorical": true
+  }
 }
