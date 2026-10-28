@@ -4,6 +4,9 @@ import { StationWorkError } from "./station-work-scheduler.js";
 import { copyRtcTransportDiagnostics, type RtcTransportDiagnostics } from "./transport-diagnostics.js";
 import type { PortalResponse } from "./portal-packet.js";
 
+const RECENT_COMMAND_LIMIT = 32;
+const COMMAND_FAILURE_LIMIT = 32;
+
 /** Finite outcomes of a validated control operation; acknowledgement is not device-state confirmation. */
 export type CommandOutcome =
   | "success"
@@ -235,6 +238,10 @@ export interface RtcCommandDiagnostics {
   evicted: number;
   recent: CommandEvidence[];
   lastFailure: CommandEvidence | null;
+  failureRetention: {
+    recentFailures: CommandEvidence[];
+    evictedFailures: number;
+  };
 }
 
 /** Thirty-two completed operations and thirty-two private target associations, with detached snapshots. */
@@ -258,6 +265,8 @@ export class CommandEvidenceRecorder {
   private failures = 0;
   private recent: CommandEvidence[] = [];
   private lastFailure: CommandEvidence | null = null;
+  private recentFailures: CommandEvidence[] = [];
+  private evictedFailures = 0;
   private observationCleanup = new Map<number, (reason: PostTimeoutStatus) => void>();
 
   constructor(private readonly timingNow: () => number = () => performance.now()) {}
@@ -407,6 +416,12 @@ export class CommandEvidenceRecorder {
     if (index !== -1) this.recent[index] = copyEvidence({ ...this.recent[index]!, postTimeout: row.postTimeout });
     if (this.lastFailure?.attempt === row.attempt)
       this.lastFailure = copyEvidence({ ...this.lastFailure, postTimeout: row.postTimeout });
+    const failureIndex = this.recentFailures.findIndex((entry) => entry.attempt === row.attempt);
+    if (failureIndex !== -1)
+      this.recentFailures[failureIndex] = copyEvidence({
+        ...this.recentFailures[failureIndex]!,
+        postTimeout: row.postTimeout,
+      });
   }
 
   /** Stop every passive window before the recorder's lifecycle is discarded. */
@@ -468,9 +483,14 @@ export class CommandEvidenceRecorder {
     if (outcome !== "success") {
       this.failures++;
       this.lastFailure = copyEvidence(row);
+      this.recentFailures.push(copyEvidence(row));
+      if (this.recentFailures.length > COMMAND_FAILURE_LIMIT) {
+        this.recentFailures.shift();
+        this.evictedFailures++;
+      }
     }
     this.recent.push(copyEvidence(row));
-    if (this.recent.length > 32) {
+    if (this.recent.length > RECENT_COMMAND_LIMIT) {
       const evicted = this.recent.shift()!;
       this.observationCleanup.get(evicted.attempt)?.("evicted");
       this.observationCleanup.delete(evicted.attempt);
@@ -486,6 +506,10 @@ export class CommandEvidenceRecorder {
       evicted: this.completed - this.recent.length,
       recent: this.recent.map(copyEvidence),
       lastFailure: this.lastFailure ? copyEvidence(this.lastFailure) : null,
+      failureRetention: {
+        recentFailures: this.recentFailures.map(copyEvidence),
+        evictedFailures: this.evictedFailures,
+      },
     };
   }
 }
