@@ -3,7 +3,7 @@
   "version": "0.2.1-s1.experimental.11",
   "status": "prepared-locally-unpublished",
   "publicBaselineCommit": "02312bfe2eee3107ce19252c7b8730a9d5ac4c67",
-  "exactInputCommit": "7dc2a3709bbeb8005fefa816e15642e567760158",
+  "exactInputCommit": "6d36e0adc9a02f2e72ea705779d323efc545e690",
   "files": {
     ".editorconfig": {
       "bytes": 487,
@@ -39,51 +39,55 @@
     },
     "BUILD_PROVENANCE.json": {
       "bytes": 449,
-      "sha256": "df0d1de14abdbba9fc97427bcff6a11289bee91af4da77da81b994f3508274da"
+      "sha256": "d47cef460cf60fdc72ffb109d45af0fe0ce27fc5caa23dd71dfd3d88ed372643"
     },
     "CONTRIBUTING.md": {
       "bytes": 9910,
       "sha256": "b3e79451e7c4e4006600d8c203218d2cdf90cd3fa8522c5af37f6b82c0336e86"
     },
     "EXPERIMENTAL.md": {
-      "bytes": 27400,
-      "sha256": "046d0d721b362b30ddf63d9c49936681b7546573998d543cb52edf4d0b25f4bf"
+      "bytes": 28041,
+      "sha256": "1f779f789a87810a9c097d4ab323a18086df2e9cf76cb83d79ac07f28cf1561c"
     },
     "LICENSE": {
       "bytes": 11339,
       "sha256": "b208eae7041fb7818ebd636d0778b49e242543be9a980ac9dcbaf98449660a2b"
     },
     "MODIFICATIONS.md": {
-      "bytes": 64859,
-      "sha256": "b1bea16f234da11fd58e707aea3ee14ef5a72e25d3d741ee532e4cbdffb4ab59"
+      "bytes": 65656,
+      "sha256": "80b4b0f6cb6a6964c5b893792d977a31e16f1d5919013977afae876b94d27859"
     },
     "PUBLICATION.json": {
       "bytes": 449,
-      "sha256": "df0d1de14abdbba9fc97427bcff6a11289bee91af4da77da81b994f3508274da"
+      "sha256": "d47cef460cf60fdc72ffb109d45af0fe0ce27fc5caa23dd71dfd3d88ed372643"
     },
     "README.md": {
-      "bytes": 16417,
-      "sha256": "7aa3b0ad9dc8d0f2d9224f253dd2ccb9b04956e85f4c4ce11f43e2636b73a187"
+      "bytes": 17058,
+      "sha256": "ea09282ce087159076d8f4dc28a8a052092e2c5bce1e7930ac815b2b006de74a"
     },
     "docs/architecture.md": {
       "bytes": 7091,
       "sha256": "e67098212e1932aff27a86c73cb001fec7b5cce99844a468093d1ad216e34e60"
+    },
+    "docs/camera-connectivity.md": {
+      "bytes": 2456,
+      "sha256": "589946820062a85480d29fec0465014c7367a4aaddaf1e7d9131a9df83e65d4a"
     },
     "docs/capability-manifest.md": {
       "bytes": 5789,
       "sha256": "f60b9bee1c83cef2af58efec465b60835dd35fd61ce2e828f48795e5bfcb8b8d"
     },
     "docs/connectivity.md": {
-      "bytes": 15923,
-      "sha256": "e43861f45c7bc1cd64fdbb55946b2c1575518fecc0f97298f1bcbc6ad94a25e1"
+      "bytes": 18380,
+      "sha256": "070650b7adff7a30b502e1f718644091e83c6231a01e0b4a26e6e1d0b622d664"
     },
     "docs/devices-gallery.md": {
       "bytes": 33781,
       "sha256": "e7b06b2b4bafd551c1ac47c1142f3ae9e87b5b34137e2fcb7e13538656db37c6"
     },
     "docs/devices.md": {
-      "bytes": 12672,
-      "sha256": "10ade5f18df334302b13175f9d2274ae85634ef2acf1f2fb09e9b744d1f380b1"
+      "bytes": 15129,
+      "sha256": "e6a5ae544c09d3a81a803a6327422b5c45e04115dc64fd16bf32f8c78eab51c8"
     },
     "docs/events.md": {
       "bytes": 13253,
@@ -302,16 +306,16 @@
       "sha256": "d011277c771c775dc630bc952f4c9b01c1d38d548bee68bae04a2db26a9758e1"
     },
     "src/client/__tests__/camera-health-ingress.spec.ts": {
-      "bytes": 29121,
-      "sha256": "f9f3afddb69bd783536ed5f46970f7ea280fa14793c59f38a159046a65578e5c"
+      "bytes": 32330,
+      "sha256": "3c37b1178214e15ac18b84273d92cf7f5f51f30461fd39d53ec13d266075365d"
     },
     "src/client/__tests__/camera-health-media.spec.ts": {
       "bytes": 4952,
       "sha256": "708cecb75bf88113786764d963443aeb9e4138ab8b6929aa0a9a14b375c3e153"
     },
     "src/client/__tests__/camera-health.spec.ts": {
-      "bytes": 27117,
-      "sha256": "22128a8a3b8354bed92b03dbcd2a29b291045ce3a09e53305cf2c61883902e26"
+      "bytes": 34335,
+      "sha256": "3434ed7051e4f4d814b605bbf86a2d939b8fd87fae3d03509c4d684c8bb8f267"
     },
     "src/client/__tests__/catch-all-event.spec.ts": {
       "bytes": 19724,
@@ -482,12 +486,12 @@
       "sha256": "e6f403f87afab1f34a47fdb68b1342ef410ec737adb441e669da65a88f506302"
     },
     "src/client/camera-health-ingress.ts": {
-      "bytes": 12205,
-      "sha256": "3aac357e17c347badc92f32073fc103d44e19b9a74a1c9ff85236278566a8335"
+      "bytes": 12362,
+      "sha256": "5ffbccbd3ac9825522fb2c6e6594ad2438a26939439d190d99ac35985a463202"
     },
     "src/client/camera-health.ts": {
-      "bytes": 21065,
-      "sha256": "7ce70910b41cc95e846d6692727f8ed521f7a51cbc2ce5d4596e076a09f59719"
+      "bytes": 23623,
+      "sha256": "9a68dde3ac66e969362614adb9ca6965d5a16a770db72d0d6dc31333e3243e14"
     },
     "src/client/command-health.ts": {
       "bytes": 7543,
