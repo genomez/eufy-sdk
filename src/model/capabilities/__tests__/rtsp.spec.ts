@@ -2,6 +2,7 @@ import type { CommandSink } from "../../../core/contracts.js";
 import { RTSP, RTSP_PARAM, RtspRecordingMode, type RtspActions } from "../rtsp.js";
 import { bind } from "./bind.js";
 import { Device } from "../../device.js";
+import { buildCommand, mergeProperties } from "../index.js";
 import type { CommandContext, InboundSignal } from "../types.js";
 
 const ctx = {
@@ -12,6 +13,35 @@ const ctx = {
 } as CommandContext;
 
 describe("rtsp capability module", () => {
+  it.each([{ stationDeviceType: 27 }, { stationModel: "T9000" }, { stationDeviceType: 18, stationModel: "T9000" }])(
+    "hides scalar publish controls behind S1 topology %j",
+    (station) => {
+      const attached = { ...ctx, ...station, homeBaseAttached: true };
+      const { acts, sent } = bind<RtspActions>("rtsp", attached);
+      expect(acts.publish).toBeUndefined();
+      expect(acts.withdraw).toBeUndefined();
+      expect(acts.setPublished).toBeUndefined();
+      expect(acts.published).toBeUndefined();
+      expect(mergeProperties(["rtsp"], attached).map((p) => p.name)).toEqual(["rtspUrl", "recordingMode"]);
+      expect(buildCommand("rtspStream", true, attached)).toBeUndefined();
+      expect(acts.setRecordingMode).toBeTypeOf("function");
+      expect(acts.requireAuth).toBeTypeOf("function");
+      expect(sent).toEqual([]);
+    },
+  );
+
+  it.each([{ stationDeviceType: 18, stationModel: "T8030" }, {}])(
+    "preserves publish controls on other or unknown covering stations %j",
+    async (station) => {
+      const attached = { ...ctx, ...station, homeBaseAttached: true };
+      const { acts, sent } = bind<RtspActions>("rtsp", attached);
+      await acts.publish!();
+      await acts.withdraw!();
+      expect(sent).toHaveLength(2);
+      expect(mergeProperties(["rtsp"], attached).some((p) => p.name === "rtspStream")).toBe(true);
+    },
+  );
+
   it("declares the capability + schema", () => {
     expect(RTSP.capability).toBe("rtsp");
     expect(RTSP.properties.map((p) => p.name)).toEqual(["rtspStream", "rtspUrl", "recordingMode"]);
@@ -56,8 +86,8 @@ describe("rtsp capability module", () => {
   it("publishes and withdraws as a scalar write on the camera's own channel", async () => {
     const { acts: actions, sent } = bind<RtspActions>("rtsp", ctx);
 
-    await actions.publish();
-    await actions.withdraw();
+    await actions.publish!();
+    await actions.withdraw!();
 
     expect(sent).toHaveLength(2);
     for (const cmd of sent) {
@@ -83,7 +113,7 @@ describe("rtsp capability module", () => {
     const attached = { ...ctx, homeBaseAttached: true } as CommandContext;
     const { acts: actions, sent } = bind<RtspActions>("rtsp", attached);
 
-    await actions.publish();
+    await actions.publish!();
 
     expect(sent).toHaveLength(1);
   });

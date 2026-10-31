@@ -17,12 +17,14 @@ once up front.
 ## Publishing
 
 ```ts
-await rtsp?.publish(); // persistently publish this camera
-await rtsp?.withdraw(); // explicitly withdraw the publication
+await rtsp?.publish?.(); // persistently publish this camera when supported
+await rtsp?.withdraw?.(); // explicitly withdraw the publication when supported
 rtsp?.published; // boolean | undefined — current state
 ```
 
 `published` is a typed read, present only when the device actually reports the backing state.
+The publish controls and this read are absent for cameras behind a HomeBase S1 (`T9000`), whose
+control channel cannot carry the scalar publish command. Other RTSP settings keep their own gates.
 
 The device does not stream to your process here — it serves an RTSP endpoint on your LAN that any
 recorder can open. Which host serves it depends on how the camera is installed:
@@ -46,11 +48,13 @@ when the recorder no longer needs the endpoint:
 <!-- typecheck: host runRecorder -->
 
 ```ts
-await rtsp?.publish();
-try {
-  await runRecorder();
-} finally {
-  await rtsp?.withdraw();
+if (rtsp?.publish && rtsp.withdraw) {
+  await rtsp.publish();
+  try {
+    await runRecorder();
+  } finally {
+    await rtsp.withdraw();
+  }
 }
 ```
 
