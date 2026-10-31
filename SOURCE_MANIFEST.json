@@ -70,24 +70,24 @@
       "sha256": "e67098212e1932aff27a86c73cb001fec7b5cce99844a468093d1ad216e34e60"
     },
     "docs/camera-connectivity.md": {
-      "bytes": 2456,
-      "sha256": "589946820062a85480d29fec0465014c7367a4aaddaf1e7d9131a9df83e65d4a"
+      "bytes": 2459,
+      "sha256": "32b02bbb8b2f35a03e0ec2a34e31970ac51c1d851819a8b156652c4cb5346954"
     },
     "docs/capability-manifest.md": {
       "bytes": 5789,
       "sha256": "f60b9bee1c83cef2af58efec465b60835dd35fd61ce2e828f48795e5bfcb8b8d"
     },
     "docs/connectivity.md": {
-      "bytes": 18380,
-      "sha256": "070650b7adff7a30b502e1f718644091e83c6231a01e0b4a26e6e1d0b622d664"
+      "bytes": 18383,
+      "sha256": "89818a8cecf472652cbde78a8f0bd0bc0c107655830cdd34a3ea0d54046ad42b"
     },
     "docs/devices-gallery.md": {
       "bytes": 33781,
       "sha256": "e7b06b2b4bafd551c1ac47c1142f3ae9e87b5b34137e2fcb7e13538656db37c6"
     },
     "docs/devices.md": {
-      "bytes": 15129,
-      "sha256": "e6a5ae544c09d3a81a803a6327422b5c45e04115dc64fd16bf32f8c78eab51c8"
+      "bytes": 15132,
+      "sha256": "ca5ee37a1c262d87da40ffebf4b463d330135de43b1cb7d6a2901d07b133d555"
     },
     "docs/events.md": {
       "bytes": 13253,
