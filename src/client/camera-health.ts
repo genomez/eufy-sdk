@@ -67,6 +67,7 @@ interface EvidenceIdentity {
   accountId: string;
   device: string;
   receivedAtMs: number;
+  receiptOrdinal?: number;
 }
 
 /** Qualification flags describe independently established source provenance, never a status-name guess. */
@@ -100,6 +101,9 @@ export interface CameraHealthState {
   readonly hubStatusQualified: boolean;
   readonly health: CameraHealth;
   assessmentAtMs: number;
+  assessmentOrdinal?: number;
+  assessmentStatus?: number | boolean | null;
+  assessmentConflict?: { atMs: number; ordinal?: number };
   expiresAtMonotonicMs: number | null;
   lastMonotonicMs: number;
   lastContactAtMs: number | null;
@@ -204,10 +208,18 @@ export function reduceCameraHealth(
       input.device !== state.device ||
       !epoch(input.receivedAtMs) ||
       input.receivedAtMs > clock.nowMs ||
-      input.receivedAtMs < (state.received[input.kind] ?? -1)
+      (((input.kind !== "raw_status" && input.kind !== "parent") || input.receiptOrdinal === undefined) &&
+        input.receivedAtMs < (state.received[input.kind] ?? -1))
     )
       return state;
   }
+  if (
+    input.kind === "parent" &&
+    input.receiptOrdinal !== undefined &&
+    state.assessmentOrdinal !== undefined &&
+    input.receiptOrdinal < state.assessmentOrdinal
+  )
+    return state;
   const next = structuredClone(state);
   let assessmentAtMs = state.assessmentAtMs;
   let expiresAtMonotonicMs = state.expiresAtMonotonicMs;
@@ -246,7 +258,7 @@ export function reduceCameraHealth(
         return state;
       next.lastContactAtMs = atMs;
       next.lastContactSource = input.kind;
-      if (state.power === "mains" && health.parentTransport !== "disconnected")
+      if (state.power === "mains" && health.parentTransport !== "disconnected" && !state.hubStatusQualified)
         assess(
           "online",
           input.kind === "push" ? "child_contact" : "media",
@@ -260,7 +272,7 @@ export function reduceCameraHealth(
       if (input.correlated !== true || input.code !== -109 || input.receivedAtMs < state.assessmentAtMs) return state;
       health.lastHubOfflineMs = input.receivedAtMs;
       health.hubOfflineCount = Math.min(Number.MAX_SAFE_INTEGER, health.hubOfflineCount + 1);
-      if (health.parentTransport !== "disconnected" && health.connectivity !== "offline")
+      if (health.parentTransport !== "disconnected" && health.connectivity !== "offline" && !state.hubStatusQualified)
         assess("suspect", "hub_reported_offline", "hub_reported", input.receivedAtMs, CAMERA_SUSPECT_TTL_MS);
       break;
     case "vendor_offline":
@@ -275,7 +287,12 @@ export function reduceCameraHealth(
       break;
     case "parent":
       if (!["connected", "disconnected", "unknown"].includes(input.transport)) return state;
-      if (input.receivedAtMs < state.assessmentAtMs) return state;
+      if (
+        input.receiptOrdinal !== undefined && state.assessmentOrdinal !== undefined
+          ? input.receiptOrdinal < state.assessmentOrdinal
+          : input.receivedAtMs < state.assessmentAtMs
+      )
+        return state;
       health.parentTransport = input.transport;
       if (input.transport !== "connected") {
         if (health.connectivity !== "unknown" || health.basis !== "parent_unassessable") health.sinceMs = clock.nowMs;
@@ -283,6 +300,7 @@ export function reduceCameraHealth(
         health.basis = "parent_unassessable";
         health.evidence = "none";
         assessmentAtMs = input.receivedAtMs;
+        next.assessmentOrdinal = input.receiptOrdinal;
         expiresAtMonotonicMs = null;
       }
       break;
@@ -317,21 +335,46 @@ export function reduceCameraHealth(
       };
       if (
         state.hubStatusQualified &&
-        state.power === "mains" &&
         input.source === "hub_report" &&
-        (input.p1131 === 0 || input.p1131 === 1 || typeof input.p1131 === "boolean") &&
-        input.receivedAtMs > state.assessmentAtMs
+        (input.p1131 === 0 ||
+          input.p1131 === 1 ||
+          input.p1131 === 2 ||
+          input.p1131 === 3 ||
+          typeof input.p1131 === "boolean") &&
+        (input.receiptOrdinal !== undefined && state.assessmentOrdinal !== undefined
+          ? input.receiptOrdinal >= state.assessmentOrdinal
+          : input.receivedAtMs >= state.assessmentAtMs)
       ) {
-        if (health.parentTransport !== "connected")
+        const sameOrder =
+          input.receiptOrdinal !== undefined && state.assessmentOrdinal !== undefined
+            ? input.receiptOrdinal === state.assessmentOrdinal
+            : input.receivedAtMs === state.assessmentAtMs;
+        const conflict = state.assessmentConflict;
+        const unresolvedConflict =
+          conflict !== undefined &&
+          (input.receiptOrdinal !== undefined && conflict.ordinal !== undefined
+            ? input.receiptOrdinal === conflict.ordinal
+            : input.receivedAtMs === conflict.atMs);
+        const unorderedConflict =
+          sameOrder &&
+          (unresolvedConflict || (health.basis === "vendor_status" && input.p1131 !== state.assessmentStatus));
+        next.assessmentStatus = input.p1131;
+        next.assessmentConflict = unorderedConflict
+          ? { atMs: input.receivedAtMs, ordinal: input.receiptOrdinal }
+          : undefined;
+        assessmentAtMs = Math.min(assessmentAtMs, input.receivedAtMs);
+        next.assessmentOrdinal = input.receiptOrdinal;
+        if (unorderedConflict) assess("unknown", "vendor_status", "hub_reported", input.receivedAtMs, null);
+        else if (health.parentTransport !== "connected")
           assess("unknown", "parent_unassessable", "none", input.receivedAtMs, null);
         else {
           const online = input.p1131 === 1 || input.p1131 === true;
           assess(
-            online ? "online" : "offline",
+            online ? "online" : input.p1131 === 0 || input.p1131 === false ? "offline" : "unknown",
             "vendor_status",
             "hub_reported",
             input.receivedAtMs,
-            online ? CAMERA_CONTACT_TTL_MS : null,
+            null,
           );
         }
       }
@@ -399,6 +442,7 @@ interface Entry {
 
 /** Bounded per-account state, a random client incarnation and at most one unreferenced timer per camera. */
 export class CameraHealthStore {
+  private receiptOrdinal = 0;
   readonly incarnation = randomUUID();
   private readonly entries = new Map<string, Entry>();
   private revision = 0;
@@ -471,6 +515,7 @@ export class CameraHealthStore {
       nowMs - health.lastContactMs < CAMERA_CONTACT_PUBLISH_MS &&
       (state.expiresAtMonotonicMs === null || monotonicMs < state.expiresAtMonotonicMs) &&
       (state.power !== "mains" ||
+        (state.hubStatusQualified && health.basis === "vendor_status" && health.evidence === "hub_reported") ||
         health.parentTransport === "disconnected" ||
         (health.connectivity === "online" && health.basis === "media" && health.evidence === "vendor_verified"))
     ) {
@@ -478,7 +523,7 @@ export class CameraHealthStore {
       state.lastContactSource = "media";
       state.lastMonotonicMs = monotonicMs;
       state.received.media = nowMs;
-      if (state.power === "mains" && health.parentTransport !== "disconnected") {
+      if (state.power === "mains" && health.parentTransport !== "disconnected" && !state.hubStatusQualified) {
         state.assessmentAtMs = nowMs;
         state.expiresAtMonotonicMs = monotonicMs + CAMERA_CONTACT_TTL_MS;
       }
@@ -496,13 +541,14 @@ export class CameraHealthStore {
     });
   }
 
-  parent(device: string, transport: CameraParentTransport): CameraHealth | undefined {
+  parent(device: string, transport: CameraParentTransport, receiptOrdinal?: number): CameraHealth | undefined {
     return this.apply(device, {
       kind: "parent",
       accountId: this.options.accountId,
       device,
       receivedAtMs: this.now(),
       transport,
+      receiptOrdinal,
     });
   }
 
@@ -556,6 +602,10 @@ export class CameraHealthStore {
   private apply(device: string, input: CameraHealthInput): CameraHealth | undefined {
     const entry = this.entries.get(device);
     if (!entry || this.closed) return undefined;
+    if ("receivedAtMs" in input) {
+      this.receiptOrdinal = Math.max(this.receiptOrdinal, input.receiptOrdinal ?? 0);
+      input = { ...input, receiptOrdinal: input.receiptOrdinal ?? ++this.receiptOrdinal };
+    }
     const previous = entry.state;
     entry.state = reduceCameraHealth(previous, input, this.clock());
     if (entry.state.health.revision !== previous.health.revision) {

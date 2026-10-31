@@ -87,20 +87,23 @@ describe("qualified HomeBase device status", () => {
     });
   });
 
-  it.each([2, 3, -1, 0.5, null])("retains %s without changing assessment or refreshing its expiry", (value) => {
+  it.each([2, 3, -1, 0.5, null])("handles undecoded status %s without reporting powered-off values online", (value) => {
     const h = qualified();
     h.status(1);
     h.advance(CAMERA_CONTACT_TTL_MS - 1);
-    expect(h.status(value)).toMatchObject({ connectivity: "online", rawStatus: { p1131: value } });
+    expect(h.status(value)).toMatchObject({
+      connectivity: value === 2 || value === 3 ? "unknown" : "online",
+      rawStatus: { p1131: value },
+    });
     h.advance(1);
-    expect(h.store.status(device)).toMatchObject({ connectivity: "unknown", basis: "contact_expired" });
+    expect(h.store.status(device)?.connectivity).toBe(value === 2 || value === 3 ? "unknown" : "online");
   });
 
-  it.each(["battery", "unknown"] as const)("keeps %s power raw-only even with qualification", (power) => {
+  it.each(["battery", "unknown"] as const)("assesses qualified %s power independently of its sleep policy", (power) => {
     const h = qualified(power);
-    expect(h.status(1)?.connectivity).toBe("unknown");
+    expect(h.status(1)?.connectivity).toBe("online");
     h.advance(1);
-    expect(h.status(0)?.connectivity).toBe("unknown");
+    expect(h.status(0)?.connectivity).toBe("offline");
   });
 
   it("keeps unqualified registrations, cloud parameters, missing source and 1182 raw-only", () => {
@@ -114,7 +117,7 @@ describe("qualified HomeBase device status", () => {
     }
   });
 
-  it("refreshes online expiry on identical later reports and publishes only actual field changes", () => {
+  it("holds online on identical later reports and publishes only actual field changes", () => {
     const h = qualified();
     const first = h.status(1);
     expect(h.status(1)).toEqual(first);
@@ -126,14 +129,14 @@ describe("qualified HomeBase device status", () => {
     expect(h.store.status(device)?.connectivity).toBe("online");
     h.advance(CAMERA_CONTACT_TTL_MS - 1);
     expect(h.store.status(device)).toMatchObject({
-      connectivity: "unknown",
-      basis: "contact_expired",
-      evidence: "none",
+      connectivity: "online",
+      basis: "vendor_status",
+      evidence: "hub_reported",
     });
     expect(h.store.diagnostics().timers).toBe(0);
   });
 
-  it.each(["push", "media"])("latches offline without a timer and recovers only on strictly newer %s", (kind) => {
+  it.each(["push", "media"])("holds offline despite newer %s until the HomeBase reports a change", (kind) => {
     const h = qualified();
     h.status(0);
     expect(h.store.diagnostics().timers).toBe(0);
@@ -141,7 +144,9 @@ describe("qualified HomeBase device status", () => {
     h.advance(CAMERA_SUSPECT_TTL_MS * 2);
     expect(h.store.status(device)?.connectivity).toBe("offline");
     expect(h.observe({ kind: "raw_status", source: "cloud_params", p1131: 1 }).connectivity).toBe("offline");
-    expect((kind === "push" ? h.push() : h.media()).connectivity).toBe("online");
+    expect((kind === "push" ? h.push() : h.media()).connectivity).toBe("offline");
+    h.advance(1);
+    expect(h.status(1).connectivity).toBe("online");
   });
 
   it("orders status against newer child contact, status and -109 without weakening the offline latch", () => {
@@ -150,14 +155,17 @@ describe("qualified HomeBase device status", () => {
     h.advance(10);
     h.status(0);
     h.advance(10);
-    expect(h.status(1, { receivedAtMs: origin + 5 }).connectivity).toBe("offline");
+    expect(h.status(1, { receivedAtMs: origin + 5, receiptOrdinal: 1 }).connectivity).toBe("offline");
     expect(h.push({ observedAtMs: origin + 9 }).connectivity).toBe("offline");
     expect(h.observe({ kind: "hub_offline", correlated: true, code: -109 }).connectivity).toBe("offline");
     h.advance(1);
     h.media();
-    expect(h.status(0, { receivedAtMs: origin + 20 })).toMatchObject({ connectivity: "online", basis: "media" });
+    expect(h.status(0, { receivedAtMs: origin + 20 })).toMatchObject({
+      connectivity: "offline",
+      basis: "vendor_status",
+    });
     h.advance(1);
-    expect(h.observe({ kind: "hub_offline", correlated: true, code: -109 }).connectivity).toBe("suspect");
+    expect(h.observe({ kind: "hub_offline", correlated: true, code: -109 }).connectivity).toBe("offline");
     h.advance(1);
     expect(h.status(1).connectivity).toBe("online");
     h.advance(1);
@@ -166,13 +174,13 @@ describe("qualified HomeBase device status", () => {
     expect(h.status(1).connectivity).toBe("online");
   });
 
-  it("requires strictly newer status, retaining the first assessment for equal-millisecond conflicts", () => {
+  it("orders equal-millisecond hub conflicts by receipt ordinal", () => {
     const h = qualified();
     h.status(1);
-    expect(h.status(0)).toMatchObject({ connectivity: "online", rawStatus: { p1131: 0 } });
+    expect(h.status(0)).toMatchObject({ connectivity: "offline", rawStatus: { p1131: 0 } });
     h.advance(1);
     h.status(0);
-    expect(h.status(1)).toMatchObject({ connectivity: "offline", rawStatus: { p1131: 1 } });
+    expect(h.status(1)).toMatchObject({ connectivity: "online", rawStatus: { p1131: 1 } });
   });
 
   it.each(["disconnected", "unknown"] as const)(
@@ -710,5 +718,169 @@ describe("bounded camera health store and command outcomes", () => {
     expect(h.store.register(device, "mains")).toBeUndefined();
     vi.advanceTimersByTime(CAMERA_SUSPECT_TTL_MS);
     expect(h.events).toHaveLength(length);
+  });
+});
+
+describe("additional status ordering review cases", () => {
+  it("accepts a later hub value received within the same millisecond", () => {
+    const h = harness("mains", 4, true);
+    h.store.parent(device, "connected");
+    h.observe({ kind: "raw_status", source: "hub_report", p1131: 0 });
+    const health = h.observe({ kind: "raw_status", source: "hub_report", p1131: 1 });
+    expect(health.connectivity).toBe("online");
+    expect(health.commandsBlocked).toBe(false);
+  });
+});
+
+describe("hub receipt ordering", () => {
+  it.each([
+    [0, 1, "online"],
+    [1, 0, "offline"],
+    [0, 2, "unknown"],
+    [1, 3, "unknown"],
+  ] as const)("orders %s then %s without a clock tick", (first, second, expected) => {
+    const h = harness("mains", 4, true);
+    h.store.parent(device, "connected");
+    h.observe({ kind: "raw_status", source: "hub_report", p1131: first });
+    expect(h.observe({ kind: "raw_status", source: "hub_report", p1131: second }).connectivity).toBe(expected);
+  });
+  it("requires new hub evidence after same-tick reconnect and keeps qualified contact diagnostic", () => {
+    const h = harness("mains", 4, true);
+    h.store.parent(device, "connected");
+    h.observe({ kind: "raw_status", source: "hub_report", p1131: 0 });
+    h.store.parent(device, "disconnected");
+    h.store.parent(device, "connected");
+    h.advance(1);
+    expect(h.media().connectivity).toBe("unknown");
+    expect(h.push().connectivity).toBe("unknown");
+    expect(h.observe({ kind: "raw_status", source: "hub_report", p1131: 1 }).connectivity).toBe("online");
+  });
+  it("invalidates conflicting equal ordinals and rejects an older session receipt", () => {
+    const h = harness("mains", 4, true);
+    h.store.parent(device, "connected");
+    h.observe({ kind: "raw_status", source: "hub_report", p1131: 0, receiptOrdinal: 100 });
+    expect(h.observe({ kind: "raw_status", source: "hub_report", p1131: 1, receiptOrdinal: 100 }).connectivity).toBe(
+      "unknown",
+    );
+    h.observe({ kind: "raw_status", source: "hub_report", p1131: 1, receiptOrdinal: 101 });
+    expect(h.observe({ kind: "raw_status", source: "hub_report", p1131: 0, receiptOrdinal: 99 }).connectivity).toBe(
+      "online",
+    );
+  });
+});
+
+describe("hub wall-clock independence", () => {
+  it("orders status and parent loss across a backward wall-clock adjustment", () => {
+    const h = harness("mains", 4, true);
+    h.store.parent(device, "connected");
+    h.observe({ kind: "raw_status", source: "hub_report", p1131: 0 });
+    h.advance(1, -1000);
+    expect(h.observe({ kind: "raw_status", source: "hub_report", p1131: 1 }).connectivity).toBe("online");
+    h.advance(1, -1000);
+    expect(h.store.parent(device, "disconnected")?.connectivity).toBe("unknown");
+    h.store.parent(device, "connected");
+    expect(h.observe({ kind: "raw_status", source: "hub_report", p1131: 0 }).connectivity).toBe("offline");
+  });
+});
+
+describe("ambiguous hub assessment keys", () => {
+  it.each([false, true])(
+    "resolves an old conflict with newer hub evidence after parent loss, ordinal=%s",
+    (ordinal) => {
+      let clock = { nowMs: 1000, monotonicMs: 0 };
+      let state = createCameraHealthState("account", "camera", "mains", "fixture", clock, true);
+      const reduce = (input: object, key: number) => {
+        state = reduceCameraHealth(
+          state,
+          {
+            accountId: "account",
+            device: "camera",
+            receivedAtMs: clock.nowMs,
+            ...(ordinal ? { receiptOrdinal: key } : {}),
+            ...input,
+          } as CameraHealthInput,
+          clock,
+        );
+        return state.health.connectivity;
+      };
+      reduce({ kind: "parent", transport: "connected" }, 1);
+      reduce({ kind: "raw_status", source: "hub_report", p1131: 0 }, 2);
+      expect(reduce({ kind: "raw_status", source: "hub_report", p1131: 1 }, 2)).toBe("unknown");
+      clock = { nowMs: 1001, monotonicMs: 1 };
+      reduce({ kind: "parent", transport: "disconnected" }, 3);
+      expect(reduce({ kind: "parent", transport: "connected" }, 3)).toBe("unknown");
+      expect(reduce({ kind: "raw_status", source: "hub_report", p1131: 1 }, 3)).toBe("online");
+    },
+  );
+
+  it.each([false, true])(
+    "keeps repeated and toggling conflicts unknown until newer evidence, ordinal=%s",
+    (ordinal) => {
+      let clock = { nowMs: 1000, monotonicMs: 0 };
+      let state = createCameraHealthState("account", "camera", "mains", "fixture", clock, true);
+      state = reduceCameraHealth(
+        state,
+        {
+          kind: "parent",
+          accountId: "account",
+          device: "camera",
+          receivedAtMs: 1000,
+          transport: "connected",
+          ...(ordinal ? { receiptOrdinal: 1 } : {}),
+        },
+        clock,
+      );
+      const status = (p1131: number, newer = false, source: "hub_report" | "cloud_params" = "hub_report") => {
+        if (newer) clock = { nowMs: 1001, monotonicMs: 1 };
+        state = reduceCameraHealth(
+          state,
+          {
+            kind: "raw_status",
+            accountId: "account",
+            device: "camera",
+            receivedAtMs: clock.nowMs,
+            source,
+            p1131,
+            ...(ordinal ? { receiptOrdinal: newer ? 3 : 2 } : {}),
+          },
+          clock,
+        );
+        expect(state.health.rawStatus.p1131).toBe(p1131);
+        return state.health.connectivity;
+      };
+      expect(status(0)).toBe("offline");
+      expect(status(1)).toBe("unknown");
+      for (const value of [1, 1, 0, 1, 0, 0]) expect(status(value)).toBe("unknown");
+      expect(status(1, false, "cloud_params")).toBe("unknown");
+      expect(status(1)).toBe("unknown");
+      expect(status(1, true)).toBe("online");
+    },
+  );
+
+  it.each([false, true])("keeps diagnostic raw updates independent of the assessed value, ordinal=%s", (ordinal) => {
+    const clock = { nowMs: 1000, monotonicMs: 0 };
+    let state = createCameraHealthState("account", "camera", "mains", "fixture", clock, true);
+    const reduce = (input: object) => {
+      state = reduceCameraHealth(
+        state,
+        { accountId: "account", device: "camera", receivedAtMs: 1000, ...input } as CameraHealthInput,
+        clock,
+      );
+      return state.health;
+    };
+    reduce({ kind: "parent", transport: "connected", ...(ordinal ? { receiptOrdinal: 1 } : {}) });
+    reduce({ kind: "raw_status", source: "hub_report", p1131: 0, ...(ordinal ? { receiptOrdinal: 3 } : {}) });
+    expect(
+      reduce({ kind: "raw_status", source: "cloud_params", p1131: 1, ...(ordinal ? { receiptOrdinal: 2 } : {}) }),
+    ).toMatchObject({ connectivity: "offline", rawStatus: { p1131: 1 } });
+    expect(
+      reduce({ kind: "raw_status", source: "hub_report", p1131: 0, ...(ordinal ? { receiptOrdinal: 3 } : {}) })
+        .connectivity,
+    ).toBe("offline");
+    reduce({ kind: "raw_status", source: "cloud_params", p1131: 1 });
+    expect(
+      reduce({ kind: "raw_status", source: "hub_report", p1131: 1, ...(ordinal ? { receiptOrdinal: 3 } : {}) })
+        .connectivity,
+    ).toBe("unknown");
   });
 });

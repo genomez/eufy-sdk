@@ -12,8 +12,8 @@ import {
   type CameraStatusSource,
 } from "./camera-health.js";
 
-/** HomeBase status assessment models; only T8425 power loss/rejoin was qualified live. T8426 is untested. */
-const HUB_STATUS_MODELS = new Set(["T8425", "T8426"]);
+/** Models using HomeBase per-child status independently of camera power tier. */
+const HUB_STATUS_MODELS = new Set(["T8425", "T8426", "T8416", "T8214", "T8134", "T8170", "T8171"]);
 
 type EvidenceData<T = CameraHealthEvidence> = T extends CameraHealthEvidence
   ? Omit<T, "accountId" | "device" | "receivedAtMs">
@@ -51,12 +51,14 @@ export class CameraHealthIngress {
       return undefined;
     }
     const power = cameraPowerEvidence(device.model, this.registry.capabilitiesForDevice(sn) ?? new Set());
+    const parent = this.registry.list().find((item) => item.sn === device.stationSn);
     const hubStatusQualified =
-      power === "mains" &&
       HUB_STATUS_MODELS.has((device.model ?? "").toUpperCase()) &&
       device.stationSn !== undefined &&
       device.stationSn !== sn &&
-      this.registry.list().some((parent) => parent.sn === device.stationSn && parent.deviceClass === "homebase");
+      parent?.deviceClass === "homebase" &&
+      parent.model?.toUpperCase() === "T9000" &&
+      !this.registry.conflicts().includes(parent.sn);
     const raw = device.raw as Record<string, unknown> | undefined;
     const key = JSON.stringify([
       device.stationSn || sn,
@@ -65,6 +67,8 @@ export class CameraHealthIngress {
       device.realtime,
       raw?.device_channel ?? null,
       raw?.device_type ?? null,
+      parent?.model,
+      parent?.deviceClass,
       hubStatusQualified,
     ]);
     const previous = this.bindings.get(sn);

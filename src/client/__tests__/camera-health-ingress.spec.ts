@@ -170,18 +170,18 @@ describe("suppressed signal diagnostics", () => {
   });
 });
 
-describe("HomeBase floodlight status ingress", () => {
-  it("expires hub-online through the existing local timer without another report or status read", () => {
+describe("HomeBase camera status ingress", () => {
+  it("holds hub-online without a timer until a different report or parent loss", () => {
     const f = fixture();
     vi.setSystemTime(PUSH_TIME);
     vi.spyOn(performance, "now").mockImplementation(() => Date.now() - PUSH_TIME);
     f.ingress.parent(STATION, "connected");
     f.ingress.params(TARGET, { 1131: "1" }, "hub_report");
-    expect(f.ingress.store.diagnostics().timers).toBe(1);
+    expect(f.ingress.store.diagnostics().timers).toBe(0);
     vi.advanceTimersByTime(CAMERA_CONTACT_TTL_MS - 1);
     expect(f.event.mock.calls.at(-1)?.[0].connectivity).toBe("online");
     vi.advanceTimersByTime(1);
-    expect(f.event.mock.calls.at(-1)?.[0]).toMatchObject({ connectivity: "unknown", basis: "contact_expired" });
+    expect(f.event.mock.calls.at(-1)?.[0]).toMatchObject({ connectivity: "online", basis: "vendor_status" });
     expect(f.ingress.store.diagnostics().timers).toBe(0);
     f.ingress.store.close();
   });
@@ -199,41 +199,44 @@ describe("HomeBase floodlight status ingress", () => {
     f.ingress.store.close();
   });
 
-  it.each(["T8425", "T8426"])("assesses %s numeric and boolean reports and keeps cloud status raw-only", (model) => {
-    const f = fixture();
-    f.devices[0]!.model = model;
-    f.ingress.parent(STATION, "connected");
-    for (const [raw, connectivity] of [
-      ["1", "online"],
-      ["0", "offline"],
-      ["true", "online"],
-      ["false", "offline"],
-    ]) {
+  it.each(["T8425", "T8426", "T8416", "T8214", "T8134", "T8170", "T8171"])(
+    "assesses %s numeric and boolean reports and keeps cloud status raw-only",
+    (model) => {
+      const f = fixture();
+      f.devices[0]!.model = model;
+      f.ingress.parent(STATION, "connected");
+      for (const [raw, connectivity] of [
+        ["1", "online"],
+        ["0", "offline"],
+        ["true", "online"],
+        ["false", "offline"],
+      ]) {
+        vi.advanceTimersByTime(1);
+        f.ingress.params(TARGET, { 1131: raw! }, "hub_report");
+        expect(f.ingress.status(TARGET)).toMatchObject({
+          connectivity,
+          basis: "vendor_status",
+          evidence: "hub_reported",
+          lastContactMs: null,
+        });
+      }
       vi.advanceTimersByTime(1);
-      f.ingress.params(TARGET, { 1131: raw! }, "hub_report");
+      f.ingress.params(TARGET, { 1131: "1" }, "cloud_params");
       expect(f.ingress.status(TARGET)).toMatchObject({
-        connectivity,
-        basis: "vendor_status",
-        evidence: "hub_reported",
-        lastContactMs: null,
+        connectivity: "offline",
+        rawStatus: { p1131: 1, source: "cloud_params" },
       });
-    }
-    vi.advanceTimersByTime(1);
-    f.ingress.params(TARGET, { 1131: "1" }, "cloud_params");
-    expect(f.ingress.status(TARGET)).toMatchObject({
-      connectivity: "offline",
-      rawStatus: { p1131: 1, source: "cloud_params" },
-    });
-    vi.advanceTimersByTime(1);
-    f.ingress.params(TARGET, { 1131: "2", 1182: "1" }, "hub_report");
-    expect(f.ingress.status(TARGET)).toMatchObject({
-      connectivity: "offline",
-      rawStatus: { p1131: 2, p1182: 1, source: "hub_report" },
-    });
-    f.ingress.store.close();
-  });
+      vi.advanceTimersByTime(1);
+      f.ingress.params(TARGET, { 1131: "2", 1182: "1" }, "hub_report");
+      expect(f.ingress.status(TARGET)).toMatchObject({
+        connectivity: "unknown",
+        rawStatus: { p1131: 2, p1182: 1, source: "hub_report" },
+      });
+      f.ingress.store.close();
+    },
+  );
 
-  it.each(["T8423", "T8419", "T8171", "T8124", "unknown"])("keeps model %s raw-only", (model) => {
+  it.each(["T8423", "T8419", "T9999", "T8124", "unknown"])("keeps model %s raw-only", (model) => {
     const f = fixture();
     f.devices[0]!.model = model;
     f.registry.capabilitiesForDevice = () => new Set<Capability>(["battery"]);
@@ -377,7 +380,7 @@ describe("camera evidence source qualification", () => {
     f.ingress.media(OTHER);
     expect(f.ingress.status(OTHER)?.connectivity).toBe("unknown");
     f.ingress.media(TARGET);
-    expect(f.ingress.status(TARGET)?.connectivity).toBe("online");
+    expect(f.ingress.status(TARGET)?.connectivity).toBe("unknown");
     f.ingress.store.close();
   });
 
@@ -421,8 +424,8 @@ describe("camera evidence source qualification", () => {
     const f = fixture();
     f.ingress.push(TARGET, STATION, f.payload(), 3101);
     expect(f.ingress.status(TARGET)).toMatchObject({
-      connectivity: "online",
-      basis: "child_contact",
+      connectivity: "unknown",
+      basis: "startup",
       lastContactSource: "push",
     });
     f.ingress.push(OTHER, STATION, { ...f.payload(), device_sn: OTHER, channel: 2 }, 3101);
@@ -543,8 +546,8 @@ describe("parsed cloud detection health evidence", () => {
     const event = parsedDetection(payload, siblings);
     f.ingress.cloudPush(event);
     expect(f.ingress.status(TARGET)).toMatchObject({
-      connectivity: "online",
-      basis: "child_contact",
+      connectivity: "unknown",
+      basis: "startup",
       lastContactSource: "push",
       lastContactMs: PUSH_TIME - 7000,
       enforcement: "observe_only",
@@ -559,7 +562,7 @@ describe("parsed cloud detection health evidence", () => {
     vi.setSystemTime(PUSH_TIME);
     f.ingress.cloudPush(parsedDetection({ event_type: 3102 }, { device_sn: TARGET, event_time: String(PUSH_TIME) }));
     expect(f.ingress.status(TARGET)).toMatchObject({
-      connectivity: "online",
+      connectivity: "unknown",
       lastContactMs: PUSH_TIME,
       lastContactSource: "push",
     });
@@ -579,9 +582,9 @@ describe("parsed cloud detection health evidence", () => {
       f.ingress.cloudPush(parsedDetection(body, envelope));
       expect(f.ingress.status(TARGET)?.lastContactMs).toBe(PUSH_TIME - 7000);
       vi.advanceTimersByTime(CAMERA_CONTACT_TTL_MS - 7001);
-      expect(f.ingress.status(TARGET)?.connectivity).toBe("online");
+      expect(f.ingress.status(TARGET)?.connectivity).toBe("unknown");
       vi.advanceTimersByTime(1);
-      expect(f.ingress.status(TARGET)).toMatchObject({ connectivity: "unknown", basis: "contact_expired" });
+      expect(f.ingress.status(TARGET)).toMatchObject({ connectivity: "unknown", basis: "startup" });
       f.ingress.store.close();
     },
   );
@@ -683,6 +686,86 @@ describe("parsed cloud detection health evidence", () => {
     expect(f.ingress.status(TARGET)).toEqual(accepted);
     f.ingress.cloudPush(parsedDetection({ ...PUSH_BODY, trigger_time: PUSH_TIME - 8000 }));
     expect(f.ingress.status(TARGET)).toEqual(accepted);
+    f.ingress.store.close();
+  });
+});
+
+describe("qualified camera hold", () => {
+  it.each(
+    ["T8425", "T8426", "T8416", "T8214", "T8134", "T8170", "T8171"].flatMap((model) =>
+      [false, true].map((battery) => ({ model, battery })),
+    ),
+  )("holds $model with battery=$battery", ({ model, battery }) => {
+    const f = fixture();
+    vi.setSystemTime(PUSH_TIME);
+    vi.spyOn(performance, "now").mockImplementation(() => Date.now() - PUSH_TIME);
+    f.devices[0]!.model = model;
+    f.registry.capabilitiesForDevice = () => new Set<Capability>(battery ? ["battery"] : []);
+    f.ingress.parent(STATION, "connected");
+    for (const value of [1, 0]) {
+      vi.advanceTimersByTime(1);
+      f.ingress.params(TARGET, { 1131: String(value) }, "hub_report");
+      vi.advanceTimersByTime(86_400_000);
+      f.ingress.media(TARGET);
+      expect(f.ingress.status(TARGET)?.connectivity).toBe(value ? "online" : "offline");
+      expect(f.ingress.store.diagnostics().timers).toBe(0);
+    }
+    vi.advanceTimersByTime(1);
+    f.ingress.parent(STATION, "unknown");
+    expect(f.ingress.status(TARGET)).toMatchObject({
+      connectivity: "unknown",
+      basis: "parent_unassessable",
+      commandsBlocked: false,
+    });
+    f.ingress.store.close();
+  });
+});
+
+describe("additional topology scope cases", () => {
+  it("does not qualify non-T9000 HomeBase p1131", () => {
+    const f = fixture();
+    f.devices[0]!.model = "T8170";
+    f.devices[2]!.model = "T8030";
+    f.ingress.parent(STATION, "connected");
+    vi.advanceTimersByTime(1);
+    f.ingress.params(TARGET, { 1131: "0" }, "hub_report");
+    expect(f.ingress.status(TARGET)?.connectivity).toBe("unknown");
+    f.ingress.store.close();
+  });
+  it("invalidates held status if the parent registry model ceases to be qualified", () => {
+    const f = fixture();
+    f.ingress.parent(STATION, "connected");
+    vi.advanceTimersByTime(1);
+    f.ingress.params(TARGET, { 1131: "1" }, "hub_report");
+    f.devices[2]!.model = "T8030";
+    f.ingress.roster(f.devices);
+    expect(f.ingress.status(TARGET)?.connectivity).toBe("unknown");
+    f.ingress.store.close();
+  });
+});
+
+describe("parent binding ownership", () => {
+  it("retires held status and captured observers on parent model change", () => {
+    const f = fixture();
+    f.ingress.parent(STATION, "connected");
+    f.ingress.params(TARGET, { 1131: "0" }, "hub_report");
+    const oldRevision = f.ingress.status(TARGET)!.revision;
+    const command = f.ingress.command(TARGET)!;
+    const media = f.ingress.live(TARGET)!;
+    f.devices[2]!.model = "T8030";
+    f.ingress.roster(f.devices);
+    expect(f.ingress.status(TARGET)!.revision).toBeGreaterThan(oldRevision);
+    vi.advanceTimersByTime(1);
+    media();
+    command.finish({ status: "acknowledged", sendAttempted: true, effect: "unconfirmed" });
+    expect(f.ingress.status(TARGET)).toMatchObject({
+      connectivity: "unknown",
+      lastContactMs: null,
+      lastOutcome: null,
+      enforcement: "observe_only",
+    });
+    f.ingress.params(TARGET, { 1131: "0" }, "hub_report");
+    expect(f.ingress.status(TARGET)?.connectivity).toBe("unknown");
     f.ingress.store.close();
   });
 });
