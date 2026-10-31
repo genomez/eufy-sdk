@@ -1,10 +1,11 @@
 import type { CommandReceipt } from "../core/contracts.js";
 import type { EufyDevice } from "../core/types.js";
-import { cameraPowerEvidence } from "../model/index.js";
+import { cameraPowerEvidence, decodeWifiRssi } from "../model/index.js";
 import type { PushEvent } from "../transport/push/types.js";
 import type { DeviceRegistry } from "./device-registry.js";
 import {
   CAMERA_CONTACT_TTL_MS,
+  CAMERA_HEALTH_CAPACITY,
   CameraHealthStore,
   type CameraHealth,
   type CameraHealthEvidence,
@@ -18,10 +19,19 @@ type EvidenceData<T = CameraHealthEvidence> = T extends CameraHealthEvidence
   ? Omit<T, "accountId" | "device" | "receivedAtMs">
   : never;
 
+/** Last rejected signal only; text and device identifiers are never included in the record. */
+export interface RssiSuppression {
+  reason: "sentinel_-100" | "non_numeric" | "out_of_range";
+  source: CameraStatusSource | "realtime_overlay";
+  receivedAtMs: number;
+  value: -100 | null;
+}
+
 /** Receipt-only evidence wiring; none of these methods initiates transport work. */
 export class CameraHealthIngress {
   readonly store: CameraHealthStore;
   private readonly bindings = new Map<string, { key: string; token: object }>();
+  private readonly suppressedRssi = new Map<string, RssiSuppression>();
   private readonly parents = new Map<string, Partial<Record<"rtc" | "p2p", "connected" | "disconnected">>>();
 
   constructor(
@@ -36,6 +46,7 @@ export class CameraHealthIngress {
     const device = this.registry.list().find((item) => item.sn === sn);
     if (device?.deviceClass !== "camera" || this.registry.conflicts().includes(sn)) {
       this.bindings.delete(sn);
+      this.suppressedRssi.delete(sn);
       this.store.remove(sn);
       return undefined;
     }
@@ -60,6 +71,7 @@ export class CameraHealthIngress {
     if (previous && previous.key !== key) {
       this.store.remove(sn);
       this.bindings.delete(sn);
+      this.suppressedRssi.delete(sn);
     }
     const health = this.store.register(sn, power, hubStatusQualified);
     if (health && !this.bindings.has(sn)) {
@@ -97,6 +109,30 @@ export class CameraHealthIngress {
       } catch {}
     }
     if (Object.keys(raw).length > 1) this.observe(sn, { ...raw, source });
+    this.recordRssiSuppression(sn, params, source ?? "realtime_overlay");
+  }
+
+  /** Receipt-only instrumentation; valid and absent reports leave the last suppression intact. */
+  recordRssiSuppression(sn: string, params: Readonly<Record<number, string>>, source: RssiSuppression["source"]): void {
+    if (!Object.hasOwn(params, 1142)) return;
+    if (!this.registry.list().some((device) => device.sn === sn && device.deviceClass === "camera")) return;
+    if (this.registry.conflicts().includes(sn)) return;
+    const reason = decodeWifiRssi(params[1142]);
+    if (typeof reason === "number") return;
+    if (!this.suppressedRssi.has(sn) && this.suppressedRssi.size >= CAMERA_HEALTH_CAPACITY)
+      this.suppressedRssi.delete(this.suppressedRssi.keys().next().value!);
+    this.suppressedRssi.set(sn, {
+      reason,
+      source,
+      receivedAtMs: Date.now(),
+      value: reason === "sentinel_-100" ? -100 : null,
+    });
+  }
+
+  /** Cache-only defensive copy; this read neither registers health nor starts transport work. */
+  rssiSuppression(sn: string): RssiSuppression | null {
+    const record = this.suppressedRssi.get(sn);
+    return record ? { ...record } : null;
   }
 
   /** A connected session keeps the parent usable; recovery still requires fresh child evidence. */
@@ -237,6 +273,7 @@ export class CameraHealthIngress {
     );
     for (const station of this.parents.keys()) if (!stations.has(station)) this.parents.delete(station);
     for (const sn of this.bindings.keys()) if (!present.has(sn)) this.bindings.delete(sn);
+    for (const sn of this.suppressedRssi.keys()) if (!present.has(sn)) this.suppressedRssi.delete(sn);
     this.store.retain(cameras);
     for (const sn of cameras) if (this.bindings.has(sn)) this.status(sn);
   }

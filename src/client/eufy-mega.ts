@@ -858,8 +858,13 @@ export class EufyMega extends EventEmitter {
    * advancing the set here is what stops the second call from firing a duplicate, and what stops a
    * failed re-bind from re-triggering on every subsequent report.
    */
-  private applyRealtimeState(sn: string | undefined, params: Record<number, string>): void {
+  private applyRealtimeState(
+    sn: string | undefined,
+    params: Record<number, string>,
+    rssiSource: "hub_report" | "realtime_overlay" = "realtime_overlay",
+  ): void {
     if (!sn) return;
+    this.cameraHealthIngress.recordRssiSuppression(sn, params, rssiSource);
     const known = this.boundParamIds.get(sn);
     const reported = Object.keys(params).map(Number);
     const widens = known ? reported.some((id) => !known.has(id)) : false;
@@ -883,7 +888,7 @@ export class EufyMega extends EventEmitter {
     if (rtcReportParameters(stationSn, frame, this.registry).size) this.scheduleReportRefresh(stationSn);
     for (const [sn, params] of rtcStateParameters(stationSn, frame, this.registry)) {
       this.cameraHealthIngress.params(sn, params, "hub_report");
-      this.applyRealtimeState(sn, params);
+      this.applyRealtimeState(sn, params, "hub_report");
       this.lateEffects.observe(sn, params);
       if (identity) this.lateContrary.observe(sn, params, identity);
       const device = this.liveDevices.get(sn)?.deref();
@@ -1501,7 +1506,7 @@ export class EufyMega extends EventEmitter {
     if (f.params) {
       if (deviceSn)
         this.cameraHealthIngress.params(deviceSn, f.params, stationSn === deviceSn ? undefined : "hub_report");
-      this.applyRealtimeState(deviceSn, f.params);
+      this.applyRealtimeState(deviceSn, f.params, stationSn === deviceSn ? "realtime_overlay" : "hub_report");
     }
     this.applyRealtimeReport(deviceSn, decodeCapabilityState(signal, caps));
     for (const ev of decodeCapabilityEvent(signal, caps))
@@ -3470,6 +3475,11 @@ export class EufyMega extends EventEmitter {
   /** Cache-only, observe-only assessment of this camera's connectivity evidence. */
   cameraHealth(sn: string) {
     return this.cameraHealthIngress.status(sn);
+  }
+
+  /** Last suppressed signal receipt only; no cache preparation or device work is performed. */
+  getRssiSuppressionDiagnostics(sn: string) {
+    return this.cameraHealthIngress.rssiSuppression(sn);
   }
 
   /** Passive local automatic-send permission; neither a read nor proof of device availability. */

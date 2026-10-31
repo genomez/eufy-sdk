@@ -148,6 +148,46 @@ describe("reported camera Wi-Fi signal", () => {
 });
 
 describe("camera capability module", () => {
+  it.each([{ stationDeviceType: 27 }, { stationModel: "T9000" }, { stationDeviceType: 18, stationModel: "T9000" }])(
+    "withholds streaming quality behind S1 until 1020 is reported: %j",
+    (station) => {
+      const c = ctx(0, { ...station, paramIds: new Set([1705, 2731]) });
+      expect(mergeProperties(["camera"], c).some((p) => p.name === "streamingQuality")).toBe(false);
+      expect(camera(c).acts).not.toHaveProperty("streamingQuality");
+      const reported = { ...c, paramIds: new Set([1020, 1705, 2731]) };
+      expect(mergeProperties(["camera"], reported).find((p) => p.name === "streamingQuality")).toMatchObject({
+        paramType: 1020,
+        writable: false,
+      });
+      expect(camera(reported).acts).not.toHaveProperty("setStreamingQuality");
+    },
+  );
+
+  it.each([{ stationDeviceType: 18, stationModel: "T8030" }, {}])(
+    "preserves streaming quality exposure outside S1: %j",
+    (station) => {
+      expect(mergeProperties(["camera"], ctx(0, station)).some((p) => p.name === "streamingQuality")).toBe(true);
+    },
+  );
+
+  it("reprojects a camera manifest on S1 attachment and later reported streaming quality", () => {
+    const dev = Device.fromRecord("synthetic-camera", { model: "T8170", deviceType: 94, params: { 2731: "3" } });
+    dev.setStationContext({ stationDeviceType: 27 });
+    expect(dev.properties.some((p) => p.name === "streamingQuality")).toBe(false);
+    dev.applyParams({ 1020: "2" });
+    dev.reresolve({ params: { 1020: "2" } });
+    dev.applyParams({ 1020: "2" });
+    expect(dev.properties.find((p) => p.name === "streamingQuality")).toMatchObject({ paramType: 1020 });
+    expect(dev.getPropertyValue("streamingQuality")).toBe(2);
+  });
+
+  it("keeps the doorbell video-quality select when streaming quality is withheld", () => {
+    const dev = Device.fromRecord("synthetic-doorbell", { model: "T8214", deviceType: 93, params: { 1705: "0" } });
+    dev.setStationContext({ stationModel: "T9000" });
+    expect(dev.properties.some((p) => p.name === "streamingQuality")).toBe(false);
+    expect(dev.properties.find((p) => p.paramType === 1705)).toMatchObject({ writable: true });
+  });
+
   it("declares the capability + schema", () => {
     expect(CAMERA.capability).toBe("camera");
     expect(CAMERA.properties.map((p) => p.name)).toEqual([

@@ -90,6 +90,86 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("suppressed signal diagnostics", () => {
+  it.each([
+    [" -100.0 ", "sentinel_-100", -100],
+    ["malformed-private-text", "non_numeric", null],
+    ["", "non_numeric", null],
+    ["-1e2", "non_numeric", null],
+    ["9".repeat(400), "out_of_range", null],
+  ] as const)("classifies %s without retaining payload text", (raw, reason, value) => {
+    const f = fixture();
+    f.ingress.params(TARGET, { 1142: raw }, "hub_report");
+    expect(f.ingress.rssiSuppression(TARGET)).toEqual({
+      reason,
+      source: "hub_report",
+      receivedAtMs: Date.now(),
+      value,
+    });
+    expect(f.ingress.status(TARGET)?.rssi).toEqual({ value: null, valid: false, lastValidMs: null });
+    f.ingress.store.close();
+  });
+
+  it("keeps only the last suppression, its own source and receipt time, across valid and absent reports", () => {
+    const f = fixture();
+    expect(f.ingress.rssiSuppression(TARGET)).toBeNull();
+    f.ingress.params(TARGET, { 1142: "-100" }, "hub_report");
+    const first = f.ingress.rssiSuppression(TARGET)!;
+    vi.advanceTimersByTime(10);
+    f.ingress.params(TARGET, { 1142: "-60" }, "cloud_params");
+    const health = f.ingress.status(TARGET)!;
+    f.ingress.params(TARGET, {}, "hub_report");
+    expect(f.ingress.rssiSuppression(TARGET)).toEqual(first);
+    f.ingress.params(TARGET, { 1142: "private-text" }, "cloud_params");
+    expect(f.ingress.rssiSuppression(TARGET)).toEqual({
+      reason: "non_numeric",
+      source: "cloud_params",
+      receivedAtMs: Date.now(),
+      value: null,
+    });
+    expect(f.ingress.status(TARGET)?.rssi.lastValidMs).toBe(health.rssi.lastValidMs);
+    f.ingress.recordRssiSuppression(TARGET, { 1142: "-100" }, "realtime_overlay");
+    expect(f.ingress.rssiSuppression(TARGET)?.source).toBe("realtime_overlay");
+    const copy = f.ingress.rssiSuppression(TARGET)!;
+    copy.source = "cloud_params";
+    expect(f.ingress.rssiSuppression(TARGET)?.source).toBe("realtime_overlay");
+    expect(f.ingress.rssiSuppression(OTHER)).toBeNull();
+    f.ingress.roster([]);
+    expect(f.ingress.rssiSuppression(TARGET)).toBeNull();
+    f.ingress.store.close();
+  });
+
+  it("leaves finite fractional and unconventional signal values unsuppressed", () => {
+    const f = fixture();
+    for (const raw of ["-60.5", "17", "-101", "0"])
+      f.ingress.recordRssiSuppression(TARGET, { 1142: raw }, "realtime_overlay");
+    expect(f.ingress.rssiSuppression(TARGET)).toBeNull();
+    expect(f.event).not.toHaveBeenCalled();
+    f.ingress.store.close();
+  });
+
+  it("bounds retention and ignores unknown, non-camera and conflicting identities", () => {
+    const f = fixture();
+    const camera = f.devices[0]!;
+    f.devices.splice(
+      0,
+      f.devices.length,
+      ...Array.from({ length: 1030 }, (_, index) => ({ ...camera, sn: `camera-${index}` })),
+    );
+    for (const device of f.devices) f.ingress.recordRssiSuppression(device.sn, { 1142: "-100" }, "hub_report");
+    expect(f.ingress.rssiSuppression("camera-0")).toBeNull();
+    expect(f.ingress.rssiSuppression("camera-5")).toBeNull();
+    expect(f.ingress.rssiSuppression("camera-6")?.reason).toBe("sentinel_-100");
+    expect(f.ingress.rssiSuppression("camera-1029")?.reason).toBe("sentinel_-100");
+    f.ingress.recordRssiSuppression("missing", { 1142: "-100" }, "hub_report");
+    expect(f.ingress.rssiSuppression("missing")).toBeNull();
+    f.registry.conflicts = () => ["camera-6"];
+    f.ingress.roster(f.devices);
+    expect(f.ingress.rssiSuppression("camera-6")).toBeNull();
+    f.ingress.store.close();
+  });
+});
+
 describe("HomeBase floodlight status ingress", () => {
   it("expires hub-online through the existing local timer without another report or status read", () => {
     const f = fixture();

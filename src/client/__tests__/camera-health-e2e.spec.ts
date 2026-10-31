@@ -141,6 +141,50 @@ afterEach(() => {
 });
 
 describe("observe-only camera health at the RTC packet boundary", () => {
+  it("records suppressed signal provenance across cloud, hub and realtime paths without sending work", async () => {
+    const f = fixture();
+    f.client.registry.devices[0].deviceClass = "homebase";
+    try {
+      expect(f.eufy.getRssiSuppressionDiagnostics(TARGET)).toBeNull();
+      f.client.registry.onCloudParams(TARGET, { 1142: "-100" });
+      expect(f.eufy.getRssiSuppressionDiagnostics(TARGET)).toEqual({
+        reason: "sentinel_-100",
+        source: "cloud_params",
+        receivedAtMs: Date.now(),
+        value: -100,
+      });
+      f.client.onP2PFrame(STATION, { channel: 1, commandId: 1103, params: { 1142: "private-text" } });
+      expect(f.eufy.getRssiSuppressionDiagnostics(TARGET)?.source).toBe("hub_report");
+      f.client.onRtcFrame(STATION, {
+        commandId: 1103,
+        channel: 255,
+        segment: 1,
+        isResponse: 0,
+        linkType: 3,
+        data: { params: [{ channel: 1, param_type: 1142, param_value: -100 }] },
+      });
+      expect(f.eufy.getRssiSuppressionDiagnostics(TARGET)).toEqual({
+        reason: "sentinel_-100",
+        source: "hub_report",
+        receivedAtMs: Date.now(),
+        value: -100,
+      });
+      f.client.applyRealtimeReport(TARGET, [{ params: { 1142: "9".repeat(400) } }]);
+      expect(f.eufy.getRssiSuppressionDiagnostics(TARGET)).toEqual({
+        reason: "out_of_range",
+        source: "realtime_overlay",
+        receivedAtMs: Date.now(),
+        value: null,
+      });
+      expect(f.eufy.getRssiSuppressionDiagnostics(SIBLING)).toBeNull();
+      expect(f.packets).toEqual([]);
+    } finally {
+      await f.eufy.disconnect();
+    }
+    f.eufy.clearSession();
+    expect(f.eufy.getRssiSuppressionDiagnostics(TARGET)).toBeNull();
+  });
+
   it("receives HomeBase offline status passively and still sends legacy and bounded OFF commands", async () => {
     const f = fixture();
     f.client.registry.devices[0].deviceClass = "homebase";

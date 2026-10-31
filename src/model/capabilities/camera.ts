@@ -1,7 +1,7 @@
 /** Modified for genomez S1 experimental source preview, 2026-10-16. */
 import { asBool, coerceEnumValue } from "../../core/util.js";
 import { DeviceType } from "../device-types.js";
-import { isIndoorCamera, isIndoorCamMini, isIndoorPanTiltS350 } from "../device-family.js";
+import { isIndoorCamera, isIndoorCamMini, isIndoorPanTiltS350, isStation9000 } from "../device-family.js";
 import { setScalar, setPayload, setJson, hasCapability } from "./access.js";
 import { cameraPowerTier } from "./battery.js";
 import { AUDIO_CMD } from "./audio.js";
@@ -480,13 +480,20 @@ function refuseWhenDisabled(ctx: CommandContext, read: (name: string) => { value
  */
 const WIFI_NO_READING = -100;
 
-/** Finite signal numbers and decimal strings; other reports and the placeholder remain nonnumeric. */
-function coerceWifiRssi(raw: unknown): number | "" {
+/** Finite decimal signal or the reason it cannot supply a reading; no physical range is inferred. */
+export function decodeWifiRssi(raw: unknown): number | "sentinel_-100" | "non_numeric" | "out_of_range" {
   let value: number;
   if (typeof raw === "number") value = raw;
-  else if (typeof raw !== "string" || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw.trim())) return "";
+  else if (typeof raw !== "string" || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw.trim())) return "non_numeric";
   else value = Number(raw);
-  return Number.isFinite(value) && value !== WIFI_NO_READING ? value : "";
+  if (!Number.isFinite(value)) return "out_of_range";
+  return value === WIFI_NO_READING ? "sentinel_-100" : value;
+}
+
+/** Finite signal numbers and decimal strings; other reports and the placeholder remain nonnumeric. */
+function coerceWifiRssi(raw: unknown): number | "" {
+  const decoded = decodeWifiRssi(raw);
+  return typeof decoded === "number" ? decoded : "";
 }
 
 /**
@@ -713,6 +720,9 @@ export const CAMERA_MEMBERS = {
     enumValues: STREAMING_QUALITY_TIERS,
     provenance: "verified",
     unverified: true,
+    available: (ctx: AvailabilityContext) =>
+      !isStation9000({ deviceType: ctx.stationDeviceType, model: ctx.stationModel }) ||
+      ctx.paramIds?.has(1020) === true,
     description:
       "Live-view quality as a tier, 0 = Auto (1020). Distinct from recordingQuality, which is what gets " +
       "stored. All four tiers confirmed on a T8170 and a T8171. The WRITE (2730) is unconfirmed from " +

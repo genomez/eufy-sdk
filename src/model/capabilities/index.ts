@@ -66,6 +66,7 @@ export {
   resolveRecordingQuality,
   resolveRecordingQualityValue,
   resolveRecordingQualityTier,
+  decodeWifiRssi,
 } from "./camera.js";
 export {
   WorkingMode,
