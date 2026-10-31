@@ -7,7 +7,8 @@ import {
   ArmingMode,
   type ArmingActions,
 } from "../arming.js";
-import { buildCommand } from "../index.js";
+import { buildCommand, decodeEvent, type DeviceEventMap } from "../index.js";
+import { CusPushAlarmType, CusPushEvent } from "../../push-events.js";
 import { bind } from "./bind.js";
 import type { CommandContext } from "../types.js";
 import type { Command } from "../../../core/contracts.js";
@@ -25,6 +26,34 @@ const ctx: CommandContext = {
 const noIdentityCtx: CommandContext = { channel: 0, codec: "station", paramIds: new Set() };
 
 describe("arming capability module", () => {
+  it.each([
+    [CusPushAlarmType.HUB_STOP_BY_APP, "stopped"],
+    [CusPushAlarmType.APP, "triggered"],
+    [CusPushAlarmType.PIR, "triggered"],
+    [undefined, "triggered"],
+    [999, "triggered"],
+    ["16", "triggered"],
+  ])("derives the alarm phase from type %s without trusting a raw phase", (type, phase) => {
+    const [decoded] = decodeEvent({
+      source: "push",
+      eventType: CusPushEvent.ALARM,
+      payload: { type, phase: "delayed" },
+    });
+    expect(decoded.event).toBe("alarm");
+    expect(decoded.payload).toMatchObject({ type, phase });
+  });
+
+  it("keeps countdown pushes delayed even when they contain an app-stop type", () => {
+    const [decoded] = decodeEvent({
+      source: "push",
+      eventType: CusPushEvent.ALARM_DELAY,
+      payload: { type: CusPushAlarmType.HUB_STOP_BY_APP, phase: "stopped" },
+    });
+    expect(decoded.payload.phase).toBe("delayed");
+    const typed: DeviceEventMap["alarm"] = { phase: "stopped", type: CusPushAlarmType.HUB_STOP_BY_APP };
+    expect(typed.phase).toBe("stopped");
+  });
+
   it("declares the capability + schema", () => {
     expect(ARMING.capability).toBe("arming");
     expect(ARMING.properties.map((p) => p.name)).toEqual(["armingMode"]);

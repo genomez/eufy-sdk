@@ -1,8 +1,8 @@
 import { enumLabels } from "../../core/util.js";
 import { describeDevice, setJsonRaw, setPayload } from "./access.js";
 import { accepts, method, propertiesOf, type Members, type Surface } from "./members.js";
-import type { CapabilityModule, CommandContext } from "./types.js";
-import { CusPushEvent } from "../push-events.js";
+import type { CapabilityModule, CommandContext, InboundSignal } from "./types.js";
+import { CusPushAlarmType, CusPushEvent } from "../push-events.js";
 import type { Command } from "../../core/contracts.js";
 
 /** The station broadcast channel the HomeBase's own controls ride (not a device channel). */
@@ -367,6 +367,12 @@ export const ARMING_MEMBERS = {
   ),
 } as const satisfies Members;
 
+/** Override the alarm phase when the push reports an app stop. */
+function decodeAlarmPhase(signal: InboundSignal): Record<string, unknown> {
+  const type = signal.source === "push" ? signal.payload?.["type"] : undefined;
+  return type === CusPushAlarmType.HUB_STOP_BY_APP ? { phase: "stopped" } : {};
+}
+
 /**
  * `arming` — guard/arming mode. `armingMode` (see {@link ARMING_CMD.SET_ARMING}) has a verified read/write
  * MECHANISM, and all 9 modes it reports are now confirmed as writes — the {@link ArmingMode} union is the
@@ -387,8 +393,8 @@ export const ARMING: CapabilityModule = {
    * generic `CusPushEvent` channel, so these ids are shared with other families and resolve by
    * capability (see the barrel's event index).
    *
-   * The alarm ids carry a static `phase` so one event name covers the whole lifecycle, the same shape
-   * `battery` uses for its threshold pushes. The mode-switch push is known to identify WHICH mode and
+   * The alarm ids carry a `phase`: countdowns are `"delayed"`, app stops are `"stopped"`, and other
+   * alarm pushes are `"triggered"`. The mode-switch push is known to identify WHICH mode and
    * what triggered the change, but neither has been observed on the wire here, so this emits the bare
    * transition and refreshes the `mode` read rather than trusting a decoded field.
    */
@@ -399,7 +405,13 @@ export const ARMING: CapabilityModule = {
       emit: "armingModeChanged",
       refresh: { member: "mode" },
     },
-    { source: "push", match: CusPushEvent.ALARM, emit: "alarm", payload: { phase: "triggered" } },
+    {
+      source: "push",
+      match: CusPushEvent.ALARM,
+      emit: "alarm",
+      payload: { phase: "triggered" },
+      derive: decodeAlarmPhase,
+    },
     { source: "push", match: CusPushEvent.ALARM_DELAY, emit: "alarm", payload: { phase: "delayed" } },
   ],
 };

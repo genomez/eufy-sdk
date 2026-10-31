@@ -8,6 +8,7 @@
  * @module model/capabilities
  */
 
+import type { CusPushAlarmType } from "../push-events.js";
 import type { Capability, CloudRecord, Codec, PropertyChange, PropertySpec } from "../types.js";
 import {
   bindMembers,
@@ -701,8 +702,8 @@ export interface DeviceEventMap {
   cameraEnabledChanged: PushSemanticEvent;
   /** A light write matched its reported switch state. Carries no value; re-read the current light state. */
   lightChanged: PushSemanticEvent;
-  /** Station alarm lifecycle; `phase` says whether it fired or is counting down. */
-  alarm: PushSemanticEvent & { phase?: "triggered" | "delayed" };
+  /** Station alarm lifecycle, including an explicit stop phase and the reported alarm type. */
+  alarm: PushSemanticEvent & { phase?: "triggered" | "delayed" | "stopped"; type?: CusPushAlarmType };
   /** Lock (un)locked or a lock alarm fired. */
   lockState: PushSemanticEvent;
   /**
