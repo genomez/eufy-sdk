@@ -1582,6 +1582,7 @@ export class EufyMega extends EventEmitter {
   private afterLogin(result: LoginResult): LoginResult {
     if (result.status === LoginStatus.Ok) {
       if (this.storedImageAccount && this.storedImageAccount !== result.session.userId) this.storedImages?.clear();
+      this.storedImages?.clearLifecycleErrors();
       this.storedImageAccount = result.session.userId;
       const auth = this.mega.auth;
       if (auth?.userId) this.tuya.bind(auth.userId, this.mega.regionShard, this.opts.countryCode);
@@ -3902,7 +3903,11 @@ export class EufyMega extends EventEmitter {
     client.on("message", (raw: RawPushMessage) => this.emit("pushRaw", raw));
     client.on("push", (ev: PushEvent) => {
       this.onCloudPush(ev);
-      store.save({ creds: persistedCreds, persistentIds: client.getPersistentIds() });
+      try {
+        store.save({ creds: persistedCreds, persistentIds: client.getPersistentIds() });
+      } catch (e) {
+        this.reportError(e, "push_connection");
+      }
     });
     await new Promise<void>((resolve, reject) => {
       const cleanup = () => {

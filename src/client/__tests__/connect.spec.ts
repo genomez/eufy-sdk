@@ -488,3 +488,47 @@ describe("EufyMega sessionExpired event", () => {
     expect(errors[0]?.message).toBe("transient boom");
   });
 });
+
+/**
+ * The push handler runs inside the MCS socket's `data` callback, so a throw out of it is an uncaught
+ * exception. A store whose `save` fails (a full or read-only disk) is reported, and the channel keeps
+ * delivering.
+ */
+describe("EufyMega push persistence failure", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it("reports a failed pushStore save through error and keeps handling pushes", async () => {
+    const failure = Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+    const pushStore = {
+      load: () => ({
+        creds: { fid: "f", androidId: "0", securityToken: "0", fcmToken: "t", createdAt: 0 },
+        persistentIds: [],
+      }),
+      save: vi.fn(() => {
+        throw failure;
+      }),
+      clear: vi.fn(),
+    };
+    const c = makeClient({ mqtt: 0 }, { pushStore });
+    c.push.mockRestore();
+    vi.spyOn((c.eufy as any).mega, "registerPushToken").mockResolvedValue(undefined);
+    vi.spyOn(PushClient.prototype, "connect").mockImplementation(function (this: PushClient) {
+      this.emit("connect");
+    });
+    const errors = vi.fn();
+    c.eufy.on("error", errors);
+    const raw: unknown[] = [];
+    c.eufy.on("push", (ev) => raw.push(ev));
+    const client: PushClient = await (c.eufy as any).startPush();
+
+    expect(() => client.emit("push", { payload: {} })).not.toThrow();
+    expect(() => client.emit("push", { payload: {} })).not.toThrow();
+
+    expect(pushStore.save).toHaveBeenCalledTimes(2);
+    expect(errors).toHaveBeenCalledTimes(2);
+    expect(errors).toHaveBeenNthCalledWith(1, failure, { origin: "push_connection" });
+    expect(errors).toHaveBeenNthCalledWith(2, failure, { origin: "push_connection" });
+    expect(raw).toHaveLength(2);
+    client.close();
+  });
+});
