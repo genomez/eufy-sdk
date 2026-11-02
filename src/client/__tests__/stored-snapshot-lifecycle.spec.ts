@@ -4,7 +4,7 @@ import type { PersistedSession, SessionStore } from "../../core/store.js";
 import type { EufyDevice } from "../../core/types.js";
 import { normalizePushEvent } from "../../transport/push/push-client.js";
 import type { PushEvent, ThumbnailCandidate } from "../../transport/push/types.js";
-import { LoginStatus, type LoginResult } from "../../transport/http/mega-client.js";
+import { LoginStatus, SessionExpiredError, type LoginResult } from "../../transport/http/mega-client.js";
 import { EufyMega } from "../eufy-mega.js";
 import { LiveSnapshotUnavailableError } from "../../core/contracts.js";
 
@@ -276,6 +276,82 @@ describe("stored snapshot client lifecycle", () => {
     await client.eufy.login();
 
     await expect(action()).rejects.toMatchObject({ reason: "not-observed" });
+  });
+
+  it("a successful same-account login clears a session failure and keeps retained metadata", async () => {
+    const client = makeClient();
+    await client.eufy.login();
+    const image = jpeg("before-expiry");
+    const eventTime = 1790000000000;
+    client.download.mockResolvedValueOnce(image);
+    const action = await storedSnapshotAction(client.eufy);
+    await client.internals.observeStoredImage({ ...exactCandidate(), eventTime });
+    await vi.waitFor(() => expect(action()).resolves.toEqual({ jpeg: image, eventTime }));
+    const expired = new SessionExpiredError("synthetic session expiry");
+    client.download.mockRejectedValueOnce(expired);
+    await client.internals.observeStoredImage({
+      ...exactCandidate(),
+      url: `${IMAGE_URL}?next`,
+      eventTime: eventTime + 1,
+    });
+    await vi.waitFor(() => expect(action()).rejects.toBe(expired));
+    const diagnostics = client.eufy.getThumbnailDiagnostics();
+
+    await client.eufy.login();
+
+    await expect(action()).resolves.toEqual({ jpeg: image, eventTime });
+    expect(client.download).toHaveBeenCalledTimes(2);
+    expect(client.eufy.getThumbnailDiagnostics().counters.lifecycle_error).toBe(diagnostics.counters.lifecycle_error);
+  });
+
+  it("ignores an old session failure while the new-login fetch is pending", async () => {
+    const client = makeClient();
+    await client.eufy.login();
+    const image = jpeg("retained");
+    const action = await retainImage(client, image);
+    const old = Promise.withResolvers<Buffer>();
+    const fresh = Promise.withResolvers<Buffer>();
+    client.download.mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
+    await client.internals.observeStoredImage({ ...exactCandidate(), url: `${IMAGE_URL}?next` });
+    await client.eufy.login();
+    old.reject(new SessionExpiredError("synthetic old expiry"));
+    await new Promise(setImmediate);
+
+    await expect(action()).resolves.toEqual({ jpeg: image });
+    expect(client.download).toHaveBeenCalledTimes(3);
+    fresh.resolve(jpeg("fresh"));
+    await vi.waitFor(() => expect(action()).resolves.toEqual({ jpeg: jpeg("fresh") }));
+  });
+
+  it("refetches a candidate whose session failure outlived login, preserving its event time", async () => {
+    const client = makeClient();
+    await client.eufy.login();
+    const action = await storedSnapshotAction(client.eufy);
+    const old = Promise.withResolvers<Buffer>();
+    const image = jpeg("after-login");
+    client.download.mockReturnValueOnce(old.promise).mockResolvedValueOnce(image);
+    await client.internals.observeStoredImage({ ...exactCandidate(), eventTime: 1790000000000 });
+    await client.eufy.login();
+    old.reject(new SessionExpiredError("synthetic old expiry"));
+    await new Promise(setImmediate);
+
+    expect(client.download).toHaveBeenCalledTimes(2);
+    await expect(action()).resolves.toEqual({ jpeg: image, eventTime: 1790000000000 });
+    expect(client.eufy.getThumbnailDiagnostics().counters.lifecycle_error).toBe(0);
+  });
+
+  it("does not clear a session failure when login requires further authentication", async () => {
+    const client = makeClient();
+    const action = await retainImage(client);
+    const expired = new SessionExpiredError("synthetic expiry");
+    client.download.mockRejectedValueOnce(expired);
+    await client.internals.observeStoredImage({ ...exactCandidate(), url: `${IMAGE_URL}?next` });
+    await vi.waitFor(() => expect(action()).rejects.toBe(expired));
+    vi.spyOn(client.internals.mega, "login").mockResolvedValue({ status: LoginStatus.TwoFactor, method: "email" });
+
+    await client.eufy.login();
+
+    await expect(action()).rejects.toBe(expired);
   });
 });
 

@@ -56,6 +56,7 @@ export class StoredImageCache {
   private readonly activeDevices = new Set<string>();
   private activeDownloads = 0;
   private generation = 0;
+  private lifecycle = 0;
 
   constructor(
     private readonly downloader: (url: string, deviceKey: string) => Promise<Buffer>,
@@ -132,6 +133,12 @@ export class StoredImageCache {
     return Promise.reject(new StoredSnapshotUnavailableError(reason, "No stored snapshot is available"));
   }
 
+  /** Clear session failures after login, preserving retained metadata and pending candidates. */
+  clearLifecycleErrors(): void {
+    this.lifecycle += 1;
+    for (const state of this.devices.values()) state.lifecycleError = undefined;
+  }
+
   /** Invalidate all retained and candidate state. */
   clear(): void {
     this.generation += 1;
@@ -152,23 +159,28 @@ export class StoredImageCache {
       this.activeDownloads += 1;
       this.activeDevices.add(candidate.deviceKey);
       this.evidence.decision("download_started");
+      const lifecycle = this.lifecycle;
       void this.downloader(candidate.url, candidate.deviceKey).then(
-        (image) => this.complete(candidate, image),
-        (error: unknown) => this.complete(candidate, undefined, error),
+        (image) => this.complete(candidate, lifecycle, image),
+        (error: unknown) => this.complete(candidate, lifecycle, undefined, error),
       );
     }
   }
 
-  private complete(candidate: Candidate, image: Buffer | undefined, error?: unknown): void {
+  private complete(candidate: Candidate, lifecycle: number, image: Buffer | undefined, error?: unknown): void {
     this.activeDownloads -= 1;
     this.activeDevices.delete(candidate.deviceKey);
     const state = this.devices.get(candidate.deviceKey);
     if (candidate.generation === this.generation && state?.inFlight === candidate) {
       state.inFlight = undefined;
       if (error !== undefined && this.isLifecycleError(error)) {
-        this.evidence.decision("lifecycle_error");
-        state.lifecycleError = error;
-        state.reason = undefined;
+        if (lifecycle === this.lifecycle) {
+          this.evidence.decision("lifecycle_error");
+          state.lifecycleError = error;
+          state.reason = undefined;
+        } else {
+          state.queued ??= candidate;
+        }
       } else if (image === undefined && this.retryLater(state, candidate, error)) {
         state.lifecycleError = undefined;
         this.evidence.downloadFailure(error);

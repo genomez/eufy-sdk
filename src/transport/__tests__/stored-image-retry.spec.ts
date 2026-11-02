@@ -121,6 +121,79 @@ describe("stored thumbnail 404 retry boundaries", () => {
     await expect(cache.snapshotStored("camera-a")).rejects.toBe(error);
   });
 
+  it("refetches after re-login without resetting the candidate's 404 retry budget or evidence", async () => {
+    const expired = new Error("synthetic expiry");
+    const evidence = new ThumbnailDiagnostics();
+    const old = deferred<Buffer>();
+    const download = vi
+      .fn()
+      .mockRejectedValueOnce(missing())
+      .mockReturnValueOnce(old.promise)
+      .mockRejectedValue(missing());
+    const cache = new StoredImageCache(download, logger().log, Date.now, (error) => error === expired, evidence);
+    cache.observe("camera-a", "https://media.example/fresh", time);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(download).toHaveBeenCalledTimes(2);
+    cache.clearLifecycleErrors();
+    old.reject(expired);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(download).toHaveBeenCalledTimes(3);
+    expect(await reason(cache)).toBe("pending");
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(await reason(cache)).toBe("download-failed");
+    expect(download).toHaveBeenCalledTimes(4);
+    expect(evidence.failures()).toHaveLength(3);
+    expect(evidence.diagnostics()).toMatchObject({ lifecycle_error: 0, download_failed: 1 });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(download).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not replace a newer queued candidate with a stale-login refetch", async () => {
+    const expired = new Error("synthetic expiry");
+    const old = deferred<Buffer>();
+    const download = vi.fn().mockReturnValueOnce(old.promise).mockResolvedValueOnce(jpeg("newer"));
+    const cache = new StoredImageCache(download, logger().log, Date.now, (error) => error === expired);
+    cache.observe("camera-a", "https://media.example/old", time);
+    cache.clearLifecycleErrors();
+    cache.observe("camera-a", "https://media.example/newer", time + 1);
+    old.reject(expired);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(download.mock.calls.map((call) => call[0])).toEqual([
+      "https://media.example/old",
+      "https://media.example/newer",
+    ]);
+    await expect(cache.snapshotStored("camera-a")).resolves.toEqual({ jpeg: jpeg("newer"), eventTime: time + 1 });
+  });
+
+  it("does not refetch a failed old-account download after cache invalidation and login", async () => {
+    const expired = new Error("synthetic expiry");
+    const old = deferred<Buffer>();
+    const download = vi.fn().mockReturnValueOnce(old.promise);
+    const cache = new StoredImageCache(download, logger().log, Date.now, (error) => error === expired);
+    cache.observe("camera-a", "https://media.example/old", time);
+    cache.clear();
+    cache.clearLifecycleErrors();
+    old.reject(expired);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(download).toHaveBeenCalledTimes(1);
+    expect(await reason(cache)).toBe("not-observed");
+  });
+
+  it("clears a settled session error without inventing a download or image when none was retained", async () => {
+    const expired = new Error("synthetic expiry");
+    const download = vi.fn().mockRejectedValueOnce(expired);
+    const cache = new StoredImageCache(download, logger().log, Date.now, (error) => error === expired);
+    cache.observe("camera-a", "https://media.example/old", time);
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(cache.snapshotStored("camera-a")).rejects.toBe(expired);
+    cache.clearLifecycleErrors();
+
+    expect(await reason(cache)).toBe("not-observed");
+    expect(download).toHaveBeenCalledTimes(1);
+  });
+
   it("does not retry an invalid JPEG", async () => {
     const download = vi.fn().mockResolvedValue(Buffer.from("invalid"));
     const cache = new StoredImageCache(download, logger().log);
