@@ -576,10 +576,19 @@ export class CameraHealthStore {
     this.entries.delete(device);
   }
 
+  /** Publish an ordered unknown assessment before retiring an invalid identity and its timer. */
+  invalidate(device: string): void {
+    if (!this.entries.has(device)) return;
+    const state = createCameraHealthState(this.options.accountId, device, "unknown", this.incarnation, this.clock());
+    state.health.revision = ++this.revision;
+    this.remove(device);
+    this.emit(device, state.health);
+  }
+
   /** Complete roster replacement releases removed-camera state and its expiry timer. */
   retain(devices: readonly string[]): void {
     const retained = new Set(devices);
-    for (const device of this.entries.keys()) if (!retained.has(device)) this.remove(device);
+    for (const device of this.entries.keys()) if (!retained.has(device)) this.invalidate(device);
   }
 
   diagnostics(): { entries: number; timers: number; capacity: number } {

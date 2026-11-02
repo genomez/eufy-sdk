@@ -537,6 +537,20 @@ export class Device {
     };
   }
 
+  /** Refresh record metadata on held objects without reading or changing device state. */
+  setMetadataContext(ctx: Pick<CommandContext, "firmwareVersion" | "hardwareVersion" | "firmwareSubVersion">): void {
+    if (!this.binding) return;
+    if (
+      this.binding.ctx.firmwareVersion === ctx.firmwareVersion &&
+      this.binding.ctx.hardwareVersion === ctx.hardwareVersion &&
+      this.binding.ctx.firmwareSubVersion === ctx.firmwareSubVersion
+    )
+      return;
+    this.binding = { ...this.binding, ctx: { ...this.binding.ctx, ...ctx } };
+    this.propertyReadContext = this.binding.ctx;
+    this.actionMap = buildActions(this.capabilities, this.binding);
+  }
+
   /** Rebuild with the current record facts and existing providers, leaving every stored value untouched. */
   private rebuildBinding(): void {
     if (!this.binding) return;

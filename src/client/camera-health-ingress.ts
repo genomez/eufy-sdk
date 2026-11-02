@@ -47,7 +47,7 @@ export class CameraHealthIngress {
     if (device?.deviceClass !== "camera" || this.registry.conflicts().includes(sn)) {
       this.bindings.delete(sn);
       this.suppressedRssi.delete(sn);
-      this.store.remove(sn);
+      this.store.invalidate(sn);
       return undefined;
     }
     const power = cameraPowerEvidence(device.model, this.registry.capabilitiesForDevice(sn) ?? new Set());

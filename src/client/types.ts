@@ -340,6 +340,8 @@ export type EufyMegaEventMap = {
   lateContraryEffect: [event: LateContraryEffect];
   commandHealth: [event: CommandHealthEvent];
   cameraHealth: [event: CameraHealthEvent];
+  /** Current record metadata observed during an existing roster refresh; never initiates a read. */
+  deviceMetadata: [event: { deviceSn: string; firmwareVersion: string | null }];
   /** Catch-all: fires for EVERY semantic event, payload tagged with its `eventName`. */
   event: [AnyDeviceEvent];
   /**

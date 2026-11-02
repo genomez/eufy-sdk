@@ -90,6 +90,47 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("roster invalidation publication", () => {
+  it.each(["conflict", "removed", "reclassified"])(
+    "publishes unknown before %s eviction and rejects captured observers",
+    (reason) => {
+      const f = fixture();
+      f.ingress.parent(STATION, "connected");
+      f.ingress.params(TARGET, { 1131: "1" }, "hub_report");
+      const before = f.ingress.status(TARGET)!;
+      expect(before.connectivity).toBe("online");
+      const media = f.ingress.live(TARGET)!;
+      const command = f.ingress.command(TARGET)!;
+      f.event.mockClear();
+      if (reason === "conflict") f.registry.conflicts = () => [TARGET];
+      if (reason === "removed") f.devices.splice(0, 1);
+      if (reason === "reclassified") f.devices[0]!.deviceClass = "homebase";
+      f.ingress.roster(f.devices);
+      const invalidation = f.event.mock.calls.find(([event]) => event.device === TARGET)![0];
+      expect(invalidation).toMatchObject({
+        device: TARGET,
+        connectivity: "unknown",
+        basis: "startup",
+        lastContactMs: null,
+        rawStatus: { p1131: null, p1182: null },
+        incarnation: before.incarnation,
+      });
+      expect(invalidation.revision).toBeGreaterThan(before.revision);
+      expect(f.ingress.status(TARGET)).toBeUndefined();
+      media();
+      command.finish({ status: "acknowledged", sendAttempted: true, effect: "unconfirmed" });
+      f.ingress.roster(f.devices);
+      expect(f.event).toHaveBeenCalledTimes(1);
+      if (reason === "conflict") {
+        f.registry.conflicts = () => [];
+        expect(f.ingress.status(TARGET)?.connectivity).toBe("unknown");
+        expect(f.ingress.status(TARGET)!.revision).toBeGreaterThan(invalidation.revision);
+      }
+      f.ingress.store.close();
+    },
+  );
+});
+
 describe("suppressed signal diagnostics", () => {
   it.each([
     [" -100.0 ", "sentinel_-100", -100],

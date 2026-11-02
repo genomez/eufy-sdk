@@ -215,7 +215,7 @@ function recordString(raw: Record<string, unknown>, key: string): string | undef
 export interface StorageTelemetryOwner {
   readonly token: object;
   readonly model: "T9000";
-  readonly firmware: "4.4.0.4";
+  readonly firmware: "4.4.0.4" | "4.4.1.4";
 }
 
 /**
@@ -374,6 +374,7 @@ export class EufyMega extends EventEmitter {
   private inventoryScopeKey?: string;
   private inventoryScope: Readonly<{ epoch: number }> = Object.freeze({ epoch: 0 });
   private storageTelemetryOwners = new Map<string, { fields: readonly unknown[]; owner: StorageTelemetryOwner }>();
+  private readonly firmwareVersions = new Map<string, string | undefined>();
   private storageTelemetryReads = new Map<string, Set<AbortController>>();
   /** Shared startup state for the current epoch; caller timeouts never replace or cancel it. */
   private realtimeGeneration?: RealtimeGeneration;
@@ -560,6 +561,7 @@ export class EufyMega extends EventEmitter {
       onRoster: () => {
         this.reconcileStationContexts();
         this.cameraHealthIngress?.roster(this.registry.list());
+        this.reconcileFirmwareVersions();
       },
       onCloudParams: (sn, params) => this.cameraHealthIngress?.params(sn, params, "cloud_params"),
       onError: (e) => this.reportError(e, "device_registry"),
@@ -956,6 +958,7 @@ export class EufyMega extends EventEmitter {
     const device = this.registry.list().find((candidate) => candidate.sn === sn);
     const identity = this.mega.rtcIdentity();
     const raw = (device?.raw ?? {}) as Record<string, unknown>;
+    const firmware = recordString(raw, "main_sw_version");
     const admin = (raw.member as { admin_user_id?: unknown } | undefined)?.admin_user_id;
     if (
       !device ||
@@ -965,7 +968,7 @@ export class EufyMega extends EventEmitter {
       device.model !== "T9000" ||
       device.deviceClass !== "homebase" ||
       !RtcCommandRouter.claimsDevice(device) ||
-      recordString(raw, "main_sw_version") !== "4.4.0.4" ||
+      (firmware !== "4.4.0.4" && firmware !== "4.4.1.4") ||
       (admin !== undefined && (typeof admin !== "string" || !admin.trim() || Buffer.byteLength(admin) > 128))
     ) {
       this.invalidateStorageTelemetryOwner(sn);
@@ -994,7 +997,7 @@ export class EufyMega extends EventEmitter {
         throw new Error("Storage telemetry owner token is not serializable");
       },
     });
-    const owner: StorageTelemetryOwner = Object.freeze({ token, model: "T9000", firmware: "4.4.0.4" });
+    const owner: StorageTelemetryOwner = Object.freeze({ token, model: "T9000", firmware });
     this.storageTelemetryOwners.set(sn, { fields, owner });
     return owner;
   }
@@ -1013,7 +1016,7 @@ export class EufyMega extends EventEmitter {
   async readStorageTelemetry(sn: string, opts: { signal?: AbortSignal; timeoutMs?: number } = {}) {
     opts.signal?.throwIfAborted();
     const owner = this.getStorageTelemetryOwner(sn);
-    if (!owner) throw new Error("Storage telemetry requires an existing T9000/4.4.0.4 owner");
+    if (!owner) throw new Error("Storage telemetry requires an existing T9000 owner on firmware 4.4.0.4 or 4.4.1.4");
     const controller = new AbortController();
     const signal = opts.signal ? AbortSignal.any([opts.signal, controller.signal]) : controller.signal;
     const reads = this.storageTelemetryReads.get(sn) ?? new Set<AbortController>();
@@ -3764,6 +3767,26 @@ export class EufyMega extends EventEmitter {
       const station = stationOf(cached);
       if (dev.stationSn !== station) dev.reresolve({ parentSn: station === cached.sn ? "" : station });
       dev.setStationContext(this.parentStationContext(cached));
+      const raw = (cached.raw ?? {}) as Record<string, unknown>;
+      dev.setMetadataContext({
+        firmwareVersion: recordString(raw, "main_sw_version"),
+        hardwareVersion: recordString(raw, "main_hw_version"),
+        firmwareSubVersion: recordString(raw, "sec_sw_version"),
+      });
+    }
+  }
+
+  /** Publish changed firmware from already received roster records, including metadata-only changes. */
+  private reconcileFirmwareVersions(): void {
+    const roster = this.registry.list();
+    const present = new Set(roster.map((device) => device.sn));
+    for (const sn of this.firmwareVersions.keys()) if (!present.has(sn)) this.firmwareVersions.delete(sn);
+    for (const device of roster) {
+      const raw = (device.raw ?? {}) as Record<string, unknown>;
+      const firmware = recordString(raw, "main_sw_version");
+      if (this.firmwareVersions.has(device.sn) && this.firmwareVersions.get(device.sn) === firmware) continue;
+      this.firmwareVersions.set(device.sn, firmware);
+      this.emit("deviceMetadata", { deviceSn: device.sn, firmwareVersion: firmware ?? null });
     }
   }
 
