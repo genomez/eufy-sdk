@@ -28,6 +28,7 @@ import {
 } from "./framer.js";
 import { PortalLinkType } from "./portal-packet.js";
 import { PORTAL_KEEPALIVE } from "./portal-keepalive.js";
+import type { RtcIngressGuard } from "./playback-ingress.js";
 import { PtcsFramer } from "./ptcs-framer.js";
 import {
   TransportEvidenceRecorder,
@@ -205,6 +206,12 @@ async function loadNativePeerFactory(): Promise<NativePeerFactory> {
 }
 
 export class RtcPeer extends EventEmitter<RtcPeerEvents> {
+  private ingressGuard?: RtcIngressGuard;
+
+  /** Install native admission and post-decode classification before any session consumer. */
+  attachIngressGuard(guard: RtcIngressGuard): void {
+    this.ingressGuard = guard;
+  }
   private pc?: NativePeerConnection;
   private readonly channels = new Map<string, NativeDataChannel>();
   private framer?: PortalFramer;
@@ -457,13 +464,20 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
     dc.onMessage((msg) => {
       const timingScope = this.beginReceiveTiming(label, dc);
       try {
+        if (this.ingressGuard) {
+          if (this.transportClosed || this.channels.get(label) !== dc) {
+            this.ingressGuard.stale();
+            return;
+          }
+          if (!this.ingressGuard.native(msg)) return;
+        }
         const buf = typeof msg === "string" ? Buffer.from(msg) : Buffer.isBuffer(msg) ? msg : Buffer.from(msg);
         const current = !this.transportClosed && this.channels.get(label) === dc;
         if (current) this.transportEvidence.nativeReceive(label, buf.length);
         // Per-channel wire tally (debug): the first packets of each label, then one line per 100.
         const n = (this.wireTally.get(label) ?? 0) + 1;
         this.wireTally.set(label, n);
-        if (n <= 3 || n % 100 === 0) {
+        if (!this.ingressGuard && (n <= 3 || n % 100 === 0)) {
           this.logger.debug(`[rtc] wire ${label} #${n} ${buf.length}B ${buf.subarray(0, 8).toString("hex")}`);
         }
         if (current && label === COMMAND_CHANNEL && buf.equals(PORTAL_KEEPALIVE)) {
@@ -540,6 +554,7 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
             }
             this.transportEvidence.logicalFrame(linkType, frame.length);
           }
+          if (this.ingressGuard && !this.ingressGuard.decoded(frame, linkType)) return;
           this.emit("data", labelForLinkType(linkType), frame, linkType);
         },
       )

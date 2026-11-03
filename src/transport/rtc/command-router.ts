@@ -91,6 +91,13 @@ import {
 } from "./event-thumb-candidate.js";
 import { collectEventTableCandidate, type EventTableReceipt } from "./event-table-candidate.js";
 import {
+  EventPlaybackCandidate,
+  reservePlaybackSelectors,
+  selectPlayback,
+  type PlaybackReceipt,
+} from "./event-playback-candidate.js";
+import { PlaybackIngress } from "./playback-ingress.js";
+import {
   InformationReadEvidence,
   informationReadFailure,
   type InformationOperationEvidence,
@@ -185,6 +192,8 @@ export interface RtcCommandRouterDeps {
 }
 
 interface StationSession {
+  playbackSelectors: Set<number>;
+  playbackObservation?: PlaybackIngress;
   storageCandidateOwner: { identity: RtcIdentity; accountId: string; model: string | undefined };
   session: RtcSession;
   connectionRecord: ConnectionRecord;
@@ -319,6 +328,16 @@ let nextRefreshOwnerIncarnation = 0;
 export class RtcCommandRouter {
   private readonly connectionEvidence = new ConnectionEvidenceRecorder();
   private readonly eventTableProbes = new Map<string, AbortController>();
+  private readonly playbackProbes = new Map<
+    string,
+    { controller: AbortController; candidate: EventPlaybackCandidate }
+  >();
+  private playbackUnresolved = false;
+  private playbackMarker?: (unresolved: boolean) => void;
+  private playbackHealth = { failureTaints: 0, failureDrops: 0, normalReestablishments: 0, ordinaryReads: 0 };
+  private playbackFailureStation?: string;
+  private playbackFailedOwner?: StationSession;
+  private playbackReestablishedAt?: number;
   private readonly eventThumbReplies = new Map<string, { owner: StationSession; expiresAtMs: number }>();
   private lastEventTableTransaction = 0;
   private readonly eventTableObservers = new Map<RtcSession, (decodedBytes: number, frame: PortalResponse) => void>();
@@ -483,6 +502,10 @@ export class RtcCommandRouter {
     const epoch = this.epoch;
     owner.onChange = (current) => {
       if (epoch !== this.epoch) return;
+      if (current.queued && current.active)
+        for (const [sn, st] of this.sessions) {
+          if (st.scheduler === owner) this.playbackProbes.get(sn)?.controller.abort();
+        }
       for (const key of Object.keys(current) as (keyof StationWorkDiagnostics)[]) {
         if (key === "queued" || key === "active" || key === "oldestWaitMs") continue;
         if (key === "highWater")
@@ -605,6 +628,7 @@ export class RtcCommandRouter {
     } = {},
   ): Promise<void> {
     this.eventTableProbes.get(this.deps.findDevice(sn)?.stationSn || sn)?.abort();
+    this.playbackProbes.get(this.deps.findDevice(sn)?.stationSn || sn)?.controller.abort();
     if (!options.execution) return this.dispatchLegacyCommand(sn, cmd, options);
     const receipt = await this.dispatchCommandWithReceipt(sn, cmd, options);
     if (receipt.status === "acknowledged") return;
@@ -630,6 +654,7 @@ export class RtcCommandRouter {
     } = {},
   ): Promise<CommandReceipt> {
     this.eventTableProbes.get(this.deps.findDevice(sn)?.stationSn || sn)?.abort();
+    this.playbackProbes.get(this.deps.findDevice(sn)?.stationSn || sn)?.controller.abort();
     const context = options.execution ? Object.freeze({ ...options.execution }) : undefined;
     if (!context) {
       await this.dispatchLegacyCommand(sn, cmd, options);
@@ -1126,6 +1151,221 @@ export class RtcCommandRouter {
   }
 
   /** One opt-in table read on an existing idle owner; absolute deadline, no acquisition or retry. */
+  configurePlaybackSafety(unresolved: boolean, marker: (unresolved: boolean) => void): void {
+    this.playbackUnresolved ||= unresolved;
+    this.playbackMarker = marker;
+    for (const st of this.sessions.values()) {
+      if (this.playbackUnresolved) this.guardUnresolvedPlayback(st);
+      else if (!st.playbackObservation) this.observePlaybackOwner(st);
+    }
+  }
+
+  /** Fixed counters expose normal taint/drop/re-establishment without retaining public identities. */
+  getPlaybackSafetyDiagnostics() {
+    return {
+      ...this.playbackHealth,
+      unresolved: this.playbackUnresolved,
+      active: this.playbackProbes.size > 0,
+      reestablishedAgeMs:
+        this.playbackReestablishedAt === undefined
+          ? null
+          : Math.max(0, Math.floor(performance.now() - this.playbackReestablishedAt)),
+    };
+  }
+
+  private observePlaybackOwner(st: StationSession): void {
+    const guard = new PlaybackIngress({ observeOnly: true, end: () => {}, media: () => {} });
+    st.playbackObservation = guard;
+    st.session.attachIngressGuard(guard);
+  }
+
+  private guardUnresolvedPlayback(st: StationSession): void {
+    const guard = new PlaybackIngress({ end: () => {}, media: () => {} });
+    st.session.attachIngressGuard(guard);
+  }
+
+  /** Disabled unless a caller has durably consumed explicit one-use authority. Never acquires an owner. */
+  async readEventPlaybackCandidate(
+    stationSn: string,
+    opts: {
+      enabled?: boolean;
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      deadlineMs?: number;
+      cameras?: ReadonlySet<string>;
+      excluded?: ReadonlySet<string>;
+      fresh?: () => boolean;
+    } = {},
+  ): Promise<PlaybackReceipt> {
+    const started = performance.now();
+    const timeout = opts.timeoutMs ?? 24000;
+    if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 24000)
+      throw new RangeError("Playback deadline invalid");
+    const deadlineMs = Math.min(started + timeout, opts.deadlineMs ?? started + timeout);
+    const st = this.sessions.get(stationSn);
+    const generation = st?.generation;
+    const continuous = () =>
+      !!st &&
+      st.session.isConnected &&
+      this.sessions.get(stationSn) === st &&
+      st.generation === generation &&
+      this.storageCandidateOwnerMatches(stationSn, st);
+    const controller = new AbortController();
+    const signal = opts.signal ? AbortSignal.any([opts.signal, controller.signal]) : controller.signal;
+    const renewalAt = () =>
+      st?.refreshBusyCooldownAtMs ??
+      st?.refreshRetryAtMs ??
+      ((this.deps.sessionRefreshMs ?? 0) ? st!.connectedAtMs! + this.deps.sessionRefreshMs! : Number.POSITIVE_INFINITY);
+    const startAllowed = () =>
+      continuous() &&
+      opts.fresh?.() === true &&
+      !st!.informationTainted &&
+      !st!.replacement &&
+      !st!.refreshPending &&
+      (!this.playbackProbes.has(stationSn) || (st!.leases === 1 && st!.pendingExchanges === 1)) &&
+      st!.scheduler.snapshot().queued === 0 &&
+      renewalAt() - Date.now() > deadlineMs - performance.now() + 5000;
+    const candidate = new EventPlaybackCandidate({
+      deadlineMs,
+      continuous,
+      startAllowed,
+      signal,
+      send: (packet) => !!st && st.session.sendCommand(packet),
+      segment: () => st!.seg.next(),
+      account: st?.storageCandidateOwner.accountId ?? "",
+      marker: (value) => {
+        if (!this.playbackMarker) throw new Error("Playback marker unavailable");
+        this.playbackMarker(value);
+      },
+      latch: (value) => {
+        this.playbackUnresolved = value;
+      },
+      liveAllowed: () =>
+        !this.playbackUnresolved &&
+        !!this.lives.get(stationSn)?.live &&
+        this.sessions.get(stationSn) === st &&
+        !st!.liveTargetAmbiguous,
+    });
+    const observation = st?.playbackObservation;
+    const admission = [
+      () => !opts.enabled,
+      () => !this.playbackMarker,
+      () => !opts.cameras?.size,
+      () => !opts.excluded?.size,
+      () => this.playbackUnresolved,
+      () => !st,
+      () => !continuous(),
+      () => opts.signal?.aborted,
+      () => !observation,
+      () => performance.now() - observation!.observedSinceMs < 60000,
+      () => !observation!.ordinaryFrames,
+      () => !observation!.keepalives,
+      () => !observation!.prestartSafe(),
+      () => !st!.lastInformationRead,
+      () => st!.connectedAtMs === undefined,
+      () => st!.informationTainted,
+      () => st!.leases !== 0,
+      () => st!.pendingExchanges !== 0,
+      () => !st!.scheduler.idle,
+      () => st!.replacement,
+      () => st!.refreshPending,
+      () => this.lives.has(stationSn),
+      () => this.playbackProbes.size,
+      () => this.eventTableProbes.size,
+      () => renewalAt() - Date.now() < 30000,
+      () => !startAllowed(),
+    ].findIndex((blocked) => !!blocked());
+    if (admission !== -1) {
+      candidate.receipt.admissionGate = admission + 1;
+      return candidate.observe();
+    }
+    if (!st) return candidate.observe();
+    st.session.attachIngressGuard(candidate.ingress);
+    this.playbackProbes.set(stationSn, { controller, candidate });
+    st.leases++;
+    st.pendingExchanges++;
+    if (st.idle) clearTimeout(st.idle);
+    const timer = setTimeout(() => controller.abort("deadline"), Math.max(0, deadlineMs - performance.now()));
+    let exchange: Promise<void> | undefined;
+    this.lastEventTableTransaction = Math.max(Date.now(), this.lastEventTableTransaction + 1);
+    const transaction = String(this.lastEventTableTransaction);
+    try {
+      await st.scheduler.enqueue({
+        target: stationSn,
+        kind: "read",
+        priority: "routine",
+        sendByMs: deadlineMs,
+        run: () =>
+          (exchange = (async () => {
+            if (!startAllowed() || signal.aborted) return;
+            let rows: unknown[] = [];
+            const tableDeadline = Math.min(deadlineMs - 15000, performance.now() + 8000);
+            const tableTimer = setTimeout(
+              () => controller.abort("deadline"),
+              Math.max(0, tableDeadline - performance.now()),
+            );
+            let table: EventTableReceipt;
+            try {
+              table = await collectEventTableCandidate(
+                st.session,
+                st.storageCandidateOwner.accountId,
+                st.seg.next(),
+                transaction,
+                signal,
+                tableDeadline,
+                () => ({ ownerContinuous: continuous(), generationContinuous: continuous() }),
+                {
+                  subscribe: (observer) => {
+                    this.eventTableObservers.set(st.session, observer);
+                    return () => {
+                      this.eventTableObservers.delete(st.session);
+                    };
+                  },
+                  issued: () => {
+                    this.eventTableReplies.set(transaction, { owner: st, expiresAtMs: Number.POSITIVE_INFINITY });
+                  },
+                },
+                (value) => {
+                  rows = value;
+                },
+              );
+            } finally {
+              clearTimeout(tableTimer);
+            }
+            if (table.outcome !== "success" || !startAllowed() || signal.aborted) return;
+            const selected = selectPlayback(rows, opts.cameras!, opts.excluded!);
+            if (!selected) {
+              candidate.end("time_refused");
+              return;
+            }
+            const selectors = reservePlaybackSelectors(st.playbackSelectors);
+            if (!selectors) return;
+            await candidate.capture(selected, selectors);
+          })()),
+      });
+    } catch {
+      if (exchange) {
+        try {
+          await exchange;
+        } catch {}
+      }
+      candidate.end("owner_changed");
+    } finally {
+      candidate.finalize();
+      st.pendingExchanges--;
+    }
+    try {
+      return await candidate.observe();
+    } finally {
+      clearTimeout(timer);
+      const issued = this.eventTableReplies.get(transaction);
+      if (issued) issued.expiresAtMs = performance.now() + 60000;
+      this.playbackProbes.delete(stationSn);
+      this.release(stationSn, st);
+    }
+  }
+
+  /** One opt-in table read on an existing idle owner; absolute deadline, no acquisition or retry. */
   readEventTableCandidate(
     stationSn: string,
     opts: { signal?: AbortSignal; timeoutMs?: number } = {},
@@ -1212,6 +1452,7 @@ export class RtcCommandRouter {
       st.refreshPending ||
       this.lives.has(stationSn) ||
       this.eventTableProbes.has(stationSn) ||
+      this.playbackProbes.has(stationSn) ||
       this.eventTableReplies.size + this.eventThumbReplies.size >= 16 ||
       !continuity().ownerContinuous
     )
@@ -1649,8 +1890,18 @@ export class RtcCommandRouter {
           unmatchedAcknowledgments,
           invalidInformation,
         });
-        if (error !== undefined && attempted) st.informationTainted = true;
-        if (error === undefined && purpose === "current") st.lastInformationRead = { startedAtMs, finishedAtMs };
+        if (error !== undefined && attempted) {
+          st.informationTainted = true;
+          if (this.playbackMarker && purpose === "current") {
+            this.playbackHealth.failureTaints++;
+            this.playbackFailureStation = [...this.sessions].find(([, owner]) => owner === st)?.[0];
+            this.playbackFailedOwner = st;
+          }
+        }
+        if (error === undefined && purpose === "current") {
+          st.lastInformationRead = { startedAtMs, finishedAtMs };
+          if (this.playbackMarker) this.playbackHealth.ordinaryReads++;
+        }
         clearTimeout(timer);
         st.session.off("commandData", onData);
         st.session.off("close", onClose);
@@ -2011,6 +2262,15 @@ export class RtcCommandRouter {
       this.armRefresh(sn, st);
       signal?.throwIfAborted();
       if (this.sessions.get(sn) !== st || !st.session.isConnected) throw new Error("RTC session closed while opening");
+      if (
+        this.playbackFailureStation === sn &&
+        this.playbackFailedOwner &&
+        this.playbackFailedOwner !== st &&
+        this.playbackHealth.failureDrops > this.playbackHealth.normalReestablishments
+      ) {
+        this.playbackHealth.normalReestablishments++;
+        this.playbackReestablishedAt = performance.now();
+      }
       this.armKeepalive(sn, st);
     } catch (e) {
       this.release(sn, st);
@@ -2051,6 +2311,7 @@ export class RtcCommandRouter {
     if (stages) session.attachConnectionEvidence(stages);
     const connectTimeoutMs = this.deps.connectTimeoutMs ?? 12_000;
     const created: StationSession = {
+      playbackSelectors: new Set([1]),
       storageCandidateOwner: {
         identity: { ...identity },
         accountId: adminUserId,
@@ -2068,6 +2329,8 @@ export class RtcCommandRouter {
       diagnosticRetirement: new Set(),
       detach: () => {},
     };
+    if (this.playbackUnresolved) this.guardUnresolvedPlayback(created);
+    else if (this.playbackMarker) this.observePlaybackOwner(created);
     if (replacement) this.stationOrdinals.set(created.scheduler, ++this.nextStationOrdinal);
     created.scheduler.onIdle = () => {
       if (this.sessions.get(sn) !== created) return;
@@ -2513,6 +2776,8 @@ export class RtcCommandRouter {
     if (!Number.isInteger(channel)) throw new Error(`rtc live: ${sn} has no device_channel`);
     const stationSn = dev.stationSn;
     this.eventTableProbes.get(stationSn)?.abort();
+    this.playbackProbes.get(stationSn)?.controller.abort();
+    if (this.playbackUnresolved) throw new Error("playback_slot_uncertain");
     let entry = this.lives.get(stationSn);
     if (entry && entry.sn !== sn) throw new Error("rtc live: station play slot already in use by another camera");
     if (!entry) {
@@ -2697,6 +2962,8 @@ export class RtcCommandRouter {
   }
 
   private drop(sn: string, st: StationSession): void {
+    if (this.playbackMarker && this.playbackFailedOwner === st && this.sessions.get(sn) === st)
+      this.playbackHealth.failureDrops++;
     this.connectionEvidence.retire(
       st.connectionRecord,
       st.connectionRecord.epoch !== this.epoch ? "router_reset" : "retired",

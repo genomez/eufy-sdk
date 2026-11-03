@@ -401,6 +401,12 @@ export class PtcsReassembler {
     return this.partials.size;
   }
 
+  /** Discard retained fragments without parsing, concatenation or decompression. */
+  clear(): void {
+    this.partials.clear();
+    this.retainedBytes = 0;
+  }
+
   /** Retained fragment payload bytes, excluding metadata and delivered frames. */
   get bufferedBytes(): number {
     return this.retainedBytes;

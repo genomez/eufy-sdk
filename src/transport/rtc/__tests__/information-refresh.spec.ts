@@ -13,6 +13,7 @@ const info = (command = 1103, value: unknown = { params: [] }) => {
   return Buffer.concat([buildPortalHeader(command, body.length, 2, 0, 0), body]);
 };
 class FakeSession extends EventEmitter {
+  attachIngressGuard(): void {}
   isConnected = false;
   closed = false;
   sent: Buffer[] = [];
@@ -88,6 +89,40 @@ async function prepared(overrides: Partial<RtcCommandRouterDeps> = {}) {
 }
 
 describe("RTC information refresh", () => {
+  it("playback uncertainty preserves failed-read taint, last-lease drop and normal re-establishment", async () => {
+    const { router, session, sessions } = await prepared({ ackTimeoutMs: 10 });
+    const held = await router.sessionFor(SN);
+    router.configurePlaybackSafety(true, () => {});
+    try {
+      await expect(router.refreshInformation(SN)).rejects.toThrow();
+      expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({
+        unresolved: true,
+        failureTaints: 1,
+        failureDrops: 0,
+      });
+      await expect(router.refreshInformation(SN)).rejects.toThrow(/until the session retires/);
+      held.release();
+      expect(session.closed).toBe(true);
+      expect(router.getPlaybackSafetyDiagnostics().failureDrops).toBe(1);
+      const next = router.refreshInformation(SN);
+      await pause();
+      const replacement = sessions[1]!;
+      replacement.ack(replacement.sent[0]!);
+      replacement.emit("commandData", info(), 3);
+      await next;
+      expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({
+        unresolved: true,
+        normalReestablishments: 1,
+        ordinaryReads: 1,
+      });
+      const ordinary = await router.sessionFor(SN);
+      ordinary.release();
+      expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(true);
+    } finally {
+      held.release();
+      router.close();
+    }
+  });
   it.each([1, 3])(
     "sends the direct binary request, observes persistent frames, and accepts information on link %i",
     async (link) => {

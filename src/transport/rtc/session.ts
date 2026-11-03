@@ -27,6 +27,7 @@ import {
 import { noopLogger, type Logger } from "../../core/logger.js";
 import { RtcPeer, type RtcPeerOptions, type TurnConfig } from "./peer.js";
 import { PortalLinkType } from "./portal-packet.js";
+import type { RtcIngressGuard } from "./playback-ingress.js";
 import { scallJsonToSdp, toWireCandidate } from "./scall-sdp.js";
 import { RtcSignalingClient, type RtcInnerMessage, type RtcSignalingOptions } from "./signaling.js";
 import { copyRtcTransportDiagnostics, type RtcTransportDiagnostics } from "./transport-diagnostics.js";
@@ -82,6 +83,10 @@ interface InfoPayload {
 const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export class RtcSession extends EventEmitter<RtcSessionEvents> {
+  /** Thread ingress policy to the native receive boundary without changing session delivery. */
+  attachIngressGuard(guard: RtcIngressGuard): void {
+    this.peer.attachIngressGuard(guard);
+  }
   private connectionEvidence = new ConnectionStageRecorder();
   private readonly signaling: RtcSignalingClient;
   private readonly peer: RtcPeer;
