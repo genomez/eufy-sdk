@@ -635,6 +635,16 @@ describe("existing-owner event table candidate", () => {
     expect((await pending).outcome).toBe("success");
     expect(onFrame.mock.calls.filter(([, f]) => f.cmd === 10000)).toHaveLength(1);
   });
+  it("charges repeated matching replies against the cumulative observation budget", async () => {
+    const { router, s } = await setup();
+    s.ack = false;
+    const pending = router.readEventTableCandidate(ST, { timeoutMs: 200 });
+    await started(s);
+    // Each reply is individually under the cap; together they exceed it while ACK is still awaited.
+    s.notify(response(s, { msg: "a".repeat(140_000) }));
+    s.notify(response(s, { msg: "a".repeat(140_000) }));
+    expect(await pending).toMatchObject({ outcome: "receive_rejected", rowCount: null });
+  });
   it("requires ACK even when a matching table arrives first", async () => {
     const { router, s } = await setup();
     s.ack = false;
