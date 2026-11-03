@@ -15,6 +15,7 @@ import {
 } from "../peer.js";
 import { ANKER_MAX_MESSAGE_SIZE, scallJsonToSdp } from "../scall-sdp.js";
 import { copyRtcTransportDiagnostics, TransportEvidenceRecorder } from "../transport-diagnostics.js";
+import { PlaybackIngress } from "../playback-ingress.js";
 
 class FakeDc implements NativeDataChannel {
   open = false;
@@ -153,6 +154,50 @@ function setup(
 }
 
 describe("RtcPeer", () => {
+  it("native callbacks deliver real framer rejection and unknown outcomes to the ingress ledger", async () => {
+    const framer = new PtcsFramer();
+    const { peer, pc } = setup("host-only", () => framer);
+    await peer.init();
+    pc().local = { type: "answer", sdp: ANSWER };
+    await peer.handleRemoteOffer(OFFER);
+    const command = pc().channels[0]!;
+    command.fireOpen();
+    await vi.waitFor(() => expect(peer.isCommandChannelReady).toBe(true));
+    let now = 100;
+    const ingress = new PlaybackIngress({ now: () => now, end: vi.fn(), media: vi.fn() });
+    const received = vi.spyOn(ingress, "received");
+    peer.attachIngressGuard(ingress);
+    const data = vi.fn();
+    peer.on("data", data);
+    try {
+      for (let frameId = 1; frameId <= 6; frameId++) {
+        now += 900;
+        const packet = packetize(Buffer.from("invalid compressed synthetic bytes"), {
+          frameId,
+          channel: PtcsChannel.COMMAND,
+        })[0]!;
+        packet.writeUInt16LE(packet.readUInt16LE(18) | 0x0800, 18);
+        command.fireMessage(packet);
+        expect(received).toHaveBeenLastCalledWith("rejected");
+        expect(ingress.lastPlausibleMs).toBe(now);
+        expect(ingress.observationComplete()).toBe(false);
+      }
+      expect(data).not.toHaveBeenCalled();
+      const receive = vi.spyOn(framer, "recvPacket").mockImplementation(() => {
+        throw Error("synthetic_receive_failure");
+      });
+      expect(() =>
+        command.fireMessage(packetize(Buffer.from("synthetic"), { frameId: 7, channel: PtcsChannel.COMMAND })[0]!),
+      ).toThrow("synthetic_receive_failure");
+      expect(received).toHaveBeenLastCalledWith("unknown");
+      receive.mockRestore();
+      expect(ingress.evidence.unknown).toBe(true);
+    } finally {
+      peer.attachIngressGuard(undefined);
+      ingress.stopExpiry();
+      peer.close();
+    }
+  });
   it("recognizes only the exact command-channel keepalive echo without framing it", async () => {
     const framer = new PassthroughFramer();
     const recvPacket = vi.spyOn(framer, "recvPacket");
