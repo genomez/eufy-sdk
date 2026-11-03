@@ -554,7 +554,7 @@ describe("RTC passive receive timing", () => {
     const original = framer.recvPacket.bind(framer);
     vi.spyOn(framer, "recvPacket").mockImplementation((packet) => {
       now += 1;
-      original(packet);
+      return original(packet);
     });
     s.peer.on("data", () => {
       const duringEmit = s.peer.getTransportDiagnostics().receiveTiming!;
@@ -595,7 +595,7 @@ describe("RTC passive receive timing", () => {
     const receive = framer.recvPacket.bind(framer);
     vi.spyOn(framer, "recvPacket").mockImplementation((packet) => {
       now += 2;
-      receive(packet);
+      return receive(packet);
     });
     const data = vi.fn(() => {
       now += 3;
@@ -631,6 +631,7 @@ describe("RTC passive receive timing", () => {
         now += 1;
         framer.deliver!(frame, PortalLinkType.COMMAND);
       }
+      return "accepted";
     });
     let nested = false;
     s.peer.on("data", (_label, _frame, link) => {

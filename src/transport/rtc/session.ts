@@ -84,7 +84,7 @@ const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 
 export class RtcSession extends EventEmitter<RtcSessionEvents> {
   /** Thread ingress policy to the native receive boundary without changing session delivery. */
-  attachIngressGuard(guard: RtcIngressGuard): void {
+  attachIngressGuard(guard: RtcIngressGuard | undefined): void {
     this.peer.attachIngressGuard(guard);
   }
   private connectionEvidence = new ConnectionStageRecorder();

@@ -13,6 +13,7 @@ export interface RtcIngressGuard {
   native(message: unknown): boolean;
   decoded(frame: Buffer, link: number): boolean;
   stale(): void;
+  received?(outcome: "accepted" | "rejected" | "unknown" | void): void;
 }
 
 /** Fixed numeric/boolean evidence; packet identities and payloads never enter this ledger. */
@@ -76,6 +77,11 @@ export class PlaybackIngress implements RtcIngressGuard {
   stale(): void {
     this.plausible(true);
     this.opts.end("invalid_media");
+  }
+
+  /** Rejected or unclassified baseline work cannot prove the absence of incoming media. */
+  received(outcome: "accepted" | "rejected" | "unknown" | void): void {
+    if (outcome !== "accepted") this.reject("invalid_media", true);
   }
 
   constructor(

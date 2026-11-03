@@ -489,14 +489,14 @@ export class PtcsFramer implements PortalFramer {
     for (const packet of packets) this.onWire?.(packet);
   }
 
-  recvPacket(wirePacket: Buffer): void {
-    if (!this.ready) return;
+  recvPacket(wirePacket: Buffer): "accepted" | "rejected" | "unknown" {
+    if (!this.ready) return "unknown";
     if (isPortalPacket(wirePacket)) {
       this.barePackets = Math.min(Number.MAX_SAFE_INTEGER, this.barePackets + 1);
       this.onFrame?.(wirePacket, PortalLinkType.COMMAND);
-      return;
+      return "accepted";
     }
-    this.reassembler?.push(wirePacket);
+    return this.reassembler?.push(wirePacket) ? "accepted" : "rejected";
   }
 
   /** Detached receive observations for the current or most recently destroyed initialized lifecycle. */

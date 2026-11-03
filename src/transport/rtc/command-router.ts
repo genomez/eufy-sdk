@@ -334,7 +334,13 @@ export class RtcCommandRouter {
   >();
   private playbackUnresolved = false;
   private playbackMarker?: (unresolved: boolean) => void;
-  private playbackHealth = { failureTaints: 0, failureDrops: 0, normalReestablishments: 0, ordinaryReads: 0 };
+  private playbackHealth = {
+    failureTaints: 0,
+    failureDrops: 0,
+    normalReestablishments: 0,
+    ordinaryReads: 0,
+    latchPersistenceFailures: 0,
+  };
   private playbackFailureStation?: string;
   private playbackFailedOwner?: StationSession;
   private playbackReestablishedAt?: number;
@@ -1151,12 +1157,15 @@ export class RtcCommandRouter {
   }
 
   /** One opt-in table read on an existing idle owner; absolute deadline, no acquisition or retry. */
-  configurePlaybackSafety(unresolved: boolean, marker: (unresolved: boolean) => void): void {
+  configurePlaybackSafety(unresolved: boolean, marker: (unresolved: boolean) => void, armed = true): void {
     this.playbackUnresolved ||= unresolved;
-    this.playbackMarker = marker;
+    this.playbackMarker = armed ? marker : undefined;
     for (const st of this.sessions.values()) {
       if (this.playbackUnresolved) this.guardUnresolvedPlayback(st);
-      else if (!st.playbackObservation) this.observePlaybackOwner(st);
+      else if (!armed) {
+        st.session.attachIngressGuard(undefined);
+        st.playbackObservation = undefined;
+      } else if (!st.playbackObservation) this.observePlaybackOwner(st);
     }
   }
 
@@ -1235,7 +1244,12 @@ export class RtcCommandRouter {
       account: st?.storageCandidateOwner.accountId ?? "",
       marker: (value) => {
         if (!this.playbackMarker) throw new Error("Playback marker unavailable");
-        this.playbackMarker(value);
+        try {
+          this.playbackMarker(value);
+        } catch (error) {
+          this.playbackHealth.latchPersistenceFailures++;
+          throw error;
+        }
       },
       latch: (value) => {
         this.playbackUnresolved = value;

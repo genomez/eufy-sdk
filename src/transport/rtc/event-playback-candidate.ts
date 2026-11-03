@@ -45,6 +45,7 @@ export interface PlaybackReceipt extends PlaybackIngressEvidence {
   ownerContinuous: boolean;
   selectorsReserved: boolean;
   latchPersisted: boolean;
+  latchPersistenceFailed: boolean;
   latchRetained: boolean;
   latchCleared: boolean;
   videoFrames: number;
@@ -191,10 +192,9 @@ export class EventPlaybackCandidate {
       liveAllowed: opts.liveAllowed,
       late: () => {
         if (this.lateLatched) return;
-        this.lateLatched = true;
-        this.opts.latch(true);
         try {
-          this.opts.marker(true);
+          this.persistLatch(true);
+          this.lateLatched = true;
         } catch {}
       },
     });
@@ -227,6 +227,7 @@ export class EventPlaybackCandidate {
       ownerContinuous: false,
       selectorsReserved: false,
       latchPersisted: false,
+      latchPersistenceFailed: false,
       latchRetained: false,
       latchCleared: false,
       videoFrames: 0,
@@ -236,6 +237,22 @@ export class EventPlaybackCandidate {
       elapsedMs: 0,
       silenceMs: 0,
     };
+  }
+
+  /** Memory remains latched after every uncertain write, including a failed clear or late re-latch. */
+  private persistLatch(unresolved: boolean): void {
+    this.opts.latch(true);
+    this.receipt.latchRetained = true;
+    this.receipt.latchCleared = false;
+    try {
+      this.opts.marker(unresolved);
+      this.opts.latch(unresolved);
+    } catch (error) {
+      this.receipt.latchPersistenceFailed = true;
+      this.receipt.latchPersisted = false;
+      this.receipt.releaseOutcome = "release_unknown";
+      throw error;
+    }
   }
 
   end(reason: CaptureOutcome): void {
@@ -282,8 +299,7 @@ export class EventPlaybackCandidate {
           if (!this.receipt.videoFrames) this.end("no_media");
         }, 5000);
         try {
-          this.opts.marker(true);
-          this.opts.latch(true);
+          this.persistLatch(true);
           this.receipt.latchPersisted = true;
           this.receipt.latchRetained = true;
           if (
@@ -292,8 +308,7 @@ export class EventPlaybackCandidate {
             this.opts.signal.aborted ||
             performance.now() >= this.opts.deadlineMs - 7000
           ) {
-            this.opts.marker(false);
-            this.opts.latch(false);
+            this.persistLatch(false);
             this.receipt.latchRetained = false;
             resolve();
             return;
@@ -383,8 +398,7 @@ export class EventPlaybackCandidate {
           (this.releaseSeen || (this.absentSeen && this.eofSeen))
         ) {
           try {
-            this.opts.marker(false);
-            this.opts.latch(false);
+            this.persistLatch(false);
             this.receipt.releaseOutcome = "release_confirmed";
             this.receipt.latchRetained = false;
             this.receipt.latchCleared = true;

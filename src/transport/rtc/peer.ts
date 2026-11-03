@@ -209,7 +209,7 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
   private ingressGuard?: RtcIngressGuard;
 
   /** Install native admission and post-decode classification before any session consumer. */
-  attachIngressGuard(guard: RtcIngressGuard): void {
+  attachIngressGuard(guard: RtcIngressGuard | undefined): void {
     this.ingressGuard = guard;
   }
   private pc?: NativePeerConnection;
@@ -492,14 +492,17 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
             } catch {}
             this.logicalEvidenceSuppressed++;
           }
+          let outcome: "accepted" | "rejected" | "unknown" | void = "unknown";
           try {
-            this.framer.recvPacket(buf);
+            outcome = this.framer.recvPacket(buf);
           } finally {
+            this.ingressGuard?.received?.(outcome);
             if (!current) this.logicalEvidenceSuppressed--;
           }
           return;
         }
         // Before the framer is up (the command channel not open yet) nothing can be reassembled.
+        this.ingressGuard?.received?.("unknown");
         this.emit("data", label, buf, 0);
       } finally {
         if (timingScope) {

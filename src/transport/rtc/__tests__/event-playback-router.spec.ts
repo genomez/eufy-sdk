@@ -8,6 +8,7 @@ import { buildPortalHeader, parsePortalHeader } from "../portal-packet.js";
 import { packetize, PtcsFramer } from "../ptcs-framer.js";
 import { PORTAL_KEEPALIVE } from "../portal-keepalive.js";
 import { performance as nativePerformance } from "node:perf_hooks";
+import { zstdCompressSync } from "node:zlib";
 
 const station = "T9000SYNTHETIC",
   camera = "camera-synthetic";
@@ -25,7 +26,7 @@ class Session extends EventEmitter {
   counter = 0;
   releaseStatus = true;
   eof = true;
-  attachIngressGuard(guard: RtcIngressGuard) {
+  attachIngressGuard(guard: RtcIngressGuard | undefined) {
     this.guard = guard;
   }
   async connect() {
@@ -47,7 +48,10 @@ class Session extends EventEmitter {
   inject(packet: Buffer) {
     if (!this.guard || this.guard.native(packet)) {
       if (packet.equals(PORTAL_KEEPALIVE)) this.emit("keepaliveEcho");
-      else this.framer.recvPacket(packet);
+      else {
+        const outcome = this.framer.recvPacket(packet);
+        this.guard?.received?.(outcome);
+      }
     }
   }
   input(command: number, body: unknown, route = 2, channel = 0, selector = 0, segment = 0) {
@@ -233,4 +237,61 @@ it("queued correction demand preempts capture and gets the scheduler immediately
   expect(kinds.slice(-4)).toEqual([0, 1, 3, 1400]);
   await vi.advanceTimersByTimeAsync(5100);
   expect((await pending).captureOutcome).toBe("preempted");
+});
+it("dormant safety leaves ordinary, compressed, keepalive and live traffic identical to baseline", async () => {
+  const { router, session, marker } = await fixture();
+  router.configurePlaybackSafety(false, (value) => marker.push(value), false);
+  expect(session.guard).toBeUndefined();
+  const baseline = new Session();
+  await baseline.connect();
+  const trace = (s: Session) => {
+    const result: unknown[] = [];
+    s.on("commandData", (frame, link) => result.push(["control", frame.toString("hex"), link]));
+    s.on("mediaData", (frame, link) => result.push(["live", frame.toString("hex"), link]));
+    s.on("keepaliveEcho", () => result.push(["keepalive"]));
+    return result;
+  };
+  const expected = trace(baseline),
+    actual = trace(session);
+  try {
+    let id = 9000;
+    for (const [command, route, compressed] of [
+      [1350, 0, false],
+      [1351, 2, true],
+      [1300, 1, false],
+      [1301, 5, true],
+    ] as const) {
+      const data = Buffer.concat([
+        buildPortalHeader(command, 4, command >= 1300 && command <= 1301 ? 101 : 0, 0, 1),
+        Buffer.alloc(4),
+      ]);
+      const parts = packetize(compressed ? zstdCompressSync(data) : data, { channel: route, frameId: ++id });
+      for (const p of parts) {
+        if (compressed) p.writeUInt16LE(p.readUInt16LE(18) | 0x0800, 18);
+        baseline.inject(p);
+        session.inject(p);
+      }
+    }
+    baseline.inject(PORTAL_KEEPALIVE);
+    session.inject(PORTAL_KEEPALIVE);
+    expect(actual).toEqual(expected);
+    expect(actual).toHaveLength(5);
+    expect(marker).toEqual([]);
+    const refresh = router.refreshInformation(station);
+    await vi.advanceTimersByTimeAsync(1);
+    await refresh;
+    expect(session.guard).toBeUndefined();
+  } finally {
+    baseline.close();
+  }
+});
+it("dormant unresolved state preserves the cross-restart media block required by the latch contract", async () => {
+  const { router, session } = await fixture();
+  router.configurePlaybackSafety(true, () => {}, false);
+  expect(session.guard).toBeDefined();
+  await expect(router.mediaProviderFor(camera).live!()).rejects.toThrow("playback_slot_uncertain");
+  const control = router.dispatchCommand(camera, { kind: "set-payload", cmd: 1400, payload: { value: 0 }, channel: 2 });
+  await vi.advanceTimersByTimeAsync(1);
+  await control;
+  expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(true);
 });

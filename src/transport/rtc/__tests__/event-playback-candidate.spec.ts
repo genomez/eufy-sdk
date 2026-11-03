@@ -278,7 +278,9 @@ function candidateSetup({
     sent: Buffer[] = [],
     markers: boolean[] = [];
   let segment = 0,
-    continuous = true;
+    continuous = true,
+    markerFails = false,
+    latched = false;
   const candidate = new EventPlaybackCandidate({
     deadlineMs: performance.now() + 24000,
     continuous: () => continuous,
@@ -286,8 +288,13 @@ function candidateSetup({
     signal: controller.signal,
     account: "synthetic",
     segment: () => ++segment,
-    marker: (value) => markers.push(value),
-    latch: () => {},
+    marker: (value) => {
+      if (markerFails) throw Error("synthetic_persistence_failure");
+      markers.push(value);
+    },
+    latch: (value) => {
+      latched = value;
+    },
     send: (p) => {
       sent.push(p);
       const body = JSON.parse(p.subarray(16).toString());
@@ -308,8 +315,78 @@ function candidateSetup({
       return true;
     },
   });
-  return { candidate, controller, sent, markers };
+  return {
+    candidate,
+    controller,
+    sent,
+    markers,
+    latch: () => latched,
+    failMarker: () => {
+      markerFails = true;
+    },
+  };
 }
+
+it.each([0, 1, 2, 3, 5, 9])(
+  "rejected compressed input on route %s prevents actual-framer cessation and latch clear",
+  async (route) => {
+    const s = candidateSetup({ eof: true });
+    await s.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+    expect(s.candidate.receipt.stopStatusCount).toBe(1);
+    const framer = new PtcsFramer();
+    await framer.init(
+      () => {},
+      (frame, link) => {
+        s.candidate.ingress.decoded(frame, link);
+      },
+    );
+    try {
+      const pending = s.candidate.observe();
+      for (let i = 0; i < 6; i++) {
+        await vi.advanceTimersByTimeAsync(900);
+        const p = packetize(Buffer.from("invalid compressed synthetic bytes"), {
+          channel: route,
+          frameId: ++frameId,
+        })[0]!;
+        p.writeUInt16LE(p.readUInt16LE(18) | 0x0800, 18);
+        expect(s.candidate.ingress.native(p)).toBe(true);
+        const outcome = framer.recvPacket(p);
+        expect(outcome).toBe("rejected");
+        s.candidate.ingress.received(outcome);
+        expect(s.candidate.ingress.lastPlausibleMs).toBe(performance.now());
+        expect(s.candidate.ingress.observationComplete()).toBe(false);
+      }
+      await vi.advanceTimersByTimeAsync(700);
+      expect(await pending).toMatchObject({
+        cessationOutcome: "cessation_unknown",
+        latchRetained: true,
+        latchCleared: false,
+        unknown: true,
+      });
+      expect(s.markers).toEqual([true]);
+      expect(s.latch()).toBe(true);
+    } finally {
+      framer.destroy();
+    }
+  },
+);
+
+it("late re-latch failure stays latched and is observable after qualified release", async () => {
+  const s = candidateSetup({ eof: true });
+  await s.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+  const pending = s.candidate.observe();
+  await vi.advanceTimersByTimeAsync(5010);
+  expect((await pending).latchCleared).toBe(true);
+  s.failMarker();
+  s.candidate.ingress.native(video());
+  expect(s.latch()).toBe(true);
+  expect(s.candidate.receipt).toMatchObject({
+    latchPersistenceFailed: true,
+    latchRetained: true,
+    latchCleared: false,
+    releaseOutcome: "release_unknown",
+  });
+});
 
 describe("mandatory finalizer and observational release", () => {
   it.each([true, false])(

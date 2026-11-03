@@ -79,7 +79,7 @@ export interface PortalFramer {
   /** One outbound portal packet → zero or more wire packets through `onWirePacket`. */
   sendFrame(portalPacket: Buffer): void;
   /** One inbound wire packet → zero or more frames through `onFrame`. */
-  recvPacket(wirePacket: Buffer): void;
+  recvPacket(wirePacket: Buffer): "accepted" | "rejected" | "unknown" | void;
   /** Detached receive observations; reading does not advance expiry or alter admission. */
   getDiagnostics?(): FramingDiagnostics;
   destroy(): void;
@@ -116,9 +116,10 @@ export class PassthroughFramer implements PortalFramer {
     this.onWire?.(portalPacket);
   }
 
-  recvPacket(wirePacket: Buffer): void {
-    if (!this.ready) return;
-    if (isPortalPacket(wirePacket)) this.onFrame?.(wirePacket, PortalLinkType.COMMAND);
+  recvPacket(wirePacket: Buffer): "accepted" | "unknown" {
+    if (!this.ready || !isPortalPacket(wirePacket)) return "unknown";
+    this.onFrame?.(wirePacket, PortalLinkType.COMMAND);
+    return "accepted";
   }
 
   destroy(): void {
