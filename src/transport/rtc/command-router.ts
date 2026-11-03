@@ -1268,6 +1268,7 @@ export class RtcCommandRouter {
             if (!thumb) return table;
             thumb.table = table;
             if (table.outcome !== "success") return table;
+            if (performance.now() >= tableDeadlineMs) return { ...table, outcome: "timeout" };
             if (!thumb.file) return { ...table, outcome: "invalid_reply" };
             const renewal =
               st.refreshBusyCooldownAtMs ??
@@ -1338,10 +1339,19 @@ export class RtcCommandRouter {
     if (result.outcome === "success" || result.outcome === "empty") {
       if (!current.ownerContinuous || !current.generationContinuous)
         result = { ...result, outcome: "owner_changed", rowCount: null, fieldTypes: {} };
-      else if (signal.aborted || performance.now() >= deadlineMs)
+      else if (
+        signal.aborted ||
+        performance.now() >= deadlineMs ||
+        (thumb?.image && performance.now() >= thumb.image.deadlineMs)
+      )
         result = {
           ...result,
-          outcome: signal.reason === "deadline" || performance.now() >= deadlineMs ? "timeout" : "abandoned",
+          outcome:
+            signal.reason === "deadline" ||
+            performance.now() >= deadlineMs ||
+            (thumb?.image && performance.now() >= thumb.image.deadlineMs)
+              ? "timeout"
+              : "abandoned",
           rowCount: null,
           fieldTypes: {},
         };

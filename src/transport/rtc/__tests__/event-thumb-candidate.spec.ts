@@ -169,6 +169,28 @@ function image(s: Session, extra: Record<string, unknown> = {}, options: Paramet
   s.notify({ file: newFile, content: jpeg.toString("base64"), ...extra }, { commandId: 1308, ...options });
 }
 describe("existing-owner stored thumbnail", () => {
+  it.each(["table", "image"])("rejects %s completion crossing its deadline during promise handoff", async (kind) => {
+    const { router, s } = await setup();
+    let now = performance.now();
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    try {
+      const run = router.readEventThumbnailCandidate(ST);
+      await started(s);
+      s.notify(response(s, { data: rows }));
+      if (kind === "table") now += 8001;
+      else {
+        await imageStarted(s);
+        image(s);
+        now += 8001;
+      }
+      const result = await run;
+      expect(result.outcome).toBe("timeout");
+      expect(result.jpeg).toBeUndefined();
+      expect(s.sent).toHaveLength(kind === "table" ? 1 : 2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
   it("accepts canonical base64 at the decoded cap, rejects one more byte and orders epoch string times", () => {
     const atCap = Buffer.concat([jpeg.subarray(0, -2), Buffer.alloc(262144 - jpeg.length), jpeg.subarray(-2)]);
     expect(validateThumbnail(atCap.toString("base64"))?.jpeg.length).toBe(262144);

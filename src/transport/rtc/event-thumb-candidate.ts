@@ -22,6 +22,7 @@ export interface EventThumbnailReceipt {
 export interface ThumbnailImageResult {
   outcome: EventTableReceipt["outcome"];
   elapsedMs: number;
+  deadlineMs: number;
   resultCode: number | null;
   jpeg?: Buffer;
   width?: number;
@@ -138,6 +139,7 @@ export function collectThumbnail(
       signal.removeEventListener("abort", onAbort);
       resolve({
         outcome,
+        deadlineMs,
         elapsedMs: Math.max(0, Math.round(performance.now() - started)),
         resultCode,
         ...(outcome === "success" ? answer : {}),
