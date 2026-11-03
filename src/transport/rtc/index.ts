@@ -22,3 +22,5 @@ export type {
 } from "./connection-diagnostics.js";
 
 export type { EventTableReceipt } from "./event-table-candidate.js";
+
+export type { EventThumbnailReceipt } from "./event-thumb-candidate.js";

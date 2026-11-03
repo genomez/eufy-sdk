@@ -81,6 +81,12 @@ import type { MediaProvider, LiveStreamConsumer } from "../../core/contracts.js"
 
 import { PORTAL_CMD_SET_PAYLOAD, PORTAL_STATION_CHANNEL } from "./commands.js";
 import { collectStorageCandidate } from "./storage-candidate.js";
+import {
+  collectThumbnail,
+  selectThumbnail,
+  type EventThumbnailReceipt,
+  type ThumbnailImageResult,
+} from "./event-thumb-candidate.js";
 import { collectEventTableCandidate, type EventTableReceipt } from "./event-table-candidate.js";
 import {
   InformationReadEvidence,
@@ -311,6 +317,7 @@ let nextRefreshOwnerIncarnation = 0;
 export class RtcCommandRouter {
   private readonly connectionEvidence = new ConnectionEvidenceRecorder();
   private readonly eventTableProbes = new Map<string, AbortController>();
+  private readonly eventThumbReplies = new Map<string, { owner: StationSession; expiresAtMs: number }>();
   private lastEventTableTransaction = 0;
   private readonly eventTableObservers = new Map<RtcSession, (decodedBytes: number, frame: PortalResponse) => void>();
   private readonly eventTableReplies = new Map<string, { owner: StationSession; expiresAtMs: number }>();
@@ -1077,6 +1084,9 @@ export class RtcCommandRouter {
   /** At most sixteen issued transactions, retained for sixty seconds after waiter completion. */
   private pruneEventTableReplies(): void {
     const now = performance.now();
+    for (const [file, reply] of this.eventThumbReplies) {
+      if (reply.expiresAtMs <= now) this.eventThumbReplies.delete(file);
+    }
     for (const [transaction, reply] of this.eventTableReplies) {
       if (reply.expiresAtMs <= now) this.eventTableReplies.delete(transaction);
     }
@@ -1084,8 +1094,17 @@ export class RtcCommandRouter {
 
   /** Suppress only the expected notify envelope and table for an exchange issued by this owner. */
   private isEventTableReply(owner: StationSession, frame: PortalResponse): boolean {
-    if (!this.eventTableReplies.size) return false;
+    if (!this.eventTableReplies.size && !this.eventThumbReplies.size) return false;
     this.pruneEventTableReplies();
+    if (
+      frame.linkType === PortalLinkType.NOTIFY &&
+      frame.commandId === 1308 &&
+      frame.channel === 255 &&
+      frame.isResponse === 0
+    ) {
+      const body = frame.data as Record<string, unknown> | undefined;
+      return !!body && typeof body.file === "string" && this.eventThumbReplies.get(body.file)?.owner === owner;
+    }
     if (
       frame.linkType !== PortalLinkType.NOTIFY ||
       frame.commandId !== 1306 ||
@@ -1105,14 +1124,49 @@ export class RtcCommandRouter {
   }
 
   /** One opt-in table read on an existing idle owner; absolute deadline, no acquisition or retry. */
-  async readEventTableCandidate(
+  readEventTableCandidate(
     stationSn: string,
     opts: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<EventTableReceipt> {
+    return this.readEventCandidate(stationSn, opts);
+  }
+
+  /** One table followed by at most one stored JPEG on the same admitted owner. */
+  async readEventThumbnailCandidate(
+    stationSn: string,
+    opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<EventThumbnailReceipt & { jpeg?: Buffer }> {
+    const thumb: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt } = {};
+    const result = await this.readEventCandidate(stationSn, opts, thumb);
+    const success = result.outcome === "success" && !!thumb.image?.jpeg;
+    return {
+      outcome: result.outcome,
+      elapsedMs: result.elapsedMs,
+      tableElapsedMs: thumb.table?.elapsedMs ?? null,
+      imageElapsedMs: thumb.image?.elapsedMs ?? null,
+      rowCount: thumb.table?.rowCount ?? result.rowCount,
+      imageBytes: success ? thumb.image!.jpeg!.length : null,
+      jpegValid: success,
+      width: success ? thumb.image!.width! : null,
+      height: success ? thumb.image!.height! : null,
+      tableResultCode: thumb.table?.resultCode ?? result.resultCode,
+      imageResultCode: thumb.image?.resultCode ?? null,
+      ownerContinuous: result.ownerContinuous,
+      generationContinuous: result.generationContinuous,
+      ...(success ? { jpeg: thumb.image!.jpeg } : {}),
+    };
+  }
+
+  private async readEventCandidate(
+    stationSn: string,
+    opts: { signal?: AbortSignal; timeoutMs?: number },
+    thumb?: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt },
+  ): Promise<EventTableReceipt> {
     const started = performance.now();
-    const timeoutMs = opts.timeoutMs ?? 8_000;
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 8_000)
-      throw new RangeError("Event table timeout must be between 1 and 8000 milliseconds");
+    const limit = thumb ? 16_000 : 8_000;
+    const timeoutMs = opts.timeoutMs ?? limit;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > limit)
+      throw new RangeError("Event probe timeout is outside its bound");
     this.pruneEventTableReplies();
     const st = this.sessions.get(stationSn);
     const generation = st?.generation;
@@ -1143,7 +1197,7 @@ export class RtcCommandRouter {
       st.refreshPending ||
       this.lives.has(stationSn) ||
       this.eventTableProbes.has(stationSn) ||
-      this.eventTableReplies.size >= 16 ||
+      this.eventTableReplies.size + this.eventThumbReplies.size >= 16 ||
       !continuity().ownerContinuous
     )
       return refused();
@@ -1156,6 +1210,8 @@ export class RtcCommandRouter {
     const controller = new AbortController();
     const signal = opts.signal ? AbortSignal.any([opts.signal, controller.signal]) : controller.signal;
     const deadlineMs = started + timeoutMs;
+    const tableDeadlineMs = Math.min(deadlineMs, started + 8_000);
+    const tableTimer = setTimeout(() => controller.abort("deadline"), Math.max(0, tableDeadlineMs - performance.now()));
     const timer = setTimeout(() => controller.abort("deadline"), Math.max(0, deadlineMs - performance.now()));
     this.eventTableProbes.set(stationSn, controller);
     this.lastEventTableTransaction = Math.max(Date.now(), this.lastEventTableTransaction + 1);
@@ -1179,28 +1235,79 @@ export class RtcCommandRouter {
             !continuity().ownerContinuous ||
             !continuity().generationContinuous ||
             this.lives.has(stationSn) ||
-            this.eventTableReplies.size >= 16
+            this.eventTableReplies.size + this.eventThumbReplies.size >= 16
           )
             return refused();
-          exchange = collectEventTableCandidate(
-            st.session,
-            st.storageCandidateOwner.accountId,
-            st.seg.next(),
-            transaction,
-            signal,
-            deadlineMs,
-            continuity,
-            {
-              subscribe: (observe) => {
-                this.eventTableObservers.set(st.session, observe);
-                return () => {
-                  if (this.eventTableObservers.get(st.session) === observe) this.eventTableObservers.delete(st.session);
-                };
+          const observe = (observe: (decodedBytes: number, frame: PortalResponse) => void) => {
+            this.eventTableObservers.set(st.session, observe);
+            return () => {
+              if (this.eventTableObservers.get(st.session) === observe) this.eventTableObservers.delete(st.session);
+            };
+          };
+          exchange = (async () => {
+            const table = await collectEventTableCandidate(
+              st.session,
+              st.storageCandidateOwner.accountId,
+              st.seg.next(),
+              transaction,
+              signal,
+              tableDeadlineMs,
+              continuity,
+              {
+                subscribe: observe,
+                issued: () =>
+                  this.eventTableReplies.set(transaction, { owner: st, expiresAtMs: Number.POSITIVE_INFINITY }),
               },
-              issued: () =>
-                this.eventTableReplies.set(transaction, { owner: st, expiresAtMs: Number.POSITIVE_INFINITY }),
-            },
-          );
+              thumb
+                ? (rows) => {
+                    thumb.file = selectThumbnail(rows);
+                  }
+                : undefined,
+            );
+            clearTimeout(tableTimer);
+            if (!thumb) return table;
+            thumb.table = table;
+            if (table.outcome !== "success") return table;
+            if (!thumb.file) return { ...table, outcome: "invalid_reply" };
+            const renewal =
+              st.refreshBusyCooldownAtMs ??
+              st.refreshRetryAtMs ??
+              (refreshInterval ? st.connectedAtMs! + refreshInterval : Number.POSITIVE_INFINITY);
+            // The only active scheduler job/lease is this invocation. Re-admit before the image send.
+            if (
+              signal.aborted ||
+              performance.now() >= deadlineMs ||
+              !continuity().ownerContinuous ||
+              !continuity().generationContinuous ||
+              st.informationTainted ||
+              st.replacement ||
+              st.refreshPending ||
+              this.lives.has(stationSn) ||
+              st.leases !== 1 ||
+              st.pendingExchanges !== 1 ||
+              st.scheduler.snapshot().queued !== 0 ||
+              renewal - Date.now() <= 8_000 ||
+              this.eventTableReplies.size + this.eventThumbReplies.size >= 16 ||
+              this.eventThumbReplies.has(thumb.file)
+            )
+              return { ...table, outcome: signal.aborted ? "abandoned" : "busy/not_admitted" };
+            const imageFile = thumb.file;
+            thumb.image = await collectThumbnail(
+              st.session,
+              st.storageCandidateOwner.accountId,
+              st.seg.next(),
+              imageFile,
+              signal,
+              Math.min(deadlineMs, performance.now() + 8_000),
+              continuity,
+              {
+                subscribe: observe,
+                issued: () =>
+                  this.eventThumbReplies.set(imageFile, { owner: st, expiresAtMs: Number.POSITIVE_INFINITY }),
+              },
+            );
+            return { ...table, outcome: thumb.image.outcome };
+          })();
           return exchange;
         },
       });
@@ -1210,9 +1317,17 @@ export class RtcCommandRouter {
         : { ...refused(), outcome: performance.now() >= deadlineMs ? "timeout" : "abandoned" };
     } finally {
       clearTimeout(timer);
+      clearTimeout(tableTimer);
+      if (thumb?.file && thumb.image) {
+        const imageReply = this.eventThumbReplies.get(thumb.file);
+        if (imageReply) {
+          if (thumb.image?.outcome === "send_refused") this.eventThumbReplies.delete(thumb.file);
+          else imageReply.expiresAtMs = performance.now() + 60_000;
+        }
+      }
       const issued = this.eventTableReplies.get(transaction);
       if (issued) {
-        if (result?.outcome === "send_refused") this.eventTableReplies.delete(transaction);
+        if ((thumb?.table ?? result)?.outcome === "send_refused") this.eventTableReplies.delete(transaction);
         else issued.expiresAtMs = performance.now() + 60_000;
       }
       if (this.eventTableProbes.get(stationSn) === controller) this.eventTableProbes.delete(stationSn);
@@ -1621,6 +1736,7 @@ export class RtcCommandRouter {
     this.readEvidence.clear();
     this.eventTableObservers.clear();
     this.eventTableReplies.clear();
+    this.eventThumbReplies.clear();
     this.commandEvidence = new CommandEvidenceRecorder();
     this.nextSessionGeneration = 0;
     this.refreshStats = this.emptyRefreshStats();

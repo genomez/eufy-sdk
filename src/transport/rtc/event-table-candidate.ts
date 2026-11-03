@@ -69,6 +69,7 @@ export function collectEventTableCandidate(
   deadlineMs: number,
   continuity: () => { ownerContinuous: boolean; generationContinuous: boolean },
   observation: EventTableObservation,
+  onRows?: (rows: unknown[]) => void,
 ): Promise<EventTableReceipt> {
   const started = performance.now();
   const receipt: EventTableReceipt = {
@@ -123,6 +124,7 @@ export function collectEventTableCandidate(
       const rows = answer.data as unknown[];
       receipt.rowCount = rows.length;
       receipt.fieldTypes = fieldTypes(answer, rows);
+      onRows?.(rows);
       finish(rows.length ? "success" : "empty");
     };
     const onData = (bytes: Buffer, link: number) => {
