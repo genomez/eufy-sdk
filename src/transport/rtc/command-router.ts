@@ -75,6 +75,7 @@ import type { MediaProvider, LiveStreamConsumer } from "../../core/contracts.js"
 
 import { PORTAL_CMD_SET_PAYLOAD, PORTAL_STATION_CHANNEL } from "./commands.js";
 import { collectStorageCandidate } from "./storage-candidate.js";
+import { collectEventTableCandidate, type EventTableReceipt } from "./event-table-candidate.js";
 import {
   InformationReadEvidence,
   informationReadFailure,
@@ -303,6 +304,8 @@ let nextRefreshOwnerIncarnation = 0;
 
 export class RtcCommandRouter {
   private readonly connectionEvidence = new ConnectionEvidenceRecorder();
+  private readonly eventTableProbes = new Map<string, AbortController>();
+  private lastEventTableTransaction = 0;
   private readonly storageCandidateSessions = new WeakSet<StationSession>();
   private commandEvidence = new CommandEvidenceRecorder();
   private readonly readEvidence = new InformationReadEvidence();
@@ -584,6 +587,7 @@ export class RtcCommandRouter {
       onResponse?: (receipt: CommandReceipt) => void;
     } = {},
   ): Promise<void> {
+    this.eventTableProbes.get(this.deps.findDevice(sn)?.stationSn || sn)?.abort();
     if (!options.execution) return this.dispatchLegacyCommand(sn, cmd, options);
     const receipt = await this.dispatchCommandWithReceipt(sn, cmd, options);
     if (receipt.status === "acknowledged") return;
@@ -608,6 +612,7 @@ export class RtcCommandRouter {
       onResponse?: (receipt: CommandReceipt) => void;
     } = {},
   ): Promise<CommandReceipt> {
+    this.eventTableProbes.get(this.deps.findDevice(sn)?.stationSn || sn)?.abort();
     const context = options.execution ? Object.freeze({ ...options.execution }) : undefined;
     if (!context) {
       await this.dispatchLegacyCommand(sn, cmd, options);
@@ -1059,6 +1064,118 @@ export class RtcCommandRouter {
       if (run && acknowledged) void run.then(releaseExchange, releaseExchange);
       else releaseExchange();
     }
+  }
+
+  /** One opt-in table read on an existing idle owner; absolute deadline, no acquisition or retry. */
+  async readEventTableCandidate(
+    stationSn: string,
+    opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<EventTableReceipt> {
+    const started = performance.now();
+    const timeoutMs = opts.timeoutMs ?? 8_000;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 8_000)
+      throw new RangeError("Event table timeout must be between 1 and 8000 milliseconds");
+    const st = this.sessions.get(stationSn);
+    const generation = st?.generation;
+    const continuity = () => ({
+      ownerContinuous: !!st && st.session.isConnected && this.storageCandidateOwnerMatches(stationSn, st),
+      generationContinuous: !!st && this.sessions.get(stationSn) === st && st.generation === generation,
+    });
+    const refused = (): EventTableReceipt => ({
+      outcome: "busy/not_admitted",
+      elapsedMs: Math.max(0, Math.round(performance.now() - started)),
+      compressedBytes: 0,
+      decompressedBytes: 0,
+      rowCount: null,
+      fieldTypes: {},
+      resultCode: null,
+      ...continuity(),
+    });
+    if (
+      opts.signal?.aborted ||
+      !st ||
+      !st.session.isConnected ||
+      st.connectedAtMs === undefined ||
+      st.informationTainted ||
+      st.leases !== 0 ||
+      st.pendingExchanges !== 0 ||
+      !st.scheduler.idle ||
+      st.replacement ||
+      st.refreshPending ||
+      this.lives.has(stationSn) ||
+      this.eventTableProbes.has(stationSn) ||
+      !continuity().ownerContinuous
+    )
+      return refused();
+    const refreshInterval = this.deps.sessionRefreshMs ?? 0;
+    const renewalAt =
+      st.refreshBusyCooldownAtMs ??
+      st.refreshRetryAtMs ??
+      (refreshInterval ? st.connectedAtMs + refreshInterval : Number.POSITIVE_INFINITY);
+    if (renewalAt - Date.now() <= 8_000) return refused();
+    const controller = new AbortController();
+    const signal = opts.signal ? AbortSignal.any([opts.signal, controller.signal]) : controller.signal;
+    const deadlineMs = started + timeoutMs;
+    const timer = setTimeout(() => controller.abort("deadline"), Math.max(0, deadlineMs - performance.now()));
+    this.eventTableProbes.set(stationSn, controller);
+    this.lastEventTableTransaction = Math.max(Date.now(), this.lastEventTableTransaction + 1);
+    const transaction = String(this.lastEventTableTransaction);
+    st.leases++;
+    st.pendingExchanges++;
+    if (st.idle) clearTimeout(st.idle);
+    let result: EventTableReceipt | undefined;
+    let exchange: Promise<EventTableReceipt> | undefined;
+    try {
+      result = await st.scheduler.enqueue({
+        target: stationSn,
+        kind: "read",
+        priority: "routine",
+        sendByMs: deadlineMs,
+        signal,
+        run: async () => {
+          if (
+            signal.aborted ||
+            performance.now() >= deadlineMs ||
+            !continuity().ownerContinuous ||
+            !continuity().generationContinuous ||
+            this.lives.has(stationSn)
+          )
+            return refused();
+          exchange = collectEventTableCandidate(
+            st.session,
+            st.storageCandidateOwner.accountId,
+            st.seg.next(),
+            transaction,
+            signal,
+            deadlineMs,
+            continuity,
+          );
+          return exchange;
+        },
+      });
+    } catch {
+      result = exchange
+        ? await exchange
+        : { ...refused(), outcome: performance.now() >= deadlineMs ? "timeout" : "abandoned" };
+    } finally {
+      clearTimeout(timer);
+      if (this.eventTableProbes.get(stationSn) === controller) this.eventTableProbes.delete(stationSn);
+      st.pendingExchanges--;
+      this.release(stationSn, st);
+    }
+    const current = continuity();
+    if (result.outcome === "success" || result.outcome === "empty") {
+      if (!current.ownerContinuous || !current.generationContinuous)
+        result = { ...result, outcome: "owner_changed", rowCount: null, fieldTypes: {} };
+      else if (signal.aborted || performance.now() >= deadlineMs)
+        result = {
+          ...result,
+          outcome: signal.reason === "deadline" || performance.now() >= deadlineMs ? "timeout" : "abandoned",
+          rowCount: null,
+          fieldTypes: {},
+        };
+    }
+    return { ...result, ...current, elapsedMs: Math.max(0, Math.round(performance.now() - started)) };
   }
 
   /** One investigative storage read on an existing idle session, with no acquisition or retry. */
@@ -1761,6 +1878,7 @@ export class RtcCommandRouter {
       if (this.sessions.get(sn) !== created || !session.isConnected) return;
       this.receivedMessages.delete(bytes);
       const frame = parsePortalPacket(bytes, linkType);
+      if (frame?.commandId === 1306 || frame?.cmd === 10000 || frame?.cmd === 1306) return;
       if (frame)
         this.deps.onFrame?.(sn, frame, { sessionGeneration: created.generation, ...this.receivedIdentity(bytes) });
     };
@@ -2192,6 +2310,7 @@ export class RtcCommandRouter {
     const channel = typeof raw.device_channel === "number" ? raw.device_channel : Number(raw.device_channel);
     if (!Number.isInteger(channel)) throw new Error(`rtc live: ${sn} has no device_channel`);
     const stationSn = dev.stationSn;
+    this.eventTableProbes.get(stationSn)?.abort();
     let entry = this.lives.get(stationSn);
     if (entry && entry.sn !== sn) throw new Error("rtc live: station play slot already in use by another camera");
     if (!entry) {

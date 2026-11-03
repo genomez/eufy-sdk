@@ -196,6 +196,11 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     } catch {}
   }
 
+  /** Inspect bounded notify bytes without acquiring or altering the RTC owner. */
+  inspectNotify(inspection: import("./framer.js").BoundedNotifyInspection): (() => void) | undefined {
+    return this.peer.inspectNotify(inspection);
+  }
+
   get isConnected(): boolean {
     return this.connected;
   }

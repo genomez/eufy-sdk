@@ -72,6 +72,13 @@ function framingCount(value: number): number {
     : 0;
 }
 
+/** Exclusive, bounded notify inspection before ordinary delivery. Undefined consumes a frame. */
+export interface BoundedNotifyInspection {
+  maxBytes: number;
+  onFrame: (encoded: Buffer) => Buffer | undefined;
+  onReject: () => void;
+}
+
 export interface PortalFramer {
   /** Arm the two callbacks; resolves once `sendFrame` may be called. */
   init(onWirePacket: (packet: Buffer) => void, onFrame: (frame: Buffer, linkType: number) => void): Promise<void>;
@@ -82,6 +89,7 @@ export interface PortalFramer {
   recvPacket(wirePacket: Buffer): void;
   /** Detached receive observations; reading does not advance expiry or alter admission. */
   getDiagnostics?(): FramingDiagnostics;
+  inspectNotify?(inspection: BoundedNotifyInspection): (() => void) | undefined;
   destroy(): void;
 }
 

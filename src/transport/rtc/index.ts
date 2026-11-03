@@ -20,3 +20,5 @@ export type {
   RtcConnectionStageEvent,
   RtcConnectionStageEvidence,
 } from "./connection-diagnostics.js";
+
+export type { EventTableReceipt } from "./event-table-candidate.js";
