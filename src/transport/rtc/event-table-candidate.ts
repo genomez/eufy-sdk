@@ -1,6 +1,5 @@
 import type { RtcSession } from "./session.js";
-import { buildPortalPacket, parsePortalHeader, parsePortalPacket, PortalLinkType } from "./portal-packet.js";
-import { decompressFrame } from "./ptcs-framer.js";
+import { buildPortalPacket, parsePortalPacket, PortalLinkType, type PortalResponse } from "./portal-packet.js";
 
 export const EVENT_TABLE_BYTE_CAP = 256 * 1024;
 const TABLE = "history_record_info";
@@ -32,7 +31,7 @@ export interface EventTableReceipt {
     | "result_nonzero"
     | "send_refused";
   elapsedMs: number;
-  compressedBytes: number;
+  compressedBytes: number | null;
   decompressedBytes: number;
   rowCount: number | null;
   fieldTypes: Record<string, string[]>;
@@ -54,7 +53,13 @@ function fieldTypes(body: Record<string, unknown>, rows: unknown[]): Record<stri
   ]);
 }
 
-/** One transaction-correlated table query; only the existing session's notify inspector owns its bytes. */
+/** Passive decoded-frame observation; subscription does not own or change notify reassembly. */
+export interface EventTableObservation {
+  subscribe: (observe: (decodedBytes: number, frame: PortalResponse) => void) => () => void;
+  issued: () => void;
+}
+
+/** One transaction-correlated table query, observing only already-decoded router frames. */
 export function collectEventTableCandidate(
   session: RtcSession,
   accountId: string,
@@ -63,12 +68,13 @@ export function collectEventTableCandidate(
   signal: AbortSignal,
   deadlineMs: number,
   continuity: () => { ownerContinuous: boolean; generationContinuous: boolean },
+  observation: EventTableObservation,
 ): Promise<EventTableReceipt> {
   const started = performance.now();
   const receipt: EventTableReceipt = {
     outcome: "busy/not_admitted",
     elapsedMs: 0,
-    compressedBytes: 0,
+    compressedBytes: null,
     decompressedBytes: 0,
     rowCount: null,
     fieldTypes: {},
@@ -145,69 +151,49 @@ export function collectEventTableCandidate(
       finish("busy/not_admitted");
       return;
     }
-    release = session.inspectNotify?.({
-      maxBytes: EVENT_TABLE_BYTE_CAP,
-      onReject: () => finish("receive_rejected"),
-      onFrame: (encoded) => {
-        if (!sent || !valid()) return;
-        const compressed = encoded.length >= 4 && encoded.readUInt32LE(0) === 0xfd2fb528;
-        if (compressed) receipt.compressedBytes += encoded.length;
-        if (encoded.length > EVENT_TABLE_BYTE_CAP || receipt.compressedBytes > EVENT_TABLE_BYTE_CAP) {
-          finish("receive_rejected");
-          return;
-        }
-        const decoded = compressed ? decompressFrame(encoded, EVENT_TABLE_BYTE_CAP) : encoded;
-        if (!decoded) {
-          finish("malformed_zstd");
-          return;
-        }
-        receipt.decompressedBytes += decoded.length;
-        if (receipt.decompressedBytes > EVENT_TABLE_BYTE_CAP) {
-          finish("receive_rejected");
-          return;
-        }
-        const header = parsePortalHeader(decoded);
-        if (!header || header.paramLength !== decoded.length - 16) {
-          finish("invalid_reply");
-          return;
-        }
-        const frame = parsePortalPacket(decoded, PortalLinkType.NOTIFY);
-        const body = frame?.data;
-        if (!body || typeof body !== "object" || Array.isArray(body)) {
-          if (header.commandId === 1306) {
-            finish("invalid_reply");
-            return;
-          }
-          return decoded;
-        }
-        const value = body as Record<string, unknown>;
-        if (value.cmd !== 10000 && value.cmd !== 1306) return decoded;
-        if (value.transaction !== transaction || value.table !== TABLE) return;
-        if (value.cmd !== 10000 || header.channel !== 255 || !Number.isSafeInteger(value.mIntRet)) {
-          finish("invalid_reply");
-          return;
-        }
-        receipt.resultCode = value.mIntRet as number;
-        if (value.mIntRet !== 0) {
-          finish("result_nonzero");
-          return;
-        }
-        if (
-          !Array.isArray(value.data) ||
-          value.data.some((row) => !row || typeof row !== "object" || Array.isArray(row))
-        ) {
-          finish("invalid_reply");
-          return;
-        }
-        answer = value;
-        complete();
+    release = observation.subscribe((decodedBytes, frame) => {
+      if (
+        !sent ||
+        !valid() ||
+        frame.linkType !== PortalLinkType.NOTIFY ||
+        frame.commandId !== 1306 ||
+        frame.channel !== 255 ||
+        frame.isResponse !== 0
+      )
         return;
-      },
+      if (decodedBytes > EVENT_TABLE_BYTE_CAP) {
+        receipt.decompressedBytes += decodedBytes;
+        finish("receive_rejected");
+        return;
+      }
+      const body = frame.data;
+      if (!body || typeof body !== "object" || Array.isArray(body)) return;
+      const value = body as Record<string, unknown>;
+      if (value.cmd !== 10000 || value.transaction !== transaction || value.table !== TABLE) return;
+      receipt.decompressedBytes += decodedBytes;
+      if (receipt.decompressedBytes > EVENT_TABLE_BYTE_CAP) {
+        finish("receive_rejected");
+        return;
+      }
+      if (!Number.isSafeInteger(value.mIntRet)) {
+        finish("invalid_reply");
+        return;
+      }
+      receipt.resultCode = value.mIntRet as number;
+      if (value.mIntRet !== 0) {
+        finish("result_nonzero");
+        return;
+      }
+      if (
+        !Array.isArray(value.data) ||
+        value.data.some((row) => !row || typeof row !== "object" || Array.isArray(row))
+      ) {
+        finish("invalid_reply");
+        return;
+      }
+      answer = value;
+      complete();
     });
-    if (!release) {
-      finish("busy/not_admitted");
-      return;
-    }
     session.on("commandData", onData);
     session.on("close", onClose);
     session.on("error", onClose);
@@ -245,6 +231,7 @@ export function collectEventTableCandidate(
     try {
       if (!valid()) return;
       sent = true;
+      observation.issued();
       accepted = session.sendCommand(packet);
       if (!accepted) finish("send_refused");
       else complete();

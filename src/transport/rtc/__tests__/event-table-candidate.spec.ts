@@ -1,13 +1,23 @@
+import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { zstdCompressSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EufyDevice } from "../../../core/types.js";
 import { RtcCommandRouter } from "../command-router.js";
 import type { RtcSession, RtcSessionOptions } from "../session.js";
-import type { BoundedNotifyInspection } from "../framer.js";
 import { PtcsFramer, packetize } from "../ptcs-framer.js";
-import { buildPortalHeader, buildPortalPacket, parsePortalHeader } from "../portal-packet.js";
-import { EVENT_TABLE_BYTE_CAP } from "../event-table-candidate.js";
+import {
+  buildPortalHeader,
+  buildPortalPacket,
+  parsePortalHeader,
+  parsePortalPacket,
+  PortalLinkType,
+} from "../portal-packet.js";
+import {
+  collectEventTableCandidate,
+  EVENT_TABLE_BYTE_CAP,
+  type EventTableObservation,
+} from "../event-table-candidate.js";
 
 const ST = "T9000P0000000000",
   CAM = "T8425P0000000000";
@@ -32,9 +42,6 @@ class Session extends EventEmitter {
   get isConnected() {
     return this.connected;
   }
-  inspectNotify(inspection: BoundedNotifyInspection) {
-    return this.framer.inspectNotify(inspection);
-  }
   sendCommand(packet: Buffer) {
     this.sent.push(packet);
     if (this.ack)
@@ -49,24 +56,37 @@ class Session extends EventEmitter {
     this.onSend?.(packet);
     return true;
   }
-  notify(
+  fragments(
     body: unknown,
     {
       compressed = true,
       flag = true,
       bytes,
       payloadBytes = 1000,
-    }: { compressed?: boolean; flag?: boolean; bytes?: Buffer; payloadBytes?: number } = {},
+      commandId = 1306,
+      channel = 255,
+      isResponse = 0,
+      link = 2,
+    }: {
+      compressed?: boolean;
+      flag?: boolean;
+      bytes?: Buffer;
+      payloadBytes?: number;
+      commandId?: number;
+      channel?: number;
+      isResponse?: number;
+      link?: number;
+    } = {},
   ) {
-    const packet = buildPortalPacket({
-      commandId: 1306,
-      channel: 255,
-      segment: 0,
-      payload: body as Record<string, unknown>,
-    });
+    const json = Buffer.from(JSON.stringify(body));
+    const packet = Buffer.concat([buildPortalHeader(commandId, json.length, channel, 0, isResponse), json]);
     const encoded = bytes ?? (compressed ? zstdCompressSync(packet) : packet);
-    const packets = packetize(encoded, { channel: 2, frameId: ++this.frameId, payloadBytes });
+    const packets = packetize(encoded, { channel: link, frameId: ++this.frameId, payloadBytes });
     if (compressed && flag) for (const p of packets) p.writeUInt16LE(p.readUInt16LE(18) | 0x0800, 18);
+    return { encoded, packets, packet };
+  }
+  notify(body: unknown, options: Parameters<Session["fragments"]>[1] = {}) {
+    const { encoded, packets } = this.fragments(body, options);
     for (const p of packets) this.framer.recvPacket(p);
     return encoded;
   }
@@ -104,6 +124,7 @@ async function setup(extra: Record<string, unknown> = {}) {
   });
   routers.push(router);
   await router.dispatchCommand(ST, control);
+  const initialMetadata = onFrame.mock.calls.at(-1)![2];
   onFrame.mockClear();
   const s = sessions[0]!;
   s.sent.length = 0;
@@ -112,6 +133,7 @@ async function setup(extra: Record<string, unknown> = {}) {
     s,
     sessions,
     onFrame,
+    initialMetadata,
     changeOwner: () => {
       identity = { ...identity, userId: "changed" };
     },
@@ -138,6 +160,235 @@ async function started(s: Session) {
 }
 
 describe("existing-owner event table candidate", () => {
+  it("matches the base router callback byte-for-byte when no probe has run", async () => {
+    const { s, onFrame, initialMetadata } = await setup();
+    const source = execFileSync("git", ["show", "b57f5b8:src/transport/rtc/command-router.ts"], { encoding: "utf8" });
+    const anchor = source.indexOf("      this.receivedMessages.delete(bytes);");
+    const start = source.lastIndexOf("    const onData = ", anchor) + "    const onData = ".length;
+    const end = source.indexOf(";\n    const onConnected", anchor);
+    expect(anchor).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const baseCallback = vi.fn();
+    const created = { generation: initialMetadata.sessionGeneration };
+    let sequence = initialMetadata.sequence;
+    const baseReceiver = {
+      sessions: new Map([[ST, created]]),
+      receivedMessages: new WeakMap(),
+      deps: { onFrame: baseCallback },
+      receivedIdentity: () => ({ sequence: ++sequence, receivedAtMonotonicMs: performance.now() }),
+    };
+    const baseOnData = new Function(
+      "parsePortalPacket",
+      "session",
+      "created",
+      "sn",
+      "return " + source.slice(start, end).replace("(bytes: Buffer, linkType: number)", "(bytes, linkType)"),
+    ).call(baseReceiver, parsePortalPacket, s, created, ST);
+    s.on("commandData", baseOnData);
+    const clock = vi.spyOn(performance, "now").mockReturnValue(1234);
+    try {
+      for (const [body, commandId, link] of [
+        [{ cmd: 10000, table: TABLE, transaction: "never-issued" }, 1306, 2],
+        [{ cmd: 10000, table: "other", transaction: "other" }, 1306, 2],
+        [{ cmd: 1306 }, 1103, 2],
+        [{ cmd: 10000 }, 1350, 2],
+        [{ cmd: 1103, state: "ordinary" }, 1306, 2],
+        [{ cmd: 1306 }, 1306, 0],
+      ] as const)
+        s.notify(body, { commandId, link });
+      expect(onFrame).toHaveBeenCalledTimes(6);
+      expect(JSON.stringify(onFrame.mock.calls)).toBe(JSON.stringify(baseCallback.mock.calls));
+    } finally {
+      clock.mockRestore();
+      s.off("commandData", baseOnData);
+    }
+  });
+  it("tees unrelated fragmented and interleaved notifies across successful completion", async () => {
+    const { router, s, onFrame } = await setup();
+    const first = s.fragments(
+      { cmd: 1103, state: "first", padding: "a".repeat(1000) },
+      { compressed: false, commandId: 1103, payloadBytes: 40 },
+    ).packets;
+    s.framer.recvPacket(first.shift()!);
+    const pending = router.readEventTableCandidate(ST);
+    await started(s);
+    const second = s.fragments(
+      { cmd: 10000, table: "unrelated", state: "second", padding: "b".repeat(1000) },
+      { compressed: false, payloadBytes: 40 },
+    ).packets;
+    const third = s.fragments(
+      { cmd: 1306, state: "third", padding: "c".repeat(1000) },
+      { compressed: false, commandId: 1103, payloadBytes: 40 },
+    ).packets;
+    const reply = s.fragments(response(s), { payloadBytes: 20 }).packets;
+    s.framer.recvPacket(third.shift()!);
+    for (let i = 0; i < Math.max(first.length, second.length, reply.length); i++) {
+      for (const packets of [first, second, reply]) if (packets[i]) s.framer.recvPacket(packets[i]!);
+    }
+    expect((await pending).outcome).toBe("success");
+    for (const packet of third) s.framer.recvPacket(packet);
+    expect(
+      onFrame.mock.calls
+        .filter(([, frame]) => frame.linkType === PortalLinkType.NOTIFY)
+        .map(([, frame]) => frame.data.state)
+        .sort(),
+    ).toEqual(["first", "second", "third"]);
+  });
+  it("cancellation between fragments preserves ordinary partials and suppresses only the late probe reply while control awaits ACK", async () => {
+    const { router, s, onFrame } = await setup();
+    const pending = router.readEventTableCandidate(ST);
+    await started(s);
+    const state = s.fragments(
+      { cmd: 1103, state: "survived", padding: "a".repeat(1000) },
+      { compressed: false, commandId: 1103, payloadBytes: 40 },
+    ).packets;
+    const reply = s.fragments(response(s), { payloadBytes: 20 }).packets;
+    s.framer.recvPacket(state.shift()!);
+    s.framer.recvPacket(reply.shift()!);
+    s.ack = false;
+    const next = router.dispatchCommand(ST, control);
+    expect((await pending).outcome).toBe("abandoned");
+    await vi.waitFor(() => expect(s.sent).toHaveLength(2), { interval: 1 });
+    for (const packet of [...state, ...reply]) s.framer.recvPacket(packet);
+    s.notify(response(s, { msg: "a".repeat(1_000_000) }));
+    expect(
+      onFrame.mock.calls
+        .filter(([, frame]) => frame.linkType === PortalLinkType.NOTIFY)
+        .map(([, frame]) => frame.data.state),
+    ).toEqual(["survived"]);
+    const h = parsePortalHeader(s.sent[1]!)!;
+    s.emit("commandData", Buffer.concat([buildPortalHeader(1350, 4, h.channel, h.segment, 1), Buffer.alloc(4)]), 1);
+    await next;
+    expect(s.isConnected).toBe(true);
+  });
+  it.each(["success", "timeout", "rejected"])(
+    "suppresses late issued replies after %s and delivers unrelated table replies",
+    async (outcome) => {
+      const { router, s, onFrame } = await setup();
+      const pending = router.readEventTableCandidate(ST, { timeoutMs: outcome === "timeout" ? 100 : 8000 });
+      await started(s);
+      const body = response(s);
+      if (outcome !== "timeout")
+        s.notify({ ...body, msg: outcome === "rejected" ? "a".repeat(EVENT_TABLE_BYTE_CAP) : "ok" });
+      expect((await pending).outcome).toBe(
+        outcome === "timeout" ? "ack_only/timeout" : outcome === "rejected" ? "receive_rejected" : "success",
+      );
+      s.notify(body);
+      s.notify({ ...body, transaction: "unrelated" });
+      s.notify({ ...body, table: "unrelated" });
+      s.notify({ ...body, cmd: 1306 });
+      expect(onFrame.mock.calls.filter(([, frame]) => frame.linkType === PortalLinkType.NOTIFY)).toHaveLength(3);
+    },
+  );
+  it.each([
+    { commandId: 1103 },
+    { commandId: 1350 },
+    { isResponse: 1 },
+    { isResponse: 2 },
+    { channel: 2 },
+    { link: 0 },
+  ])("does not accept or suppress an unexpected outer envelope %j", async (options) => {
+    const { router, s, onFrame } = await setup();
+    const pending = router.readEventTableCandidate(ST, { timeoutMs: 100 });
+    await started(s);
+    s.notify(response(s), options);
+    expect((await pending).outcome).toBe("ack_only/timeout");
+    expect(
+      onFrame.mock.calls.filter(([, frame]) => frame.commandId !== 1350 || frame.linkType !== PortalLinkType.COMMAND),
+    ).toHaveLength(1);
+    expect(onFrame).toHaveBeenCalledTimes(2);
+  });
+  it("delivers an unrelated notify above the probe cap and below the ordinary cap", async () => {
+    const { router, s, onFrame } = await setup();
+    const pending = router.readEventTableCandidate(ST);
+    await started(s);
+    s.notify({ cmd: 1103, state: "large", padding: "a".repeat(1_000_000) }, { commandId: 1103 });
+    s.notify(response(s));
+    expect((await pending).outcome).toBe("success");
+    expect(
+      onFrame.mock.calls
+        .filter(([, frame]) => frame.linkType === PortalLinkType.NOTIFY)
+        .map(([, frame]) => frame.data.state),
+    ).toEqual(["large"]);
+  });
+  it("bounds transaction retention and expires completed tombstones after sixty seconds", async () => {
+    const { router, s, onFrame } = await setup();
+    let body: Record<string, unknown> = {};
+    for (let i = 0; i < 16; i++) {
+      s.sent.length = 0;
+      const pending = router.readEventTableCandidate(ST);
+      await started(s);
+      body = response(s);
+      s.notify(body);
+      expect((await pending).outcome).toBe("success");
+    }
+    s.sent.length = 0;
+    expect((await router.readEventTableCandidate(ST)).outcome).toBe("busy/not_admitted");
+    expect(s.sent).toHaveLength(0);
+    const later = performance.now() + 60_001;
+    const clock = vi.spyOn(performance, "now").mockReturnValue(later);
+    try {
+      s.notify(body);
+      expect(onFrame.mock.calls.filter(([, frame]) => frame.linkType === PortalLinkType.NOTIFY)).toHaveLength(1);
+    } finally {
+      clock.mockRestore();
+    }
+    const pending = router.readEventTableCandidate(ST);
+    await started(s);
+    s.notify(response(s));
+    expect((await pending).outcome).toBe("success");
+  });
+  it("rejects decoded oversize before touching the parsed body", async () => {
+    const { s } = await setup();
+    let observe!: Parameters<EventTableObservation["subscribe"]>[0];
+    const pending = collectEventTableCandidate(
+      s as unknown as RtcSession,
+      "synthetic",
+      1,
+      "synthetic",
+      new AbortController().signal,
+      performance.now() + 8000,
+      () => ({ ownerContinuous: true, generationContinuous: true }),
+      {
+        subscribe: (callback) => {
+          observe = callback;
+          return () => {};
+        },
+        issued: () => {},
+      },
+    );
+    observe(EVENT_TABLE_BYTE_CAP + 1, {
+      commandId: 1306,
+      channel: 255,
+      segment: 0,
+      isResponse: 0,
+      linkType: PortalLinkType.NOTIFY,
+      get data() {
+        throw new Error("oversize body must not be inspected");
+      },
+    });
+    expect(await pending).toMatchObject({
+      outcome: "receive_rejected",
+      decompressedBytes: EVENT_TABLE_BYTE_CAP + 1,
+      rowCount: null,
+      compressedBytes: null,
+    });
+  });
+  it("does not suppress an old transaction on a new session generation", async () => {
+    const { router, s, sessions, onFrame } = await setup();
+    const pending = router.readEventTableCandidate(ST);
+    await started(s);
+    const old = response(s);
+    s.notify(old);
+    expect((await pending).outcome).toBe("success");
+    s.close();
+    await router.dispatchCommand(ST, control);
+    expect(sessions).toHaveLength(2);
+    onFrame.mockClear();
+    sessions[1]!.notify(old);
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(onFrame.mock.calls[0]![1].data.transaction).toBe(old.transaction);
+  });
   it("sends the exact single count-20 query, decodes a compressed portal packet, and returns only count/types", async () => {
     const { router, s, sessions, onFrame } = await setup();
     const pending = router.readEventTableCandidate(ST);
@@ -171,7 +422,7 @@ describe("existing-owner event table candidate", () => {
       resultCode: 0,
       ownerContinuous: true,
       generationContinuous: true,
-      compressedBytes: encoded.length,
+      compressedBytes: null,
     });
     expect(receipt.decompressedBytes).toBeGreaterThan(encoded.length);
     expect(receipt.fieldTypes["row.thumb_path"]).toEqual(["string"]);
@@ -180,11 +431,11 @@ describe("existing-owner event table candidate", () => {
     expect(s.sent).toHaveLength(1);
     expect(sessions).toHaveLength(1);
   });
-  it.each([true, false])("accepts empty replies, compression flag %s", async (flag) => {
+  it.each([true, false])("accepts empty replies, compressed %s", async (compressed) => {
     const { router, s } = await setup();
     const pending = router.readEventTableCandidate(ST);
     await started(s);
-    s.notify(response(s, { data: [], count: 0 }), { flag });
+    s.notify(response(s, { data: [], count: 0 }), { compressed });
     expect(await pending).toMatchObject({ outcome: "empty", rowCount: 0 });
   });
   it("does not treat ACK as data and ignores wrong transaction/table", async () => {
@@ -321,11 +572,26 @@ describe("existing-owner event table candidate", () => {
     s.notify(response(s, { data: [] }));
     expect(await second).toMatchObject({ outcome: "empty", rowCount: 0 });
   });
-  it.each(["oversize", "bomb", "window", "malformed", "false_compression"])(
-    "rejects %s before parsing",
-    async (kind) => {
-      const { router, s } = await setup();
+  it.each([false, true])(
+    "rejects a decoded oversize reply, compressed %s, without losing other traffic",
+    async (compressed) => {
+      const { router, s, onFrame } = await setup();
       const pending = router.readEventTableCandidate(ST);
+      await started(s);
+      s.notify(response(s, { msg: "a".repeat(EVENT_TABLE_BYTE_CAP) }), { compressed });
+      expect((await pending).outcome).toBe("receive_rejected");
+      s.notify({ cmd: 1103, state: "after-oversize" });
+      expect(
+        onFrame.mock.calls.filter(([, f]) => f.linkType === PortalLinkType.NOTIFY).map(([, f]) => f.data.state),
+      ).toEqual(["after-oversize"]);
+      expect(s.isConnected).toBe(true);
+    },
+  );
+  it.each(["oversize", "bomb", "window", "malformed", "false_compression", "unflagged"])(
+    "preserves ordinary rejection of %s without an exclusive receiver",
+    async (kind) => {
+      const { router, s, onFrame } = await setup();
+      const pending = router.readEventTableCandidate(ST, { timeoutMs: 100 });
       await started(s);
       if (kind === "oversize") s.notify({}, { bytes: Buffer.alloc(EVENT_TABLE_BYTE_CAP + 1) });
       if (kind === "bomb") s.notify({}, { bytes: zstdCompressSync(Buffer.alloc(EVENT_TABLE_BYTE_CAP + 1, 65)) });
@@ -336,7 +602,10 @@ describe("existing-owner event table candidate", () => {
         s.notify(response(s), {
           bytes: buildPortalPacket({ commandId: 1306, channel: 255, segment: 0, payload: response(s) }),
         });
-      expect((await pending).outcome).toMatch(/receive_rejected|malformed_zstd/);
+      if (kind === "unflagged") s.notify(response(s), { flag: false });
+      expect((await pending).outcome).toBe("ack_only/timeout");
+      s.notify({ cmd: 1103, state: "ordinary" });
+      expect(onFrame.mock.calls.filter(([, frame]) => frame.linkType === PortalLinkType.NOTIFY)).toHaveLength(1);
       expect(s.isConnected).toBe(true);
     },
   );
@@ -357,13 +626,14 @@ describe("existing-owner event table candidate", () => {
       expect((await pending).outcome).toBe("invalid_reply");
     },
   );
-  it("enforces aggregate receive budgets across unrelated table replies", async () => {
-    const { router, s } = await setup();
+  it("does not charge unrelated transactions against the probe observation budget", async () => {
+    const { router, s, onFrame } = await setup();
     const pending = router.readEventTableCandidate(ST);
     await started(s);
     s.notify(response(s, { transaction: "wrong", msg: "a".repeat(140_000) }));
     s.notify(response(s, { msg: "a".repeat(140_000) }));
-    expect((await pending).outcome).toBe("receive_rejected");
+    expect((await pending).outcome).toBe("success");
+    expect(onFrame.mock.calls.filter(([, f]) => f.cmd === 10000)).toHaveLength(1);
   });
   it("requires ACK even when a matching table arrives first", async () => {
     const { router, s } = await setup();

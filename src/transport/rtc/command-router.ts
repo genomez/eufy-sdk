@@ -54,7 +54,13 @@ import type { EufyDevice } from "../../core/types.js";
 import type { Logger } from "../../core/logger.js";
 import { RtcSession, type RtcSessionOptions } from "./session.js";
 import { PORTAL_KEEPALIVE } from "./portal-keepalive.js";
-import { buildPortalPacket, parsePortalPacket, SegmentCounter, type PortalResponse } from "./portal-packet.js";
+import {
+  buildPortalPacket,
+  parsePortalPacket,
+  PortalLinkType,
+  SegmentCounter,
+  type PortalResponse,
+} from "./portal-packet.js";
 import {
   renewalFailure,
   retainedRenewalFailure,
@@ -306,6 +312,8 @@ export class RtcCommandRouter {
   private readonly connectionEvidence = new ConnectionEvidenceRecorder();
   private readonly eventTableProbes = new Map<string, AbortController>();
   private lastEventTableTransaction = 0;
+  private readonly eventTableObservers = new Map<RtcSession, (decodedBytes: number, frame: PortalResponse) => void>();
+  private readonly eventTableReplies = new Map<string, { owner: StationSession; expiresAtMs: number }>();
   private readonly storageCandidateSessions = new WeakSet<StationSession>();
   private commandEvidence = new CommandEvidenceRecorder();
   private readonly readEvidence = new InformationReadEvidence();
@@ -1066,6 +1074,36 @@ export class RtcCommandRouter {
     }
   }
 
+  /** At most sixteen issued transactions, retained for sixty seconds after waiter completion. */
+  private pruneEventTableReplies(): void {
+    const now = performance.now();
+    for (const [transaction, reply] of this.eventTableReplies) {
+      if (reply.expiresAtMs <= now) this.eventTableReplies.delete(transaction);
+    }
+  }
+
+  /** Suppress only the expected notify envelope and table for an exchange issued by this owner. */
+  private isEventTableReply(owner: StationSession, frame: PortalResponse): boolean {
+    if (!this.eventTableReplies.size) return false;
+    this.pruneEventTableReplies();
+    if (
+      frame.linkType !== PortalLinkType.NOTIFY ||
+      frame.commandId !== 1306 ||
+      frame.channel !== 255 ||
+      frame.isResponse !== 0
+    )
+      return false;
+    const body = frame.data;
+    if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+    const value = body as Record<string, unknown>;
+    return (
+      value.cmd === 10000 &&
+      value.table === "history_record_info" &&
+      typeof value.transaction === "string" &&
+      this.eventTableReplies.get(value.transaction)?.owner === owner
+    );
+  }
+
   /** One opt-in table read on an existing idle owner; absolute deadline, no acquisition or retry. */
   async readEventTableCandidate(
     stationSn: string,
@@ -1075,6 +1113,7 @@ export class RtcCommandRouter {
     const timeoutMs = opts.timeoutMs ?? 8_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 8_000)
       throw new RangeError("Event table timeout must be between 1 and 8000 milliseconds");
+    this.pruneEventTableReplies();
     const st = this.sessions.get(stationSn);
     const generation = st?.generation;
     const continuity = () => ({
@@ -1084,7 +1123,7 @@ export class RtcCommandRouter {
     const refused = (): EventTableReceipt => ({
       outcome: "busy/not_admitted",
       elapsedMs: Math.max(0, Math.round(performance.now() - started)),
-      compressedBytes: 0,
+      compressedBytes: null,
       decompressedBytes: 0,
       rowCount: null,
       fieldTypes: {},
@@ -1104,6 +1143,7 @@ export class RtcCommandRouter {
       st.refreshPending ||
       this.lives.has(stationSn) ||
       this.eventTableProbes.has(stationSn) ||
+      this.eventTableReplies.size >= 16 ||
       !continuity().ownerContinuous
     )
       return refused();
@@ -1138,7 +1178,8 @@ export class RtcCommandRouter {
             performance.now() >= deadlineMs ||
             !continuity().ownerContinuous ||
             !continuity().generationContinuous ||
-            this.lives.has(stationSn)
+            this.lives.has(stationSn) ||
+            this.eventTableReplies.size >= 16
           )
             return refused();
           exchange = collectEventTableCandidate(
@@ -1149,6 +1190,16 @@ export class RtcCommandRouter {
             signal,
             deadlineMs,
             continuity,
+            {
+              subscribe: (observe) => {
+                this.eventTableObservers.set(st.session, observe);
+                return () => {
+                  if (this.eventTableObservers.get(st.session) === observe) this.eventTableObservers.delete(st.session);
+                };
+              },
+              issued: () =>
+                this.eventTableReplies.set(transaction, { owner: st, expiresAtMs: Number.POSITIVE_INFINITY }),
+            },
           );
           return exchange;
         },
@@ -1159,6 +1210,11 @@ export class RtcCommandRouter {
         : { ...refused(), outcome: performance.now() >= deadlineMs ? "timeout" : "abandoned" };
     } finally {
       clearTimeout(timer);
+      const issued = this.eventTableReplies.get(transaction);
+      if (issued) {
+        if (result?.outcome === "send_refused") this.eventTableReplies.delete(transaction);
+        else issued.expiresAtMs = performance.now() + 60_000;
+      }
       if (this.eventTableProbes.get(stationSn) === controller) this.eventTableProbes.delete(stationSn);
       st.pendingExchanges--;
       this.release(stationSn, st);
@@ -1563,6 +1619,8 @@ export class RtcCommandRouter {
     this.commandEvidence.close();
     for (const [sn, st] of this.sessions) this.drop(sn, st);
     this.readEvidence.clear();
+    this.eventTableObservers.clear();
+    this.eventTableReplies.clear();
     this.commandEvidence = new CommandEvidenceRecorder();
     this.nextSessionGeneration = 0;
     this.refreshStats = this.emptyRefreshStats();
@@ -1878,9 +1936,11 @@ export class RtcCommandRouter {
       if (this.sessions.get(sn) !== created || !session.isConnected) return;
       this.receivedMessages.delete(bytes);
       const frame = parsePortalPacket(bytes, linkType);
-      if (frame?.commandId === 1306 || frame?.cmd === 10000 || frame?.cmd === 1306) return;
-      if (frame)
+      if (frame) {
+        this.eventTableObservers.get(session)?.(bytes.length, frame);
+        if (this.isEventTableReply(created, frame)) return;
         this.deps.onFrame?.(sn, frame, { sessionGeneration: created.generation, ...this.receivedIdentity(bytes) });
+      }
     };
     const onConnected = () => {
       if (this.sessions.get(sn) === created) this.transportState(sn, "connected");

@@ -35,12 +35,7 @@
 
 import { constants as zlibConstants, zstdDecompressSync } from "node:zlib";
 import { isPortalPacket, PortalLinkType } from "./portal-packet.js";
-import {
-  copyFramingDiagnostics,
-  type BoundedNotifyInspection,
-  type FramingDiagnostics,
-  type PortalFramer,
-} from "./framer.js";
+import { copyFramingDiagnostics, type FramingDiagnostics, type PortalFramer } from "./framer.js";
 
 const MAGIC = Buffer.from("PTCS", "ascii");
 export const PTCS_HEADER_LENGTH = 28;
@@ -140,7 +135,7 @@ export function packetize(
  * rejects truncated headers, blocks, checksums and trailing data before invoking the native decoder;
  * the native decoder validates compressed content and checksums.
  */
-export function decompressFrame(frame: Buffer, maxBytes: number): Buffer | undefined {
+function decompressFrame(frame: Buffer, maxBytes: number): Buffer | undefined {
   if (frame.length < 6 || frame.readUInt32LE(0) !== 0xfd2fb528) return undefined;
   const descriptor = frame[4]!;
   if (descriptor & 0x08) return undefined;
@@ -204,8 +199,6 @@ interface Partial {
 
 /** Receive resource policy; these limits are not claims about device frame sizes. */
 export interface PtcsReassemblerOptions {
-  /** An exclusive inspector may validate compressed bytes itself before delivery. */
-  decodeCompressed?: boolean;
   /** Maximum assembled or decompressed frame size, in bytes. Defaults to 8 MiB. */
   maxFrameBytes?: number;
   /** Maximum number of incomplete frames. Defaults to 32. */
@@ -230,7 +223,7 @@ export interface PtcsReassemblerOptions {
  */
 export class PtcsReassembler {
   private readonly partials = new Map<string, Partial>();
-  private readonly limits: Required<Omit<PtcsReassemblerOptions, "now" | "decodeCompressed">>;
+  private readonly limits: Required<Omit<PtcsReassemblerOptions, "now">>;
   private readonly now: () => number;
   private retainedBytes = 0;
   private readonly counters = {
@@ -251,8 +244,8 @@ export class PtcsReassembler {
   };
 
   constructor(
-    private readonly onFrame: (frame: Buffer, channel: number, compressed?: boolean) => void,
-    private readonly opts: PtcsReassemblerOptions = {},
+    private readonly onFrame: (frame: Buffer, channel: number) => void,
+    opts: PtcsReassemblerOptions = {},
   ) {
     this.now = opts.now ?? Date.now;
     this.limits = {
@@ -367,7 +360,7 @@ export class PtcsReassembler {
     const parts: Buffer[] = [];
     for (let i = 0; i <= p.lastIndex; i++) parts.push(p.chunks.get(i)!);
     let frame: Buffer = Buffer.concat(parts, p.bytes);
-    if (p.compressed && this.opts.decodeCompressed !== false) {
+    if (p.compressed) {
       const decoded = decompressFrame(frame, this.limits.maxFrameBytes);
       if (!decoded) {
         this.count("decompression");
@@ -376,8 +369,7 @@ export class PtcsReassembler {
       frame = decoded;
     }
     this.count("completedFrames");
-    if (this.opts.decodeCompressed === false) this.onFrame(frame, p.channel, p.compressed);
-    else this.onFrame(frame, p.channel);
+    this.onFrame(frame, p.channel);
     return true;
   }
 
@@ -444,7 +436,6 @@ export interface PtcsFramerOptions extends PtcsReassemblerOptions {
 
 /** The {@link PortalFramer} the session uses: PTCS out, PTCS in, with the portal's channel mapping. */
 export class PtcsFramer implements PortalFramer {
-  private inspection?: { receiver: PtcsReassembler; options: BoundedNotifyInspection };
   private onWire?: (packet: Buffer) => void;
   private onFrame?: (frame: Buffer, linkType: number) => void;
   private reassembler?: PtcsReassembler;
@@ -494,52 +485,12 @@ export class PtcsFramer implements PortalFramer {
 
   recvPacket(wirePacket: Buffer): void {
     if (!this.ready) return;
-    const inspection = this.inspection;
-    if (inspection && parsePtcsHeader(wirePacket)?.channel === PtcsChannel.NOTIFY) {
-      if (!inspection.receiver.push(wirePacket)) inspection.options.onReject();
-      return;
-    }
     if (isPortalPacket(wirePacket)) {
       this.barePackets = Math.min(Number.MAX_SAFE_INTEGER, this.barePackets + 1);
       this.onFrame?.(wirePacket, PortalLinkType.COMMAND);
       return;
     }
     this.reassembler?.push(wirePacket);
-  }
-
-  /** Limit notify accumulation before decoding, without replacing the session or other channels. */
-  inspectNotify(options: BoundedNotifyInspection): (() => void) | undefined {
-    if (
-      !this.ready ||
-      this.inspection ||
-      this.reassembler?.pending ||
-      !Number.isSafeInteger(options.maxBytes) ||
-      options.maxBytes < 1
-    )
-      return;
-    const receiver = new PtcsReassembler(
-      (encoded, _channel, compressed) => {
-        if (compressed && (encoded.length < 4 || encoded.readUInt32LE(0) !== 0xfd2fb528)) {
-          options.onReject();
-          return;
-        }
-        const frame = options.onFrame(encoded);
-        if (frame) this.onFrame?.(frame, PortalLinkType.NOTIFY);
-      },
-      {
-        maxFrameBytes: options.maxBytes,
-        maxBufferedBytes: options.maxBytes,
-        maxPendingFrames: 1,
-        maxAgeMs: 8_000,
-        staleMs: 8_000,
-        decodeCompressed: false,
-      },
-    );
-    const inspection = { receiver, options };
-    this.inspection = inspection;
-    return () => {
-      if (this.inspection === inspection) this.inspection = undefined;
-    };
   }
 
   /** Detached receive observations for the current or most recently destroyed initialized lifecycle. */
@@ -566,7 +517,6 @@ export class PtcsFramer implements PortalFramer {
   }
 
   destroy(): void {
-    this.inspection = undefined;
     this.ready = false;
     if (this.sweep) clearInterval(this.sweep);
     this.sweep = undefined;

@@ -505,11 +505,6 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
     });
   }
 
-  /** Inspect bounded notify bytes on the existing initialized framer only. */
-  inspectNotify(inspection: import("./framer.js").BoundedNotifyInspection): (() => void) | undefined {
-    return this.framer?.inspectNotify?.(inspection);
-  }
-
   private initFramer(dc: NativeDataChannel): Promise<void> {
     if (this.framerInit) return this.framerInit;
     const framer = this.createFramer();
