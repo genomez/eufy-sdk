@@ -5,6 +5,8 @@ import { performance } from "node:perf_hooks";
 
 export const PLAYBACK_BYTES = 2 * 1024 * 1024;
 export const PLAYBACK_FRAME_BYTES = 256 * 1024;
+export const PLAYBACK_EXPIRY_SWEEP_MS = 250;
+const PLAYBACK_PARTIAL_AGE_MS = 2000 - PLAYBACK_EXPIRY_SWEEP_MS;
 
 /** Header-first native admission and post-inflation classification, before downstream parsers. */
 export interface RtcIngressGuard {
@@ -53,8 +55,9 @@ export class PlaybackIngress implements RtcIngressGuard {
   capturing = false;
   private reservedOutput = 0;
   private reservedFrames = 0;
-  private readonly assemblies = new Map<number, { bytes: number; created: number; touched: number }>();
+  private readonly assemblies = new Map<number, { bytes: number }>();
   private readonly assembler: PtcsReassembler;
+  private expiryTimer?: NodeJS.Timeout;
   private selectors = new Set<number>();
   private tombstone = false;
   private completingId = 0;
@@ -96,8 +99,8 @@ export class PlaybackIngress implements RtcIngressGuard {
         maxPendingFrames: 8,
         maxBufferedBytes: 1024 * 1024,
         maxFragmentsPerFrame: 1024,
-        maxAgeMs: 2000,
-        staleMs: 2000,
+        maxAgeMs: PLAYBACK_PARTIAL_AGE_MS,
+        staleMs: PLAYBACK_PARTIAL_AGE_MS,
         now: () => this.now(),
       },
     );
@@ -105,6 +108,27 @@ export class PlaybackIngress implements RtcIngressGuard {
 
   private now(): number {
     return this.opts.now?.() ?? performance.now();
+  }
+
+  /** Independent invocation sweep: 1,750 ms age plus at most 250 ms scheduling granularity. */
+  startExpiry(): void {
+    this.expiryTimer ??= setInterval(() => this.expire(), PLAYBACK_EXPIRY_SWEEP_MS);
+    this.expiryTimer.unref();
+  }
+
+  /** Invocation teardown releases the timer and any remaining payload; quarantine stays header-only. */
+  stopExpiry(): void {
+    clearInterval(this.expiryTimer);
+    this.expiryTimer = undefined;
+    this.finishCapture();
+  }
+
+  /** The assembler owns progress timestamps; duplicate fragments never renew the idle deadline. */
+  private expire(): void {
+    if (this.assembler.expire()) {
+      this.reject("invalid_media", true);
+      this.finishCapture();
+    }
   }
 
   reserve(start: number, stop: number): void {
@@ -142,13 +166,7 @@ export class PlaybackIngress implements RtcIngressGuard {
   /** Incomplete assemblies or expired/rejected traffic cannot manufacture cessation. */
   observationComplete(): boolean {
     const now = this.now();
-    for (const [id, entry] of this.assemblies) {
-      if (now - entry.created >= 2000 || now - entry.touched >= 2000) {
-        this.plausible(true);
-        this.assemblies.delete(id);
-      }
-    }
-    this.assembler.expire();
+    this.expire();
     for (const [key, at] of this.controlPartials) {
       if (now - at >= 15000) {
         this.plausible(true);
@@ -159,6 +177,7 @@ export class PlaybackIngress implements RtcIngressGuard {
   }
 
   native(message: unknown): boolean {
+    this.expire();
     this.currentControlKey = undefined;
     const binary = Buffer.isBuffer(message)
       ? message
@@ -241,10 +260,9 @@ export class PlaybackIngress implements RtcIngressGuard {
       this.reservedOutput += allowance;
       this.reservedFrames++;
       this.evidence.decodedWorkBytes += allowance;
-      reservation = { bytes: allowance, created: this.now(), touched: this.now() };
+      reservation = { bytes: allowance };
       this.assemblies.set(h.frameId, reservation);
     }
-    reservation.touched = this.now();
     this.completingId = h.frameId;
     if (!this.assembler.push(binary)) {
       this.assemblies.delete(h.frameId);

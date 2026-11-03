@@ -1361,6 +1361,7 @@ export class RtcCommandRouter {
       const issued = this.eventTableReplies.get(transaction);
       if (issued) issued.expiresAtMs = performance.now() + 60000;
       this.playbackProbes.delete(stationSn);
+      candidate.ingress.stopExpiry();
       this.release(stationSn, st);
     }
   }

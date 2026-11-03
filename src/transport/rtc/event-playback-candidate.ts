@@ -263,6 +263,7 @@ export class EventPlaybackCandidate {
       this.opts.deadlineMs - performance.now() < 15000
     )
       return;
+    this.ingress.startExpiry();
     let timer: NodeJS.Timeout | undefined, noMedia: NodeJS.Timeout | undefined;
     const abort = () => this.end("preempted");
     const owner = setInterval(() => {
@@ -355,58 +356,62 @@ export class EventPlaybackCandidate {
   }
 
   async observe(): Promise<PlaybackReceipt> {
-    this.finalize();
-    const deadline = Math.min(this.opts.deadlineMs, (this.stoppedAt ?? performance.now()) + 6000);
-    if (this.stoppedAt !== undefined) {
-      while (performance.now() < deadline && this.opts.continuous()) {
-        const complete = this.ingress.observationComplete();
-        const quiet = performance.now() - Math.max(this.stoppedAt, this.ingress.lastPlausibleMs);
-        this.receipt.silenceMs = Math.max(0, Math.floor(quiet));
-        if (complete && quiet >= 5000) {
-          this.receipt.cessationOutcome = "ceased";
-          break;
+    try {
+      this.finalize();
+      const deadline = Math.min(this.opts.deadlineMs, (this.stoppedAt ?? performance.now()) + 6000);
+      if (this.stoppedAt !== undefined) {
+        while (performance.now() < deadline && this.opts.continuous()) {
+          const complete = this.ingress.observationComplete();
+          const quiet = performance.now() - Math.max(this.stoppedAt, this.ingress.lastPlausibleMs);
+          this.receipt.silenceMs = Math.max(0, Math.floor(quiet));
+          if (complete && quiet >= 5000) {
+            this.receipt.cessationOutcome = "ceased";
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, Math.min(10, Math.max(0, deadline - performance.now()))));
         }
-        await new Promise((resolve) => setTimeout(resolve, Math.min(10, Math.max(0, deadline - performance.now()))));
+        if (this.receipt.cessationOutcome !== "ceased")
+          this.receipt.cessationOutcome =
+            this.opts.continuous() && this.ingress.observationComplete() ? "media_continues" : "cessation_unknown";
       }
-      if (this.receipt.cessationOutcome !== "ceased")
-        this.receipt.cessationOutcome =
-          this.opts.continuous() && this.ingress.observationComplete() ? "media_continues" : "cessation_unknown";
-    }
-    this.receipt.ownerContinuous = this.opts.continuous();
-    if (this.receipt.startAttempted) {
-      if (
+      this.receipt.ownerContinuous = this.opts.continuous();
+      if (this.receipt.startAttempted) {
+        if (
+          this.receipt.ownerContinuous &&
+          this.receipt.cessationOutcome === "ceased" &&
+          !this.conflict &&
+          (this.releaseSeen || (this.absentSeen && this.eofSeen))
+        ) {
+          try {
+            this.opts.marker(false);
+            this.opts.latch(false);
+            this.receipt.releaseOutcome = "release_confirmed";
+            this.receipt.latchRetained = false;
+            this.receipt.latchCleared = true;
+          } catch {
+            this.receipt.releaseOutcome = "release_unknown";
+          }
+        } else
+          this.receipt.releaseOutcome =
+            this.conflict || !this.receipt.ownerContinuous ? "release_unknown" : "stop_unconfirmed";
+      }
+      Object.assign(this.receipt, this.ingress.evidence);
+      this.receipt.elapsedMs = Math.max(0, Math.round(performance.now() - this.started));
+      this.receipt.boundedMediaObserved =
+        ["eof", "capped"].includes(this.receipt.captureOutcome) &&
+        this.receipt.startAcknowledged &&
+        this.receipt.randomAccess &&
         this.receipt.ownerContinuous &&
         this.receipt.cessationOutcome === "ceased" &&
-        !this.conflict &&
-        (this.releaseSeen || (this.absentSeen && this.eofSeen))
-      ) {
-        try {
-          this.opts.marker(false);
-          this.opts.latch(false);
-          this.receipt.releaseOutcome = "release_confirmed";
-          this.receipt.latchRetained = false;
-          this.receipt.latchCleared = true;
-        } catch {
-          this.receipt.releaseOutcome = "release_unknown";
-        }
-      } else
-        this.receipt.releaseOutcome =
-          this.conflict || !this.receipt.ownerContinuous ? "release_unknown" : "stop_unconfirmed";
+        this.receipt.pauseAttempted &&
+        this.receipt.stopAttempted &&
+        !this.receipt.unknown &&
+        this.receipt.wrongRouteFrames === 0;
+      this.ingress.quarantine();
+      return { ...this.receipt };
+    } finally {
+      this.ingress.stopExpiry();
     }
-    Object.assign(this.receipt, this.ingress.evidence);
-    this.receipt.elapsedMs = Math.max(0, Math.round(performance.now() - this.started));
-    this.receipt.boundedMediaObserved =
-      ["eof", "capped"].includes(this.receipt.captureOutcome) &&
-      this.receipt.startAcknowledged &&
-      this.receipt.randomAccess &&
-      this.receipt.ownerContinuous &&
-      this.receipt.cessationOutcome === "ceased" &&
-      this.receipt.pauseAttempted &&
-      this.receipt.stopAttempted &&
-      !this.receipt.unknown &&
-      this.receipt.wrongRouteFrames === 0;
-    this.ingress.quarantine();
-    return { ...this.receipt };
   }
 
   private media(frame: Buffer): void {
