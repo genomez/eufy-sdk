@@ -55,7 +55,7 @@ export interface ThumbnailShapes {
   thumb_path: { classes: ShapeClass[]; other: number };
 }
 
-/** ASCII values become class symbols; only punctuation and explicitly bounded extensions survive. */
+/** ASCII values become class symbols; only fixed punctuation and extension categories survive. */
 export function thumbnailShapes(rows: unknown[]): ThumbnailShapes {
   const result: ThumbnailShapes = {
     start_time: { classes: [], other: 0 },
@@ -65,15 +65,24 @@ export function thumbnailShapes(rows: unknown[]): ThumbnailShapes {
     const row = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
     for (const field of ["start_time", "thumb_path"] as const) {
       const value = row[field];
-      let pattern = typeof value === "string" ? value.replace(/[A-Za-z]/g, "a").replace(/[0-9]/g, "9") : null;
+      let pattern =
+        typeof value === "string"
+          ? value
+              .replace(/[^A-Za-z0-9/\-_.:,+ ]/gu, "?")
+              .replace(/[A-Za-z]/g, "a")
+              .replace(/[0-9]/g, "9")
+          : null;
       const shape: ShapeClass = { pattern, count: 1 };
       if (field === "thumb_path") {
         pattern = pattern?.replace(/([\s\S])\1+/g, "$1").slice(0, 64) ?? null;
-        const ext = typeof value === "string" && value.includes(".") ? value.slice(value.lastIndexOf(".") + 1) : "";
+        const ext =
+          typeof value === "string" && value.includes(".")
+            ? value.slice(value.lastIndexOf(".") + 1).toLowerCase()
+            : "none";
         Object.assign(shape, {
           pattern,
           startsWithSlash: typeof value === "string" ? value.startsWith("/") : null,
-          extension: /^[A-Za-z0-9]{1,5}$/.test(ext) ? ext.toLowerCase() : null,
+          extension: ["jpg", "jpeg", "png", "bmp", "dat", "bin", "none"].includes(ext) ? ext : "other",
           byteLength: typeof value === "string" ? Buffer.byteLength(value) : null,
         });
       }

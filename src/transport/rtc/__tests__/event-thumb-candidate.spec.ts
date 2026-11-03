@@ -197,12 +197,34 @@ describe("existing-owner stored thumbnail", () => {
     expect(report.start_time.classes[0]?.pattern).toBe("aa9999");
     expect(report.thumb_path.classes[0]).toMatchObject({
       pattern: "a9/".repeat(21) + "a",
-      extension: null,
+      extension: "other",
       startsWithSlash: false,
       byteLength: Buffer.byteLength(long),
     });
     expect(report.thumb_path.classes[1]).toMatchObject({ extension: "png", byteLength: 6 });
     expect(report.start_time.classes[1]).toEqual({ pattern: null, count: 2 });
+  });
+  it.each(["jpg", "jpeg", "png", "bmp", "dat", "bin"])("reports only the fixed %s extension category", (ext) => {
+    expect(thumbnailShapes([{ thumb_path: "synthetic." + ext.toUpperCase() }]).thumb_path.classes[0]?.extension).toBe(
+      ext,
+    );
+  });
+  it.each(["ab123", "\u00e9\uff11\uff12", "toolong", "", "j!g"])(
+    "masks arbitrary suffix content as other: %s",
+    (ext) => {
+      const report = thumbnailShapes([
+        { start_time: "\u00e9\u03a9\u4e2d\u0661\uff12\u{1d7e1}!?@\\\tTZ", thumb_path: "../\u00e9\u0661." + ext },
+      ]);
+      expect(report.start_time.classes[0]?.pattern).toBe("???????????aa");
+      expect(report.thumb_path.classes[0]?.extension).toBe("other");
+      for (const bucket of Object.values(report))
+        for (const shape of bucket.classes) expect(shape.pattern).not.toMatch(/[^a9?/\-_.:,+ ]/);
+    },
+  );
+  it("keeps only permitted punctuation, maps T and Z as letters and absent suffix as none", () => {
+    const report = thumbnailShapes([{ start_time: "/-_ .:,+TZ", thumb_path: "synthetic" }]);
+    expect(report.start_time.classes[0]?.pattern).toBe("/-_ .:,+aa");
+    expect(report.thumb_path.classes[0]?.extension).toBe("none");
   });
   it("prefers the largest integer record id over all times and allows firmware path forms", () => {
     expect(
@@ -249,7 +271,7 @@ describe("existing-owner stored thumbnail", () => {
     await started(s);
     const data = [
       { thumb_path: "relative image", start_time: "unknown" },
-      { thumb_path: "../unsafe", record_id: 99 },
+      { thumb_path: "../\u00e9\u0661.ab123", start_time: "\u00e9\u0661", record_id: 99 },
     ];
     s.notify(response(s, { data }));
     expect(await run).toMatchObject({ outcome: "invalid_reply", shapes: thumbnailShapes(data), imageElapsedMs: null });
