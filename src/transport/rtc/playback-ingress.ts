@@ -138,7 +138,6 @@ export class PlaybackIngress implements RtcIngressGuard {
   private plausible(unknown = false): void {
     this.lastPlausibleMs = this.now();
     if (unknown) this.evidence.unknown = true;
-    if (this.tombstone) this.opts.late?.();
   }
 
   private reject(reason: "capped" | "transport_mismatch" | "invalid_media", unknown = false): false {
@@ -275,6 +274,15 @@ export class PlaybackIngress implements RtcIngressGuard {
   private wrong(frame: Buffer): false {
     this.nonControlTraffic = true;
     this.plausible();
+    const h = parsePortalHeader(frame);
+    if (
+      this.tombstone &&
+      h &&
+      h.paramLength + 16 === frame.length &&
+      (h.commandId === 1300 || h.commandId === 1301) &&
+      this.selectors.has(h.isResponse)
+    )
+      this.opts.late?.();
     this.evidence.wrongRouteFrames = add(this.evidence.wrongRouteFrames, 1);
     this.evidence.wrongRouteBytes = add(this.evidence.wrongRouteBytes, frame.length);
     this.evidence.mediaBytes = add(this.evidence.mediaBytes, frame.length);
