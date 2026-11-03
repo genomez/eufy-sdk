@@ -147,7 +147,12 @@ async function started(s: Session) {
   await vi.waitFor(() => expect(s.sent.length).toBe(1), { interval: 1 });
 }
 
-import { validateThumbnail, selectThumbnail, thumbnailShapes } from "../event-thumb-candidate.js";
+import {
+  validateThumbnail,
+  selectThumbnail,
+  thumbnailShapes,
+  thumbnailContentDiagnostics,
+} from "../event-thumb-candidate.js";
 
 // Minimal structural JPEG, SOF0 3x2 with one component and an SOS segment.
 const jpeg = Buffer.from("ffd8ffc0000b080002000301011100ffda0008010100003f0000ffd9", "hex");
@@ -312,8 +317,8 @@ describe("existing-owner stored thumbnail", () => {
     }
   });
   it("accepts canonical base64 at the decoded cap, rejects one more byte and orders epoch string times", () => {
-    const atCap = Buffer.concat([jpeg.subarray(0, -2), Buffer.alloc(262144 - jpeg.length), jpeg.subarray(-2)]);
-    expect(validateThumbnail(atCap.toString("base64"))?.jpeg.length).toBe(262144);
+    const atCap = Buffer.concat([jpeg.subarray(0, -2), Buffer.alloc(524288 - jpeg.length), jpeg.subarray(-2)]);
+    expect(validateThumbnail(atCap.toString("base64"))?.jpeg.length).toBe(524288);
     expect(validateThumbnail(Buffer.concat([atCap, Buffer.alloc(1)]).toString("base64"))).toBeUndefined();
     expect(
       selectThumbnail([
@@ -469,7 +474,7 @@ describe("existing-owner stored thumbnail", () => {
     image(s);
     expect(await run).toMatchObject({ outcome: "owner_changed", jpegValid: false, imageBytes: null });
   });
-  it.each(["base64", "padding", "soi", "eoi", "sof", "decoded-cap", "envelope-cap", "result"])(
+  it.each(["base64", "padding", "soi", "eoi", "decoded-cap", "envelope-cap", "result"])(
     "rejects invalid image %s",
     async (kind) => {
       const { router, s } = await setup();
@@ -525,7 +530,80 @@ describe("existing-owner stored thumbnail", () => {
     expect(validateThumbnail(jpeg.toString("base64"))).toMatchObject({ width: 3, height: 2 });
     const bad = Buffer.from(jpeg);
     bad.writeUInt16BE(65535, 4);
-    expect(validateThumbnail(bad.toString("base64"))).toBeUndefined();
+    expect(validateThumbnail(bad.toString("base64"))).toMatchObject({ width: null, height: null });
     expect(selectThumbnail(rows)).toBe(newFile);
+  });
+});
+
+describe("Test 2c content diagnostics and lenient decode", () => {
+  it.each(["newline", "urlsafe", "unpadded", "trailing", "large", "no-sof"])(
+    "accepts %s without exporting values",
+    async (kind) => {
+      let bytes = jpeg;
+      if (kind === "trailing") bytes = Buffer.concat([jpeg, Buffer.alloc(4096)]);
+      if (kind === "large") bytes = Buffer.concat([jpeg.subarray(0, -2), Buffer.alloc(300000), jpeg.subarray(-2)]);
+      if (kind === "no-sof") bytes = Buffer.from([255, 216, 255, 217]);
+      let content = bytes.toString("base64");
+      if (kind === "newline") content = content.match(/.{1,8}/g)!.join("\r\n");
+      if (kind === "urlsafe") content = bytes.toString("base64url");
+      if (kind === "unpadded") content = content.replace(/=+$/, "");
+      const v = validateThumbnail(content)!;
+      expect(v).toBeDefined();
+      expect(v.jpeg.length).toBe(kind === "trailing" ? jpeg.length : bytes.length);
+      const d = thumbnailContentDiagnostics({ content, file: newFile, syntheticSecretKey: "syntheticSecretValue" });
+      expect(d).toMatchObject({
+        contentType: "string",
+        contentLength: content.length,
+        decodedBytes: bytes.length,
+        soi: true,
+        otherKeyCount: 1,
+      });
+      expect(JSON.stringify(d)).not.toContain("syntheticSecret");
+      expect(d.hasNewline).toBe(kind === "newline");
+      expect(d.sofFound).toBe(kind !== "no-sof");
+      if (kind === "trailing") expect(d).toMatchObject({ eoiAtEnd: false, lastEoiOffsetFromEnd: 4096 });
+      const f = await setup();
+      const run = f.router.readEventThumbnailCandidate(ST);
+      await table(f.s);
+      await imageStarted(f.s);
+      image(f.s, { content, syntheticSecretKey: "syntheticSecretValue" });
+      const result = await run;
+      expect(result).toMatchObject({ outcome: "success", contentDiagnostics: d });
+      expect(f.s.sent).toHaveLength(2);
+    },
+  );
+  it.each([null, 3, {}, false, undefined, "%%%%", "bm90LWltYWdl"])(
+    "diagnoses rejected content without leaking: %s",
+    (content) => {
+      const d = thumbnailContentDiagnostics({ content, file: "private", unknownSecretKey: "private" });
+      expect(d.contentType).toBe(typeof content);
+      expect(d.soi).toBe(false);
+      expect(d.otherKeyCount).toBe(1);
+      expect(validateThumbnail(content)).toBeUndefined();
+      expect(JSON.stringify(d)).not.toMatch(/private|unknownSecretKey|bm90|%%%%/);
+    },
+  );
+  it("keeps unknown decode for oversized envelopes and caps EOI distance", () => {
+    const content = Buffer.concat([jpeg, Buffer.alloc(4097)]).toString("base64");
+    expect(validateThumbnail(content)).toBeUndefined();
+    expect(thumbnailContentDiagnostics({ content }).lastEoiOffsetFromEnd).toBe(4097);
+    expect(thumbnailContentDiagnostics({ content }, false)).toMatchObject({ decodedBytes: null, soi: false });
+  });
+  it("retains only SOI raw bytes on invalid reply and suppresses them after owner loss", async () => {
+    const f = await setup();
+    const run = f.router.readEventThumbnailCandidate(ST);
+    await table(f.s);
+    await imageStarted(f.s);
+    const raw = jpeg.subarray(0, -2);
+    image(f.s, { content: raw.toString("base64") });
+    const result = await run;
+    expect(result).toMatchObject({
+      outcome: "invalid_reply",
+      raw,
+      imageBytes: raw.length,
+      contentDiagnostics: { soi: true, eoiAtEnd: false },
+    });
+    expect(result.jpeg).toBeUndefined();
+    expect(f.s.sent).toHaveLength(2);
   });
 });

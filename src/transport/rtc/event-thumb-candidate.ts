@@ -2,9 +2,31 @@ import type { RtcSession } from "./session.js";
 import { buildPortalPacket, parsePortalPacket, PortalLinkType } from "./portal-packet.js";
 import type { EventTableObservation, EventTableReceipt } from "./event-table-candidate.js";
 
-export const THUMB_IMAGE_CAP = 256 * 1024;
+export const THUMB_IMAGE_CAP = 512 * 1024;
 export const THUMB_ENVELOPE_CAP = 512 * 1024;
+export interface ContentDiagnostics {
+  contentType: string;
+  contentLength: number | null;
+  hasStdChars: boolean;
+  hasUrlSafeChars: boolean;
+  hasWhitespace: boolean;
+  hasNewline: boolean;
+  hasOtherChars: boolean;
+  paddingCount: number;
+  lengthMod4: number | null;
+  decodedBytes: number | null;
+  soi: boolean;
+  eoiAtEnd: boolean;
+  lastEoiOffsetFromEnd: number | null;
+  sofFound: boolean;
+  width: number | null;
+  height: number | null;
+  otherKeyCount: number;
+  keys: Record<"content" | "file" | "mIntRet" | "data" | "image" | "size" | "msg", boolean>;
+}
 export interface EventThumbnailReceipt {
+  contentDiagnostics: ContentDiagnostics | null;
+  rawSaved?: boolean;
   outcome: EventTableReceipt["outcome"];
   elapsedMs: number;
   tableElapsedMs: number | null;
@@ -25,9 +47,11 @@ export interface ThumbnailImageResult {
   elapsedMs: number;
   deadlineMs: number;
   resultCode: number | null;
+  contentDiagnostics?: ContentDiagnostics;
   jpeg?: Buffer;
-  width?: number;
-  height?: number;
+  raw?: Buffer;
+  width?: number | null;
+  height?: number | null;
 }
 
 function rowTime(value: unknown): number | undefined {
@@ -121,48 +145,81 @@ export function selectThumbnail(rows: unknown[]): string | undefined {
   return byId?.file ?? byTime?.file;
 }
 
-/** Strict canonical base64, JPEG bounds and SOF geometry; no image decoding or metadata output. */
-export function validateThumbnail(content: unknown): { jpeg: Buffer; width: number; height: number } | undefined {
-  if (
-    typeof content !== "string" ||
-    !content.length ||
-    content.length > 4 * Math.ceil(THUMB_IMAGE_CAP / 3) ||
-    content.length % 4 ||
-    /[^A-Za-z0-9+/=]/.test(content)
-  )
-    return;
-  const jpeg = Buffer.from(content, "base64");
-  if (
-    jpeg.length > THUMB_IMAGE_CAP ||
-    jpeg.length < 12 ||
-    jpeg.toString("base64") !== content ||
-    jpeg.readUInt16BE(0) !== 0xffd8 ||
-    jpeg.readUInt16BE(jpeg.length - 2) !== 0xffd9
-  )
-    return;
-  let width: number | undefined, height: number | undefined;
+/** Inspect only marker structure; malformed or unknown segments never invalidate an otherwise bounded image. */
+function geometry(jpeg: Buffer): { width: number | null; height: number | null } {
   let offset = 2;
-  while (offset < jpeg.length - 2) {
-    if (jpeg[offset++] !== 0xff) return;
+  while (offset < jpeg.length - 1) {
+    if (jpeg[offset++] !== 0xff) continue;
     while (jpeg[offset] === 0xff) offset++;
     const marker = jpeg[offset++];
-    if (marker === undefined || marker === 0 || marker === 0xd8 || marker === 0xd9) return;
-    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
-    if (offset + 2 > jpeg.length - 2) return;
+    if (marker === undefined || marker === 0xda || marker === 0xd9) break;
+    if (marker === 0 || marker === 0x01 || marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (offset + 2 > jpeg.length) break;
     const length = jpeg.readUInt16BE(offset);
-    if (length < 2 || offset + length > jpeg.length - 2) return;
-    if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
-      if (length < 8 || length !== 8 + 3 * jpeg[offset + 7]!) return;
-      const h = jpeg.readUInt16BE(offset + 3),
-        w = jpeg.readUInt16BE(offset + 5);
-      if (!w || !h || (width !== undefined && (width !== w || height !== h))) return;
-      width = w;
-      height = h;
+    if (length < 2 || offset + length > jpeg.length) break;
+    if (
+      [0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker) &&
+      length >= 7
+    ) {
+      return { width: jpeg.readUInt16BE(offset + 5), height: jpeg.readUInt16BE(offset + 3) };
     }
-    if (marker === 0xda) return width && height ? { jpeg, width, height } : undefined;
     offset += length;
   }
-  return;
+  return { width: null, height: null };
+}
+
+/** Fixed, value-free diagnostics. Oversized envelopes never reach the decoder. */
+export function thumbnailContentDiagnostics(reply: Record<string, unknown>, decode = true): ContentDiagnostics {
+  const content = reply.content;
+  const text = typeof content === "string" ? content : "";
+  const jpeg = decode && typeof content === "string" ? Buffer.from(text, "base64") : undefined;
+  const soi = !!jpeg && jpeg.length >= 2 && jpeg.readUInt16BE(0) === 0xffd8;
+  const eoi = jpeg?.lastIndexOf(Buffer.from([0xff, 0xd9])) ?? -1;
+  const dimensions = soi && jpeg ? geometry(jpeg) : { width: null, height: null };
+  const names = ["content", "file", "mIntRet", "data", "image", "size", "msg"] as const;
+  return {
+    contentType: typeof content,
+    contentLength: typeof content === "string" ? content.length : null,
+    hasStdChars: /[+/]/.test(text),
+    hasUrlSafeChars: /[-_]/.test(text),
+    hasWhitespace: /[\x09-\x0d ]/.test(text),
+    hasNewline: /[\r\n]/.test(text),
+    hasOtherChars: /[^A-Za-z0-9+/_=\x09-\x0d -]/.test(text),
+    paddingCount: Math.min(2, (text.match(/=/g) ?? []).length),
+    lengthMod4: typeof content === "string" ? content.length % 4 : null,
+    decodedBytes: jpeg?.length ?? null,
+    soi,
+    eoiAtEnd: !!jpeg && eoi >= 0 && eoi === jpeg.length - 2,
+    lastEoiOffsetFromEnd: jpeg && eoi >= 0 ? Math.min(4097, jpeg.length - eoi - 2) : null,
+    sofFound: dimensions.width !== null,
+    ...dimensions,
+    otherKeyCount: Object.keys(reply).filter((key) => !(names as readonly string[]).includes(key)).length,
+    keys: Object.fromEntries(names.map((key) => [key, Object.hasOwn(reply, key)])) as ContentDiagnostics["keys"],
+  };
+}
+
+/** Accept bounded SOI/EOI images with relaxed base64 and at most 4096 trailing bytes. */
+export function validateThumbnail(
+  content: unknown,
+): { jpeg: Buffer; width: number | null; height: number | null } | undefined {
+  if (typeof content !== "string") return;
+  const text = content
+    .replace(/[\x09-\x0d ]/g, "")
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+  if (!text.length || text.length > 4 * Math.ceil(THUMB_IMAGE_CAP / 3) || !/^[A-Za-z0-9+/]+={0,2}$/.test(text)) return;
+  const bare = text.replace(/=+$/, "");
+  if (
+    bare.length % 4 === 1 ||
+    (text.includes("=") && (text.length % 4 !== 0 || text.length - bare.length !== (4 - (bare.length % 4)) % 4))
+  )
+    return;
+  let jpeg = Buffer.from(text, "base64");
+  if (jpeg.length > THUMB_IMAGE_CAP || jpeg.length < 4 || jpeg.readUInt16BE(0) !== 0xffd8) return;
+  const eoi = jpeg.lastIndexOf(Buffer.from([0xff, 0xd9]));
+  if (eoi < 2 || jpeg.length - eoi - 2 > 4096) return;
+  jpeg = jpeg.subarray(0, eoi + 2);
+  return { jpeg, ...geometry(jpeg) };
 }
 
 /** #525 has no notify transaction echo: exact file + owner generation, ACK uses the issued segment. */
@@ -185,6 +242,8 @@ export function collectThumbnail(
     let resultCode: number | null = null,
       seenBytes = 0;
     let answer: ReturnType<typeof validateThumbnail>;
+    let contentDiagnostics: ContentDiagnostics | undefined;
+    let raw: Buffer | undefined;
     let release: (() => void) | undefined;
     const finish = (outcome: ThumbnailImageResult["outcome"]) => {
       if (settled) return;
@@ -200,6 +259,8 @@ export function collectThumbnail(
         deadlineMs,
         elapsedMs: Math.max(0, Math.round(performance.now() - started)),
         resultCode,
+        contentDiagnostics,
+        ...(outcome === "invalid_reply" && raw ? { raw } : {}),
         ...(outcome === "success" ? answer : {}),
       });
     };
@@ -253,16 +314,27 @@ export function collectThumbnail(
       )
         return;
       if (bytes > THUMB_ENVELOPE_CAP) {
+        const body = p.data as Record<string, unknown> | undefined;
+        if (body && !Array.isArray(body) && body.file === file)
+          contentDiagnostics = thumbnailContentDiagnostics(body, false);
         finish("receive_rejected");
         return;
       }
       const v = p.data as Record<string, unknown> | undefined;
       if (!v || typeof v !== "object" || Array.isArray(v) || v.file !== file) return;
+      contentDiagnostics = thumbnailContentDiagnostics(v, false);
       seenBytes += bytes;
       if (seenBytes > THUMB_ENVELOPE_CAP) {
         finish("receive_rejected");
         return;
       }
+      contentDiagnostics = thumbnailContentDiagnostics(v);
+      if (
+        contentDiagnostics.soi &&
+        contentDiagnostics.decodedBytes! <= THUMB_IMAGE_CAP &&
+        typeof v.content === "string"
+      )
+        raw = Buffer.from(v.content, "base64");
       if (v.mIntRet !== undefined && !Number.isSafeInteger(v.mIntRet)) {
         finish("invalid_reply");
         return;

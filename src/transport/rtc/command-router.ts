@@ -1137,22 +1137,33 @@ export class RtcCommandRouter {
   async readEventThumbnailCandidate(
     stationSn: string,
     opts: { signal?: AbortSignal; timeoutMs?: number } = {},
-  ): Promise<EventThumbnailReceipt & { jpeg?: Buffer }> {
+  ): Promise<EventThumbnailReceipt & { jpeg?: Buffer; raw?: Buffer }> {
     const thumb: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt; shapes?: ThumbnailShapes } =
       {};
     const result = await this.readEventCandidate(stationSn, opts, thumb);
     const success = result.outcome === "success" && !!thumb.image?.jpeg;
+    const raw =
+      result.outcome === "invalid_reply" &&
+      result.ownerContinuous &&
+      result.generationContinuous &&
+      !opts.signal?.aborted &&
+      !!thumb.image &&
+      performance.now() < thumb.image.deadlineMs
+        ? thumb.image?.raw
+        : undefined;
     return {
+      contentDiagnostics: thumb.image?.contentDiagnostics ?? null,
+      ...(raw ? { raw } : {}),
       outcome: result.outcome,
       elapsedMs: result.elapsedMs,
       tableElapsedMs: thumb.table?.elapsedMs ?? null,
       imageElapsedMs: thumb.image?.elapsedMs ?? null,
       rowCount: thumb.table?.rowCount ?? result.rowCount,
       shapes: thumb.shapes ?? thumbnailShapes([]),
-      imageBytes: success ? thumb.image!.jpeg!.length : null,
+      imageBytes: success ? thumb.image!.jpeg!.length : (raw?.length ?? null),
       jpegValid: success,
-      width: success ? thumb.image!.width! : null,
-      height: success ? thumb.image!.height! : null,
+      width: thumb.image?.contentDiagnostics?.width ?? null,
+      height: thumb.image?.contentDiagnostics?.height ?? null,
       tableResultCode: thumb.table?.resultCode ?? result.resultCode,
       imageResultCode: thumb.image?.resultCode ?? null,
       ownerContinuous: result.ownerContinuous,
