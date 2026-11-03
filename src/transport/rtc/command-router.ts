@@ -84,6 +84,8 @@ import { collectStorageCandidate } from "./storage-candidate.js";
 import {
   collectThumbnail,
   selectThumbnail,
+  thumbnailShapes,
+  type ThumbnailShapes,
   type EventThumbnailReceipt,
   type ThumbnailImageResult,
 } from "./event-thumb-candidate.js";
@@ -1136,7 +1138,8 @@ export class RtcCommandRouter {
     stationSn: string,
     opts: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<EventThumbnailReceipt & { jpeg?: Buffer }> {
-    const thumb: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt } = {};
+    const thumb: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt; shapes?: ThumbnailShapes } =
+      {};
     const result = await this.readEventCandidate(stationSn, opts, thumb);
     const success = result.outcome === "success" && !!thumb.image?.jpeg;
     return {
@@ -1145,6 +1148,7 @@ export class RtcCommandRouter {
       tableElapsedMs: thumb.table?.elapsedMs ?? null,
       imageElapsedMs: thumb.image?.elapsedMs ?? null,
       rowCount: thumb.table?.rowCount ?? result.rowCount,
+      shapes: thumb.shapes ?? thumbnailShapes([]),
       imageBytes: success ? thumb.image!.jpeg!.length : null,
       jpegValid: success,
       width: success ? thumb.image!.width! : null,
@@ -1160,7 +1164,7 @@ export class RtcCommandRouter {
   private async readEventCandidate(
     stationSn: string,
     opts: { signal?: AbortSignal; timeoutMs?: number },
-    thumb?: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt },
+    thumb?: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt; shapes?: ThumbnailShapes },
   ): Promise<EventTableReceipt> {
     const started = performance.now();
     const limit = thumb ? 16_000 : 8_000;
@@ -1260,6 +1264,7 @@ export class RtcCommandRouter {
               },
               thumb
                 ? (rows) => {
+                    thumb.shapes = thumbnailShapes(rows);
                     thumb.file = selectThumbnail(rows);
                   }
                 : undefined,

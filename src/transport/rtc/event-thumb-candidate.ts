@@ -10,6 +10,7 @@ export interface EventThumbnailReceipt {
   tableElapsedMs: number | null;
   imageElapsedMs: number | null;
   rowCount: number | null;
+  shapes: ThumbnailShapes;
   imageBytes: number | null;
   jpegValid: boolean;
   width: number | null;
@@ -38,29 +39,77 @@ function rowTime(value: unknown): number | undefined {
     const time = Date.parse(iso);
     if (Number.isFinite(time) && new Date(time).toISOString() === iso) return time;
   }
-  return;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export interface ShapeClass {
+  pattern: string | null;
+  count: number;
+  startsWithSlash?: boolean | null;
+  extension?: string | null;
+  byteLength?: number | null;
+}
+export interface ThumbnailShapes {
+  start_time: { classes: ShapeClass[]; other: number };
+  thumb_path: { classes: ShapeClass[]; other: number };
+}
+
+/** ASCII values become class symbols; only punctuation and explicitly bounded extensions survive. */
+export function thumbnailShapes(rows: unknown[]): ThumbnailShapes {
+  const result: ThumbnailShapes = {
+    start_time: { classes: [], other: 0 },
+    thumb_path: { classes: [], other: 0 },
+  };
+  for (const raw of rows) {
+    const row = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    for (const field of ["start_time", "thumb_path"] as const) {
+      const value = row[field];
+      let pattern = typeof value === "string" ? value.replace(/[A-Za-z]/g, "a").replace(/[0-9]/g, "9") : null;
+      const shape: ShapeClass = { pattern, count: 1 };
+      if (field === "thumb_path") {
+        pattern = pattern?.replace(/([\s\S])\1+/g, "$1").slice(0, 64) ?? null;
+        const ext = typeof value === "string" && value.includes(".") ? value.slice(value.lastIndexOf(".") + 1) : "";
+        Object.assign(shape, {
+          pattern,
+          startsWithSlash: typeof value === "string" ? value.startsWith("/") : null,
+          extension: /^[A-Za-z0-9]{1,5}$/.test(ext) ? ext.toLowerCase() : null,
+          byteLength: typeof value === "string" ? Buffer.byteLength(value) : null,
+        });
+      }
+      const bucket = result[field];
+      const key = JSON.stringify({ ...shape, count: 1 });
+      const existing = bucket.classes.find((entry) => JSON.stringify({ ...entry, count: 1 }) === key);
+      if (existing) existing.count++;
+      else if (bucket.classes.length < 4) bucket.classes.push(shape);
+      else bucket.other++;
+    }
+  }
+  return result;
 }
 
 /** Only a storage path returned in this invocation may be selected; all values stay in memory. */
 export function selectThumbnail(rows: unknown[]): string | undefined {
-  let selected: { file: string; time: number } | undefined;
+  let byId: { file: string; id: number } | undefined;
+  let byTime: { file: string; time: number } | undefined;
   for (const raw of rows) {
+    if (!raw || typeof raw !== "object") continue;
     const row = raw as Record<string, unknown>;
     const file = row.thumb_path,
       time = rowTime(row.start_time);
     if (
       typeof file !== "string" ||
-      !file.startsWith("/") ||
+      !file.length ||
       Buffer.byteLength(file) > 2048 ||
-      /[\x00-\x20\x7f\\]/.test(file) ||
-      file.split("/").some((p) => p === ".." || p === ".") ||
-      !/\.jpe?g$/i.test(file) ||
-      time === undefined
+      /[\x00-\x1f\x7f-\x9f]/.test(file) ||
+      file.split(/[/\\]/).some((p) => p === "..")
     )
       continue;
-    if (!selected || time > selected.time) selected = { file, time };
+    if (typeof row.record_id === "number" && Number.isInteger(row.record_id) && (!byId || row.record_id > byId.id))
+      byId = { file, id: row.record_id };
+    if (time !== undefined && (!byTime || time > byTime.time)) byTime = { file, time };
   }
-  return selected?.file;
+  return byId?.file ?? byTime?.file;
 }
 
 /** Strict canonical base64, JPEG bounds and SOF geometry; no image decoding or metadata output. */

@@ -147,7 +147,7 @@ async function started(s: Session) {
   await vi.waitFor(() => expect(s.sent.length).toBe(1), { interval: 1 });
 }
 
-import { validateThumbnail, selectThumbnail } from "../event-thumb-candidate.js";
+import { validateThumbnail, selectThumbnail, thumbnailShapes } from "../event-thumb-candidate.js";
 
 // Minimal structural JPEG, SOF0 3x2 with one component and an SOS segment.
 const jpeg = Buffer.from("ffd8ffc0000b080002000301011100ffda0008010100003f0000ffd9", "hex");
@@ -169,6 +169,104 @@ function image(s: Session, extra: Record<string, unknown> = {}, options: Paramet
   s.notify({ file: newFile, content: jpeg.toString("base64"), ...extra }, { commandId: 1308, ...options });
 }
 describe("existing-owner stored thumbnail", () => {
+  it("reports every row in at most four value-free shape classes and the other count", () => {
+    const report = thumbnailShapes([
+      { start_time: "Synthetic123", thumb_path: "/Synthetic123/folder 45.jpeg" },
+      { start_time: "Different456", thumb_path: "/Different456/folder 67.JPEG" },
+      ...["-", "/", ":", ".", "!"].map((part) => ({ start_time: part, thumb_path: part })),
+    ]);
+    expect(report.start_time.classes[0]).toEqual({ pattern: "aaaaaaaaa999", count: 2 });
+    expect(report.thumb_path.classes[0]).toEqual({
+      pattern: "/a9/a 9.a",
+      count: 2,
+      startsWithSlash: true,
+      extension: "jpeg",
+      byteLength: 28,
+    });
+    for (const bucket of Object.values(report)) {
+      expect(bucket.classes).toHaveLength(4);
+      expect(bucket.other).toBe(2);
+      expect(bucket.classes.reduce((n: number, c: { count: number }) => n + c.count, bucket.other)).toBe(7);
+      for (const c of bucket.classes) expect(c.pattern).not.toMatch(/[A-Zb-z0-8]/);
+    }
+    expect(JSON.stringify(report)).not.toMatch(/Synthetic|Different|123|456/);
+  });
+  it("caps path patterns at 64 without collapsing time runs, reports byte length and bounded extensions", () => {
+    const long = "abc123/".repeat(80) + ".toolong";
+    const report = thumbnailShapes([{ start_time: "Ab1234", thumb_path: long }, { thumb_path: "é.PNG" }, null]);
+    expect(report.start_time.classes[0]?.pattern).toBe("aa9999");
+    expect(report.thumb_path.classes[0]).toMatchObject({
+      pattern: "a9/".repeat(21) + "a",
+      extension: null,
+      startsWithSlash: false,
+      byteLength: Buffer.byteLength(long),
+    });
+    expect(report.thumb_path.classes[1]).toMatchObject({ extension: "png", byteLength: 6 });
+    expect(report.start_time.classes[1]).toEqual({ pattern: null, count: 2 });
+  });
+  it("prefers the largest integer record id over all times and allows firmware path forms", () => {
+    expect(
+      selectThumbnail([
+        { thumb_path: "/new.jpg", record_id: 2, start_time: "20991103000000" },
+        { thumb_path: "relative path/image.bin", record_id: 7, start_time: "unparseable" },
+        { thumb_path: "/ignored.jpg", record_id: 6.5 },
+        { thumb_path: "/ignored-time.jpg", start_time: "21001103000000" },
+      ]),
+    ).toBe("relative path/image.bin");
+    expect(
+      selectThumbnail([
+        { thumb_path: "relative", record_id: -2 },
+        { thumb_path: "other", record_id: -1 },
+      ]),
+    ).toBe("other");
+  });
+  it("falls back to parseable times only when no eligible path has an integer id", () => {
+    expect(
+      selectThumbnail([
+        { thumb_path: "old", record_id: "99", start_time: "2026-11-02T00:00:00Z" },
+        { thumb_path: "new", record_id: 1.5, start_time: "2026-11-03T00:00:00Z" },
+        { thumb_path: "/../unsafe", record_id: 100 },
+      ]),
+    ).toBe("new");
+    expect(selectThumbnail([{ thumb_path: "unknown", start_time: "unparseable" }, null])).toBeUndefined();
+  });
+  it.each([
+    "",
+    "../image",
+    "folder/../image",
+    "folder\\..\\image",
+    "x\u0000y",
+    "x\ny",
+    "x\u007fy",
+    "x\u0085y",
+    "é".repeat(1025),
+  ])("refuses an unsafe candidate without a fallback", (file) => {
+    expect(selectThumbnail([{ thumb_path: file, record_id: 1 }])).toBeUndefined();
+  });
+  it("retains all-row shapes when no row qualifies and sends no image", async () => {
+    const { router, s } = await setup();
+    const run = router.readEventThumbnailCandidate(ST);
+    await started(s);
+    const data = [
+      { thumb_path: "relative image", start_time: "unknown" },
+      { thumb_path: "../unsafe", record_id: 99 },
+    ];
+    s.notify(response(s, { data }));
+    expect(await run).toMatchObject({ outcome: "invalid_reply", shapes: thumbnailShapes(data), imageElapsedMs: null });
+    expect(s.sent).toHaveLength(1);
+  });
+  it("sends one image using record id with an unparseable firmware time and retains shapes on image failure", async () => {
+    const { router, s } = await setup();
+    const run = router.readEventThumbnailCandidate(ST);
+    await started(s);
+    const data = [{ thumb_path: "relative firmware image", start_time: "unknown", record_id: 1 }];
+    s.notify(response(s, { data }));
+    await imageStarted(s);
+    expect(JSON.parse(s.sent[1]!.subarray(16).toString()).payload).toEqual([{ file: "relative firmware image" }]);
+    image(s, { file: "relative firmware image", content: "invalid" });
+    expect(await run).toMatchObject({ outcome: "invalid_reply", shapes: thumbnailShapes(data) });
+    expect(s.sent).toHaveLength(2);
+  });
   it.each(["table", "image"])("rejects %s completion crossing its deadline during promise handoff", async (kind) => {
     const { router, s } = await setup();
     let now = performance.now();
