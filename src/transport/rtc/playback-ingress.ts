@@ -242,7 +242,35 @@ export class PlaybackIngress implements RtcIngressGuard {
     }
     this.plausible();
     this.nonControlTraffic = true;
-    if (!this.capturing || this.evidence.cutoff) return false;
+    if (!this.capturing) {
+      // Only self-contained packets can identify late playback; never retain partial media.
+      if (!this.tombstone || h.index !== 0 || !h.last) return false;
+      if (
+        binary[4] !== 3 ||
+        (binary.readUInt16LE(18) & 0xb000) !== 0 ||
+        !(binary.readUInt16LE(18) & 0x4000) ||
+        h.frameLength > PLAYBACK_FRAME_BYTES ||
+        h.payloadLength !== h.frameLength ||
+        h.payloadLength > binary.length - 28
+      )
+        return this.reject("invalid_media", true);
+      if (!(binary.readUInt16LE(18) & 0x0800)) {
+        this.lateFrame(binary.subarray(28, 28 + h.payloadLength));
+        return false;
+      }
+      if (
+        this.evidence.cutoff ||
+        this.reservedFrames >= 256 ||
+        this.evidence.decodedWorkBytes + PLAYBACK_FRAME_BYTES > 4 * 1024 * 1024
+      )
+        return this.reject("capped", true);
+      this.reservedFrames++;
+      this.evidence.decodedWorkBytes += PLAYBACK_FRAME_BYTES;
+      if (!this.assembler.push(binary)) return this.reject("invalid_media", true);
+      this.assembler.clear();
+      return false;
+    }
+    if (this.evidence.cutoff) return false;
     if (
       binary[4] !== 3 ||
       (binary.readUInt16LE(18) & 0xb000) !== 0 ||
@@ -280,6 +308,18 @@ export class PlaybackIngress implements RtcIngressGuard {
   private wrong(frame: Buffer): false {
     this.nonControlTraffic = true;
     this.plausible();
+    this.lateFrame(frame);
+    this.evidence.wrongRouteFrames = add(this.evidence.wrongRouteFrames, 1);
+    this.evidence.wrongRouteBytes = add(this.evidence.wrongRouteBytes, frame.length);
+    this.evidence.mediaBytes = add(this.evidence.mediaBytes, frame.length);
+    this.evidence.mediaFrames = add(this.evidence.mediaFrames, 1);
+    if (this.evidence.wrongRouteBytes >= PLAYBACK_BYTES || this.evidence.wrongRouteFrames >= 64)
+      this.opts.end("capped_wrong_route");
+    else this.opts.end("transport_mismatch");
+    return false;
+  }
+
+  private lateFrame(frame: Buffer): void {
     const h = parsePortalHeader(frame);
     if (
       this.tombstone &&
@@ -289,14 +329,6 @@ export class PlaybackIngress implements RtcIngressGuard {
       this.selectors.has(h.isResponse)
     )
       this.opts.late?.();
-    this.evidence.wrongRouteFrames = add(this.evidence.wrongRouteFrames, 1);
-    this.evidence.wrongRouteBytes = add(this.evidence.wrongRouteBytes, frame.length);
-    this.evidence.mediaBytes = add(this.evidence.mediaBytes, frame.length);
-    this.evidence.mediaFrames = add(this.evidence.mediaFrames, 1);
-    if (this.evidence.wrongRouteBytes >= PLAYBACK_BYTES || this.evidence.wrongRouteFrames >= 64)
-      this.opts.end("capped_wrong_route");
-    else this.opts.end("transport_mismatch");
-    return false;
   }
 
   decoded(frame: Buffer, link: number): boolean {
@@ -329,6 +361,10 @@ export class PlaybackIngress implements RtcIngressGuard {
 
   private complete(frame: Buffer): void {
     this.plausible();
+    if (this.tombstone && !this.capturing) {
+      this.lateFrame(frame);
+      return;
+    }
     if (!this.capturing || this.evidence.cutoff) return;
     const h = parsePortalHeader(frame);
     if (

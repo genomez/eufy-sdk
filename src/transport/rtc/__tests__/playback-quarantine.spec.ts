@@ -141,4 +141,49 @@ describe("selector-specific quarantine", () => {
       s.close();
     }
   });
+  for (const selector of [6, 7])
+    for (const command of [1300, 1301])
+      for (const compressed of [false, true]) {
+        it(`re-latches complete playback-route media selector=${selector} command=${command} compressed=${compressed}`, async () => {
+          const s = await setup();
+          try {
+            s.setNow(100);
+            const complete = packets(frame(command, selector, 4), 4, compressed, false);
+            expect(complete).toHaveLength(1);
+            s.receive(complete[0]!);
+            expect(s.guard.lastPlausibleMs).toBe(100);
+            expect(s.late).toHaveBeenCalledOnce();
+            expect(s.delivered).not.toHaveBeenCalled();
+            expect(s.guard.evidence.collectorAttempts).toBe(0);
+            expect(s.guard.evidence.mediaBytes).toBe(0);
+            expect(s.guard.evidence.wrongRouteFrames).toBe(0);
+            expect(s.guard.observationComplete()).toBe(true);
+          } finally {
+            s.close();
+          }
+        });
+      }
+  it("bounds post-release compressed work without retaining partial media", async () => {
+    const s = await setup();
+    try {
+      for (let i = 0; i < 40; i++) for (const p of packets(frame(1300, 6, 4), 4, true, false)) s.receive(p);
+      expect(s.guard.evidence.decodedWorkBytes).toBe(4 * 1024 * 1024);
+      expect(s.late).toHaveBeenCalledTimes(16);
+      expect(s.guard.evidence.collectorAttempts).toBe(0);
+      expect(s.guard.evidence.unknown).toBe(true);
+    } finally {
+      s.close();
+    }
+  });
+  for (const selector of [1, 8])
+    it(`ignores complete playback-route media without a reserved selector ${selector}`, async () => {
+      const s = await setup();
+      try {
+        for (const p of packets(frame(1300, selector, 4), 4, false, false)) s.receive(p);
+        expect(s.late).not.toHaveBeenCalled();
+        expect(s.delivered).not.toHaveBeenCalled();
+      } finally {
+        s.close();
+      }
+    });
 });
