@@ -65,6 +65,77 @@ async function setup(released = true) {
 }
 
 describe("selector-specific quarantine", () => {
+  for (const command of [1300, 1301])
+    for (const compressed of [false, true])
+      for (const route of [4, 5])
+        it(`fails closed for reserved length mismatch command=${command} compressed=${compressed} route=${route}`, async () => {
+          const s = await setup();
+          try {
+            const bytes = frame(command, 6, 4);
+            bytes.writeUInt32LE(5, 6);
+            s.receive(packets(bytes, route, compressed, false)[0]!);
+            expect(s.late).toHaveBeenCalledOnce();
+            expect(s.guard.evidence.unknown).toBe(true);
+            s.receive(packets(frame(1300, 1, 4), 5, false, false)[0]!);
+            expect(s.delivered).not.toHaveBeenCalled();
+          } finally {
+            s.close();
+          }
+        });
+  for (const kind of [
+    "missing",
+    "invalid",
+    "reserved-control",
+    "inner-oversized",
+    "envelope-truncated",
+    "envelope-oversized",
+  ])
+    for (const compressed of [false, true])
+      it(`fails closed for complete playback ${kind} compressed=${compressed}`, async () => {
+        const s = await setup();
+        try {
+          let bytes = frame(kind === "reserved-control" ? 1350 : 1300, 6, 4);
+          if (kind === "missing") bytes = bytes.subarray(0, 8);
+          if (kind === "invalid") bytes[0] = bytes[0]! ^ 0xff;
+          if (kind === "inner-oversized") bytes.writeUInt32LE(3, 6);
+          let p = packets(bytes, 4, compressed, false)[0]!;
+          if (kind === "envelope-truncated") p = p.subarray(0, 29);
+          if (kind === "envelope-oversized") p.writeUInt32LE(PLAYBACK_FRAME_BYTES + 1, 12);
+          s.receive(p);
+          expect(s.late).toHaveBeenCalledOnce();
+          expect(s.guard.evidence.unknown).toBe(true);
+          expect(s.guard.evidence.collectorAttempts).toBe(0);
+        } finally {
+          s.close();
+        }
+      });
+  for (const route of [0, 5])
+    for (const compressed of [false, true])
+      it(`does not re-latch ordinary malformed route=${route} compressed=${compressed}`, async () => {
+        const s = await setup();
+        try {
+          const bytes = frame(1300, 1, 4);
+          bytes.writeUInt32LE(5, 6);
+          s.receive(packets(bytes, route, compressed, false)[0]!);
+          s.receive(packets(Buffer.alloc(8), route, compressed, false)[0]!);
+          expect(s.late).not.toHaveBeenCalled();
+          expect(s.delivered).not.toHaveBeenCalled();
+        } finally {
+          s.close();
+        }
+      });
+  it("fails closed for a bare reserved length mismatch through wrong", async () => {
+    const s = await setup();
+    try {
+      const bytes = frame(1301, 7, 4);
+      bytes.writeUInt32LE(5, 6);
+      s.receive(bytes);
+      expect(s.late).toHaveBeenCalledOnce();
+      expect(s.guard.evidence.unknown).toBe(true);
+    } finally {
+      s.close();
+    }
+  });
   for (const route of [1, 5])
     for (const compressed of [false, true])
       for (const fragmented of [false, true]) {

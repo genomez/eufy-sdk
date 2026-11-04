@@ -270,7 +270,7 @@ export class PlaybackIngress implements RtcIngressGuard {
       this.lateWindow.frames++;
       if (!compressed) {
         this.chargeLate(h.payloadLength);
-        this.lateFrame(binary.subarray(28, 28 + h.payloadLength));
+        this.lateFrame(binary.subarray(28, 28 + h.payloadLength), true);
         return false;
       }
       const inspected = this.assembler.push(binary);
@@ -349,20 +349,24 @@ export class PlaybackIngress implements RtcIngressGuard {
     return false;
   }
 
-  private lateFrame(frame: Buffer): void {
+  private lateFrame(frame: Buffer, playbackRoute = false): void {
+    if (!this.tombstone) return;
     const h = parsePortalHeader(frame);
-    if (
-      this.tombstone &&
-      h &&
-      h.paramLength + 16 === frame.length &&
-      (h.commandId === 1300 || h.commandId === 1301) &&
-      this.selectors.has(h.isResponse)
-    )
-      this.opts.late?.();
+    const reservedMedia = h && (h.commandId === 1300 || h.commandId === 1301) && this.selectors.has(h.isResponse);
+    if (!h || h.paramLength + 16 !== frame.length || frame.length > PLAYBACK_FRAME_BYTES) {
+      if (playbackRoute || reservedMedia) this.lateUnknown("invalid_media");
+      return;
+    }
+    if (reservedMedia) this.opts.late?.();
+    else if (playbackRoute && this.selectors.has(h.isResponse)) this.lateUnknown("invalid_media");
   }
 
   decoded(frame: Buffer, link: number): boolean {
     if (link !== PortalLinkType.PLAYBACK && this.currentControlKey) this.controlPartials.delete(this.currentControlKey);
+    if (this.tombstone && link === PortalLinkType.PLAYBACK) {
+      this.lateFrame(frame, true);
+      return false;
+    }
     const h = parsePortalHeader(frame);
     if (!h) return this.reject("invalid_media", true);
     if (this.opts.observeOnly) {
@@ -380,6 +384,7 @@ export class PlaybackIngress implements RtcIngressGuard {
         this.tombstone &&
         this.opts.liveAllowed?.() &&
         link === PortalLinkType.LIVE &&
+        h.paramLength + 16 === frame.length &&
         h.isResponse === 1 &&
         !this.selectors.has(1)
       )
@@ -393,7 +398,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     this.plausible();
     if (this.tombstone && !this.capturing) {
       this.chargeLate(frame.length);
-      this.lateFrame(frame);
+      this.lateFrame(frame, true);
       return;
     }
     if (!this.capturing || this.evidence.cutoff) return;
