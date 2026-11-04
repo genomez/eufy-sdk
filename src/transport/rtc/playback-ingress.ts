@@ -6,6 +6,9 @@ import { performance } from "node:perf_hooks";
 export const PLAYBACK_BYTES = 2 * 1024 * 1024;
 export const PLAYBACK_FRAME_BYTES = 256 * 1024;
 export const PLAYBACK_EXPIRY_SWEEP_MS = 250;
+export const PLAYBACK_LATE_WINDOW_MS = 1000;
+export const PLAYBACK_LATE_WINDOW_BYTES = 64 * 1024 * 1024;
+export const PLAYBACK_LATE_WINDOW_FRAMES = 1024;
 const PLAYBACK_PARTIAL_AGE_MS = 2000 - PLAYBACK_EXPIRY_SWEEP_MS;
 
 /** Header-first native admission and post-inflation classification, before downstream parsers. */
@@ -61,6 +64,7 @@ export class PlaybackIngress implements RtcIngressGuard {
   private expiryTimer?: NodeJS.Timeout;
   private selectors = new Set<number>();
   private tombstone = false;
+  private lateWindow = { since: 0, bytes: 0, frames: 0 };
   private completingId = 0;
   private readonly controlPartials = new Map<string, number>();
   private currentControlKey?: string;
@@ -166,6 +170,7 @@ export class PlaybackIngress implements RtcIngressGuard {
   quarantine(): void {
     this.finishCapture();
     this.tombstone = true;
+    this.lateWindow = { since: this.now(), bytes: 0, frames: 0 };
   }
 
   /** Incomplete assemblies or expired/rejected traffic cannot manufacture cessation. */
@@ -194,7 +199,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     this.evidence.nativeMessages = add(this.evidence.nativeMessages, 1);
     this.evidence.nativeBytes = add(this.evidence.nativeBytes, binary?.length ?? 0);
     if (!binary) return this.reject("invalid_media", true);
-    if (this.evidence.nativeBytes >= 4 * 1024 * 1024 || this.evidence.nativeMessages >= 16384) {
+    if (!this.tombstone && (this.evidence.nativeBytes >= 4 * 1024 * 1024 || this.evidence.nativeMessages >= 16384)) {
       this.evidence.cutoff = true;
       this.opts.end("capped");
     }
@@ -243,7 +248,6 @@ export class PlaybackIngress implements RtcIngressGuard {
     this.plausible();
     this.nonControlTraffic = true;
     if (!this.capturing) {
-      // Only self-contained packets can identify late playback; never retain partial media.
       if (!this.tombstone || h.index !== 0 || !h.last) return false;
       if (
         binary[4] !== 3 ||
@@ -253,21 +257,28 @@ export class PlaybackIngress implements RtcIngressGuard {
         h.payloadLength !== h.frameLength ||
         h.payloadLength > binary.length - 28
       )
-        return this.reject("invalid_media", true);
-      if (!(binary.readUInt16LE(18) & 0x0800)) {
+        return this.lateUnknown("invalid_media");
+      const compressed = !!(binary.readUInt16LE(18) & 0x0800);
+      const now = this.now();
+      if (now - this.lateWindow.since >= PLAYBACK_LATE_WINDOW_MS) this.lateWindow = { since: now, bytes: 0, frames: 0 };
+      const allowance = compressed ? PLAYBACK_FRAME_BYTES : h.payloadLength;
+      if (
+        this.lateWindow.frames >= PLAYBACK_LATE_WINDOW_FRAMES ||
+        this.lateWindow.bytes + allowance > PLAYBACK_LATE_WINDOW_BYTES
+      )
+        return this.lateUnknown("capped");
+      this.lateWindow.frames++;
+      if (!compressed) {
+        this.chargeLate(h.payloadLength);
         this.lateFrame(binary.subarray(28, 28 + h.payloadLength));
         return false;
       }
-      if (
-        this.evidence.cutoff ||
-        this.reservedFrames >= 256 ||
-        this.evidence.decodedWorkBytes + PLAYBACK_FRAME_BYTES > 4 * 1024 * 1024
-      )
-        return this.reject("capped", true);
-      this.reservedFrames++;
-      this.evidence.decodedWorkBytes += PLAYBACK_FRAME_BYTES;
-      if (!this.assembler.push(binary)) return this.reject("invalid_media", true);
+      const inspected = this.assembler.push(binary);
       this.assembler.clear();
+      if (!inspected) {
+        this.chargeLate(PLAYBACK_FRAME_BYTES);
+        return this.lateUnknown("invalid_media");
+      }
       return false;
     }
     if (this.evidence.cutoff) return false;
@@ -303,6 +314,25 @@ export class PlaybackIngress implements RtcIngressGuard {
     }
     if (!this.assembler.pending) this.assemblies.clear();
     return false;
+  }
+
+  /**
+   * A complete uninspectable tombstone packet is uncertainty, requiring the durable late latch.
+   * Fragment-only traffic never reaches this path and never retains payload or re-latches.
+   */
+  private lateUnknown(reason: "capped" | "invalid_media"): false {
+    this.opts.late?.();
+    return this.reject(reason, true);
+  }
+
+  /**
+   * One-second windows admit 64 MiB and 1,024 complete packets. At 30 fps and the 256 KiB
+   * per-frame ceiling, a stream uses at most 7.5 MiB/s; byte headroom exceeds eight streams.
+   * Successful inflation charges actual output; failed inflation consumes its full bounded allowance.
+   */
+  private chargeLate(bytes: number): void {
+    this.lateWindow.bytes += bytes;
+    this.evidence.decodedWorkBytes = add(this.evidence.decodedWorkBytes, bytes);
   }
 
   private wrong(frame: Buffer): false {
@@ -362,6 +392,7 @@ export class PlaybackIngress implements RtcIngressGuard {
   private complete(frame: Buffer): void {
     this.plausible();
     if (this.tombstone && !this.capturing) {
+      this.chargeLate(frame.length);
       this.lateFrame(frame);
       return;
     }

@@ -199,6 +199,33 @@ it("full current-table/start/pause/next-selector stop path uses one original own
   expect(playback.map((p) => parsePortalHeader(p)!.isResponse)).toEqual([6, 6, 7]);
   expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: false, active: false });
 });
+it("qualified release re-latches and refuses live after admitted traffic exceeds the old budget", async () => {
+  const { router, session, marker } = await fixture();
+  const pending = router.readEventPlaybackCandidate(station, options());
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await pending).toMatchObject({
+    releaseOutcome: "release_confirmed",
+    cessationOutcome: "ceased",
+    latchCleared: true,
+  });
+  expect(marker).toEqual([true, false]);
+  const live = packetize(Buffer.concat([buildPortalHeader(1300, 512, 101, 9, 1), Buffer.alloc(512)]), {
+    channel: 5,
+    frameId: 30000,
+    payloadBytes: 1000,
+  })[0]!;
+  for (let i = 0; i < 16385; i++) session.inject(live);
+  expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(false);
+  const bytes = zstdCompressSync(Buffer.concat([buildPortalHeader(1301, 4, 101, 9, 7), Buffer.alloc(4)]));
+  const reserved = packetize(bytes, { channel: 4, frameId: 30001, payloadBytes: 1000 });
+  expect(reserved).toHaveLength(1);
+  reserved[0]!.writeUInt16LE(reserved[0]!.readUInt16LE(18) | 0x0800, 18);
+  session.inject(reserved[0]!);
+  expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(true);
+  expect(marker).toEqual([true, false, true]);
+  await expect(router.mediaProviderFor(camera).live!()).rejects.toThrow("playback_slot_uncertain");
+  expect(session.sent.filter((p) => parsePortalHeader(p)!.commandId === 1700)).toHaveLength(3);
+});
 it("missing release survives a new owner and blocks live while ordinary control remains usable", async () => {
   const { router, session, sessions } = await fixture();
   session.releaseStatus = false;

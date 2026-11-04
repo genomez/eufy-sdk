@@ -1,17 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
 import { zstdCompressSync } from "node:zlib";
-import { PlaybackIngress } from "../playback-ingress.js";
+import {
+  PlaybackIngress,
+  PLAYBACK_FRAME_BYTES,
+  PLAYBACK_LATE_WINDOW_MS,
+  PLAYBACK_LATE_WINDOW_BYTES,
+  PLAYBACK_LATE_WINDOW_FRAMES,
+} from "../playback-ingress.js";
 import { PtcsFramer, packetize } from "../ptcs-framer.js";
 import { buildPortalHeader } from "../portal-packet.js";
 
 let id = 0;
 const frame = (command: number, selector: number, size = 5000) =>
   Buffer.concat([buildPortalHeader(command, size, 101, 9, selector), Buffer.alloc(size)]);
-function packets(bytes: Buffer, route: number, compressed = false, fragmented = true) {
+function packets(bytes: Buffer, route: number, compressed = false, fragmented = true, fragmentBytes = 8) {
   const result = packetize(compressed ? zstdCompressSync(bytes) : bytes, {
     channel: route,
     frameId: ++id,
-    payloadBytes: fragmented ? 8 : 1000,
+    payloadBytes: fragmented ? fragmentBytes : 1000,
   });
   if (compressed) for (const p of result) p.writeUInt16LE(p.readUInt16LE(18) | 0x0800, 18);
   return result;
@@ -163,14 +169,101 @@ describe("selector-specific quarantine", () => {
           }
         });
       }
-  it("bounds post-release compressed work without retaining partial media", async () => {
+  it("inspects a compressed reserved frame after allowed live traffic exceeds every old budget", async () => {
     const s = await setup();
     try {
-      for (let i = 0; i < 40; i++) for (const p of packets(frame(1300, 6, 4), 4, true, false)) s.receive(p);
-      expect(s.guard.evidence.decodedWorkBytes).toBe(4 * 1024 * 1024);
-      expect(s.late).toHaveBeenCalledTimes(16);
-      expect(s.guard.evidence.collectorAttempts).toBe(0);
+      const live = packets(frame(1300, 1, 512), 5, false, false)[0]!;
+      for (let i = 0; i < 16385; i++) s.receive(live);
+      const ordinary = packets(frame(1300, 1, 4), 4, true, false)[0]!;
+      for (let i = 0; i < 300; i++) s.receive(ordinary);
+      expect(s.delivered).toHaveBeenCalledTimes(16385);
+      expect(s.guard.evidence.nativeBytes).toBeGreaterThan(4 * 1024 * 1024);
+      expect(s.guard.evidence.nativeMessages).toBeGreaterThan(16384);
+      expect(s.guard.evidence.decodedWorkBytes).toBe(300 * 20);
+      expect(s.late).not.toHaveBeenCalled();
+      s.receive(packets(frame(1301, 7, 4), 4, true, false)[0]!);
+      expect(s.late).toHaveBeenCalledOnce();
+      expect(s.guard.evidence.unknown).toBe(false);
+      s.receive(live);
+      expect(s.delivered).toHaveBeenCalledTimes(16385);
+    } finally {
+      s.close();
+    }
+  });
+  it.each([false, true])(
+    "sustained 30 fps live traffic refills across five windows, compressed=%s",
+    async (compressed) => {
+      const s = await setup();
+      try {
+        const live = packets(frame(1300, 1, PLAYBACK_FRAME_BYTES - 16), 5, compressed, true, 1000);
+        const inspection = packets(frame(1300, 1, compressed ? PLAYBACK_FRAME_BYTES - 16 : 512), 4, compressed, false);
+        expect(inspection).toHaveLength(1);
+        for (let window = 0; window < 5; window++) {
+          for (let i = 0; i < 30; i++) {
+            s.setNow(window * PLAYBACK_LATE_WINDOW_MS + i * 33);
+            for (const p of live) s.receive(p);
+            s.receive(inspection[0]!);
+          }
+          expect(s.delivered).toHaveBeenCalledTimes((window + 1) * 30);
+          expect(s.guard.evidence.decodedWorkBytes).toBe((window + 1) * 30 * (compressed ? PLAYBACK_FRAME_BYTES : 528));
+          expect(s.late).not.toHaveBeenCalled();
+          expect(s.guard.evidence.unknown).toBe(false);
+        }
+        s.receive(packets(frame(1300, 6, 4), 4, true, false)[0]!);
+        expect(s.late).toHaveBeenCalledOnce();
+        expect(s.guard.evidence.collectorAttempts).toBe(0);
+        expect(s.guard.evidence.mediaBytes).toBe(0);
+      } finally {
+        s.close();
+      }
+    },
+  );
+  it.each(["bytes", "frames"])("fails closed at the post-release %s window limit and refills", async (limit) => {
+    const s = await setup();
+    try {
+      const size = limit === "bytes" ? PLAYBACK_FRAME_BYTES - 16 : 4;
+      const count = limit === "bytes" ? PLAYBACK_LATE_WINDOW_BYTES / PLAYBACK_FRAME_BYTES : PLAYBACK_LATE_WINDOW_FRAMES;
+      const ordinary = packets(frame(1300, 1, size), 4, true, false)[0]!;
+      for (let i = 0; i < count; i++) s.receive(ordinary);
+      expect(s.late).not.toHaveBeenCalled();
+      expect(s.guard.evidence.decodedWorkBytes).toBe(count * (size + 16));
+      s.receive(packets(frame(1301, 7, 4), 4, true, false)[0]!);
+      expect(s.late).toHaveBeenCalledOnce();
       expect(s.guard.evidence.unknown).toBe(true);
+      expect(s.guard.evidence.decodedWorkBytes).toBe(count * (size + 16));
+      s.setNow(PLAYBACK_LATE_WINDOW_MS);
+      s.receive(packets(frame(1301, 7, 4), 4, true, false)[0]!);
+      expect(s.late).toHaveBeenCalledTimes(2);
+      expect(s.guard.evidence.decodedWorkBytes).toBe(count * (size + 16) + 20);
+      expect(s.guard.evidence.collectorAttempts).toBe(0);
+    } finally {
+      s.close();
+    }
+  });
+  it("capture cutoff cannot disable post-release inspection", async () => {
+    const s = await setup(false);
+    try {
+      const live = packets(frame(1300, 1, 512), 5, false, false)[0]!;
+      for (let i = 0; i < 8000; i++) s.receive(live);
+      expect(s.guard.evidence.cutoff).toBe(true);
+      s.guard.quarantine();
+      s.receive(packets(frame(1300, 6, 4), 4, true, false)[0]!);
+      expect(s.late).toHaveBeenCalledOnce();
+      expect(s.guard.evidence.decodedWorkBytes).toBe(20);
+    } finally {
+      s.close();
+    }
+  });
+  it("complete malformed compression fails closed without a finalized end callback", async () => {
+    const s = await setup();
+    try {
+      const p = packets(Buffer.from("invalid-compression"), 4, false, false)[0]!;
+      p.writeUInt16LE(p.readUInt16LE(18) | 0x0800, 18);
+      s.receive(p);
+      expect(s.late).toHaveBeenCalledOnce();
+      expect(s.guard.evidence.unknown).toBe(true);
+      expect(s.guard.evidence.decodedWorkBytes).toBe(PLAYBACK_FRAME_BYTES);
+      expect(s.guard.evidence.collectorAttempts).toBe(0);
     } finally {
       s.close();
     }
