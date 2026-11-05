@@ -1232,7 +1232,7 @@ export class EufyMega extends EventEmitter {
         if (this.reportRefreshes.get(stationSn) === entry) this.reportRefreshes.delete(stationSn);
         return;
       }
-      entry.promise = this.refreshDeviceState(stationSn, { signal: generation.abort.signal, timeoutMs: 15_000 });
+      entry.promise = this.refreshAutomaticState(stationSn, generation);
       void entry.promise
         .catch((error) => {
           if (generation.epoch === this.realtimeEpoch && !generation.abort.signal.aborted) {
@@ -1247,6 +1247,37 @@ export class EufyMega extends EventEmitter {
     };
     entry.timer = setTimeout(fire, 1_500);
     entry.timer.unref?.();
+  }
+
+  /** Automatic joiners share one renewal retry and one deadline covering renewal waits and both reads. */
+  private async refreshAutomaticState(
+    station: string,
+    generation: RealtimeGeneration,
+  ): ReturnType<EufyMega["refreshDeviceState"]> {
+    const deadline = Date.now() + 15_000;
+    const { epoch, abort } = generation;
+    try {
+      return await this.refreshDeviceState(station, {
+        signal: abort.signal,
+        timeoutMs: deadline - Date.now(),
+        waitForRenewal: true,
+      });
+    } catch (error) {
+      const remaining = deadline - Date.now();
+      if (
+        epoch !== this.realtimeEpoch ||
+        abort.signal.aborted ||
+        remaining < 1 ||
+        !consumeRenewalInformationRead(error)
+      )
+        throw error;
+      this.stateRefreshEvidence.renewalRetries++;
+      return this.refreshDeviceState(station, {
+        signal: abort.signal,
+        timeoutMs: remaining,
+        waitForRenewal: true,
+      });
+    }
   }
 
   /**
@@ -2732,20 +2763,8 @@ export class EufyMega extends EventEmitter {
         for (const station of stations) {
           if (epoch !== this.realtimeEpoch || abort.signal.aborted) return { refreshed: false, retiredSession: false };
           try {
-            let result;
-            try {
-              result = await (this.reportRefreshes.get(station)?.promise ??
-                this.refreshDeviceState(station, { signal: abort.signal, timeoutMs: 15_000, waitForRenewal: true }));
-            } catch (error) {
-              if (epoch !== this.realtimeEpoch || abort.signal.aborted || !consumeRenewalInformationRead(error))
-                throw error;
-              this.stateRefreshEvidence.renewalRetries++;
-              result = await this.refreshDeviceState(station, {
-                signal: abort.signal,
-                timeoutMs: 15_000,
-                waitForRenewal: true,
-              });
-            }
+            const result = await (this.reportRefreshes.get(station)?.promise ??
+              this.refreshAutomaticState(station, generation));
             if (epoch !== this.realtimeEpoch || abort.signal.aborted)
               return { refreshed: false, retiredSession: false };
             parameters += result.parametersUpdated;
