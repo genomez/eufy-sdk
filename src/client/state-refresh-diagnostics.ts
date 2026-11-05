@@ -24,7 +24,7 @@ export interface StateRefreshOperationEvidence {
   startedAtMs: number;
   finishedAtMs: number;
   phase: "validation" | "transport" | "processing";
-  outcome: "success" | "failed";
+  outcome: "success" | "failed" | "superseded_by_renewal";
   failure: StateRefreshFailure | null;
 }
 
@@ -66,6 +66,8 @@ export interface StateRefreshDiagnostics {
   attempts: number;
   successes: number;
   failures: number;
+  /** Single immediate retries of reads superseded specifically by local renewal adoption. */
+  renewalRetries: number;
   lastAttemptMs: number | null;
   lastSuccessMs: number | null;
   lastFailureMs: number | null;
@@ -88,6 +90,7 @@ export function emptyStateRefreshEvidence() {
     attempts: 0,
     successes: 0,
     failures: 0,
+    renewalRetries: 0,
     lastAttemptMs: null as number | null,
     lastSuccessMs: null as number | null,
     lastFailureMs: null as number | null,

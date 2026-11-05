@@ -28,7 +28,12 @@ import { decodeMapFrame } from "./map-channels.js";
 import { VacuumMapStore } from "../model/index.js";
 import { type P2PSession, type P2PFrame } from "../transport/p2p/p2p-session.js";
 import { P2PCommandRouter } from "../transport/p2p/command-router.js";
-import { consumeRetiredInformationRead } from "../transport/rtc/retired-information-read.js";
+import {
+  consumeRetiredInformationRead,
+  consumeRenewalInformationRead,
+  isRenewalInformationRead,
+  markRenewalInformationRead,
+} from "../transport/rtc/retired-information-read.js";
 import { RtcCommandRouter } from "../transport/rtc/command-router.js";
 import {
   recordingAccountNamespace,
@@ -1252,12 +1257,13 @@ export class EufyMega extends EventEmitter {
    */
   async refreshDeviceState(
     sn: string,
-    opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+    opts: { signal?: AbortSignal; timeoutMs?: number; waitForRenewal?: boolean } = {},
   ): Promise<{ notificationCorrelation: "temporal-only"; devicesUpdated: number; parametersUpdated: number }> {
     const epoch = this.realtimeEpoch;
     const startedAtMs = Date.now();
     let phase: StateRefreshOperationEvidence["phase"] = "validation";
     let completed = false;
+    let superseded = false;
     let failure: StateRefreshFailure | null = null;
     try {
       opts.signal?.throwIfAborted();
@@ -1275,8 +1281,16 @@ export class EufyMega extends EventEmitter {
         epoch !== this.realtimeEpoch ||
         opts.signal?.aborted ||
         !this.rtc.informationResultCurrent(station.sn, result)
-      )
-        throw new Error("State refresh was interrupted");
+      ) {
+        const error = new Error("State refresh was interrupted");
+        if (
+          epoch === this.realtimeEpoch &&
+          !opts.signal?.aborted &&
+          this.rtc.informationResultSupersededByRenewal(station.sn, result)
+        )
+          markRenewalInformationRead(error);
+        throw error;
+      }
       phase = "processing";
       const updates = rtcStateParameters(station.sn, result.frame, this.registry);
       const receivedAtMs = result.informationReceivedAtMs;
@@ -1292,6 +1306,7 @@ export class EufyMega extends EventEmitter {
         parametersUpdated: [...updates.values()].reduce((count, params) => count + Object.keys(params).length, 0),
       };
     } catch (error) {
+      superseded = isRenewalInformationRead(error);
       failure = stateRefreshFailure(error);
       throw error;
     } finally {
@@ -1300,12 +1315,12 @@ export class EufyMega extends EventEmitter {
           startedAtMs,
           finishedAtMs: Date.now(),
           phase,
-          outcome: completed ? "success" : "failed",
-          failure,
+          outcome: completed ? "success" : superseded ? "superseded_by_renewal" : "failed",
+          failure: superseded ? null : failure,
         };
         this.stateRefreshEvidence.operations.push(evidence);
         if (this.stateRefreshEvidence.operations.length > 20) this.stateRefreshEvidence.operations.shift();
-        if (!completed) this.stateRefreshEvidence.lastOperationFailure = { ...evidence };
+        if (!completed && !superseded) this.stateRefreshEvidence.lastOperationFailure = { ...evidence };
       }
     }
   }
@@ -2717,8 +2732,20 @@ export class EufyMega extends EventEmitter {
         for (const station of stations) {
           if (epoch !== this.realtimeEpoch || abort.signal.aborted) return { refreshed: false, retiredSession: false };
           try {
-            const result = await (this.reportRefreshes.get(station)?.promise ??
-              this.refreshDeviceState(station, { signal: abort.signal, timeoutMs: 15_000 }));
+            let result;
+            try {
+              result = await (this.reportRefreshes.get(station)?.promise ??
+                this.refreshDeviceState(station, { signal: abort.signal, timeoutMs: 15_000, waitForRenewal: true }));
+            } catch (error) {
+              if (epoch !== this.realtimeEpoch || abort.signal.aborted || !consumeRenewalInformationRead(error))
+                throw error;
+              this.stateRefreshEvidence.renewalRetries++;
+              result = await this.refreshDeviceState(station, {
+                signal: abort.signal,
+                timeoutMs: 15_000,
+                waitForRenewal: true,
+              });
+            }
             if (epoch !== this.realtimeEpoch || abort.signal.aborted)
               return { refreshed: false, retiredSession: false };
             parameters += result.parametersUpdated;

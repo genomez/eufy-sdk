@@ -1387,6 +1387,7 @@ describe("generation-owned RTC state refresh", () => {
       expect(read).toHaveBeenCalledExactlyOnceWith(station, {
         signal: client.realtimeGeneration.abort.signal,
         timeoutMs: 15_000,
+        waitForRenewal: true,
       });
       expect(client.realtimeGeneration.stateRefreshDeferrals).toBeUndefined();
       if (busy === "target") {
@@ -2146,7 +2147,11 @@ describe("generation-owned RTC state refresh", () => {
     const { eufy, refresh } = fixture();
     await (eufy as any).ensureRealtime();
     await (eufy as any).ensureRealtime();
-    expect(refresh).toHaveBeenCalledExactlyOnceWith(station, { signal: expect.any(AbortSignal), timeoutMs: 15_000 });
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(station, {
+      signal: expect.any(AbortSignal),
+      timeoutMs: 15_000,
+      waitForRenewal: true,
+    });
     await vi.advanceTimersByTimeAsync(1000);
     expect(refresh).toHaveBeenCalledTimes(2);
     await eufy.disconnect();

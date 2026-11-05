@@ -69,7 +69,7 @@ import {
   type RenewalFailure,
   type RenewalFailureRetention,
 } from "./renewal-diagnostics.js";
-import { markRetiredInformationRead } from "./retired-information-read.js";
+import { markRetiredInformationRead, markRenewalInformationRead } from "./retired-information-read.js";
 import { connectionDeadline } from "./connection-deadline.js";
 import { informationPayload } from "./camera-info.js";
 import { RtcLive, type RtcLiveConsumer } from "./live.js";
@@ -258,7 +258,9 @@ interface StationSession {
   refreshRetryUserId?: string;
   /** Successful complete read on this generation; ACK alone is insufficient. */
   lastInformationRead?: { startedAtMs: number; finishedAtMs: number };
-  replacement?: { controller: AbortController; candidate?: StationSession };
+  replacement?: { controller: AbortController; candidate?: StationSession; settled: Promise<void> };
+  /** Set only immediately before locally retiring a healthy owner after verified adoption. */
+  renewalSuccessorGeneration?: number;
   idleWaiters: Set<() => void>;
   diagnosticRetirement: Set<(reason: PostTimeoutStatus) => void>;
   detach: () => void;
@@ -306,6 +308,8 @@ interface LiveSlot {
 /** Bounds the complete information read, including connection and queue waiting. */
 export interface InformationRefreshOptions {
   signal?: AbortSignal;
+  /** Wait within the read deadline for an already running renewal before acquiring a lease. */
+  waitForRenewal?: boolean;
   priority?: "late-check" | "report" | "routine";
   notBeforeMonotonicMs?: number;
   /** Positive integer milliseconds, at most 60 seconds; defaults to 15 seconds. */
@@ -362,6 +366,7 @@ interface RecordingAttemptBudget {
 }
 
 export class RtcCommandRouter {
+  private readonly informationOwners = new WeakMap<InformationRefreshResult, StationSession>();
   private readonly informationReceiptTimes = new WeakMap<object, number>();
   private readonly wireReceiptTimes = new WeakMap<Buffer, number>();
   private readonly recordingReads = new Map<string, AbortController>();
@@ -1224,6 +1229,21 @@ export class RtcCommandRouter {
       result.currentAtArrival === true &&
       result.sessionGeneration === st.generation &&
       this.storageCandidateOwnerMatches(stationSn, st)
+    );
+  }
+
+  /** A healthy local adoption superseded this exact result, and its successor remains the current owner. */
+  informationResultSupersededByRenewal(stationSn: string, result: InformationRefreshResult): boolean {
+    const owner = this.informationOwners.get(result);
+    const current = this.sessions.get(stationSn);
+    return (
+      owner?.renewalSuccessorGeneration !== undefined &&
+      owner.renewalSuccessorGeneration === current?.generation &&
+      owner.connectionRecord.epoch === this.epoch &&
+      owner.session.closeOrigin === "local" &&
+      current?.session.isConnected === true &&
+      result.currentAtArrival === true &&
+      this.storageCandidateOwnerMatches(stationSn, current)
     );
   }
 
@@ -2156,6 +2176,9 @@ export class RtcCommandRouter {
     let operationError: unknown;
     let lease: Awaited<ReturnType<RtcCommandRouter["sessionFor"]>> | undefined;
     try {
+      const renewal = opts.waitForRenewal ? this.sessions.get(stationSn)?.replacement : undefined;
+      if (renewal) await untilAborted(renewal.settled, signal);
+      signal.throwIfAborted();
       const acquiring = this.sessionFor(stationSn, { signal });
       observedSession = this.sessions.get(stationSn);
       lease = await acquiring;
@@ -2184,10 +2207,23 @@ export class RtcCommandRouter {
         },
       });
       const result = await untilAborted(run, signal);
+      this.informationOwners.set(result, st);
       completed = true;
       return result;
     } catch (error) {
       failure = informationReadFailure(error);
+      if (
+        error instanceof Error &&
+        failure === "session_closed" &&
+        !signal.aborted &&
+        epoch === this.epoch &&
+        observedSession?.renewalSuccessorGeneration !== undefined &&
+        observedSession.renewalSuccessorGeneration === this.sessions.get(stationSn)?.generation &&
+        observedSession.session.closeOrigin === "local" &&
+        this.sessions.get(stationSn)?.session.isConnected === true &&
+        this.storageCandidateOwnerMatches(stationSn, this.sessions.get(stationSn)!)
+      )
+        markRenewalInformationRead(error);
       operationError = error;
       throw error;
     } finally {
@@ -2917,7 +2953,11 @@ export class RtcCommandRouter {
     original.refreshRetryUserId = undefined;
     const epoch = this.epoch;
     const started = Date.now();
-    const replacement: NonNullable<StationSession["replacement"]> = { controller: new AbortController() };
+    const settled = Promise.withResolvers<void>();
+    const replacement: NonNullable<StationSession["replacement"]> = {
+      controller: new AbortController(),
+      settled: settled.promise,
+    };
     original.replacement = replacement;
     const signal = replacement.controller.signal;
     const timeout = setTimeout(
@@ -2973,6 +3013,8 @@ export class RtcCommandRouter {
       outcome = "success";
       this.armRefresh(sn, candidate);
       this.touch(sn, candidate);
+      if (original.session.isConnected && !original.informationTainted && original.lastSessionError === undefined)
+        original.renewalSuccessorGeneration = candidate.generation;
       this.drop(sn, original);
     } catch (error) {
       failure = renewalFailure(error);
@@ -3076,6 +3118,7 @@ export class RtcCommandRouter {
           original.refreshBusyCooldownAtMs = evidence.finishedAtMs + original.refreshBusyCooldownMs;
         }
       }
+      settled.resolve();
     }
   }
 
