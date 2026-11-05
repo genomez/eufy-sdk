@@ -74,6 +74,19 @@ describe("strict Chicago recording times", () => {
 });
 
 describe("internal normalization and privacy", () => {
+  it("retains private shared-path fingerprints for persistent ambiguity checks", () => {
+    const entries = normalize([row(), row({ record_id: 2 })]).rows;
+    expect(entries).toHaveLength(2);
+    expect(entries.every((entry) => entry.coverSelector === null)).toBe(true);
+    expect(entries[0]!.coverPathKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(entries[0]!.coverPathKey).toBe(entries[1]!.coverPathKey);
+    expect(normalize([row({ record_id: 3 })]).rows[0]!.coverPathKey).toBe(entries[0]!.coverPathKey);
+    expect(projectRecordingRow(entries[0]!)).not.toHaveProperty("coverPathKey");
+    const other = normalizeRecordingRows([row()], { ...scope, accountNamespace: "synthetic-other-namespace" });
+    expect(other.status).toBe("ok");
+    if (other.status === "ok") expect(other.rows[0]!.coverPathKey).not.toBe(entries[0]!.coverPathKey);
+    expect(normalize([row({ thumb_path: "../invalid" })]).rows[0]!.coverPathKey).toBeNull();
+  });
   it("detects a forced truncated-ID collision by retaining the distinct full hashes", () => {
     collision.enabled = true;
     const result = normalize([row(), row({ record_id: 2 })]);

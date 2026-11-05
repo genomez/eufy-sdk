@@ -93,6 +93,8 @@ export interface InternalRecordingRow {
   eventType: RecordingKind;
   detectType: RecordingKind;
   firstObservedAtMs: number;
+  /** Private account-and-station-bound path fingerprint, retained even when a shared path has no selector. */
+  coverPathKey: string | null;
   coverSelector: InternalCoverSelector | null;
 }
 
@@ -283,6 +285,9 @@ export function normalizeRecordingRows(
       eventType: kind(row.event_type, "Event"),
       detectType: kind(row.detect_type, "Detection"),
       firstObservedAtMs: nowMs,
+      coverPathKey: selector
+        ? mac(identityKey, "recordings.path.v1", scope.accountNamespace, scope.stationSn, selector.thumbPath)
+        : null,
       coverSelector: selector ? { ...selector, selectorMac: selectorMac(keyed, selector) } : null,
     };
     const prior = result.get(eventId);

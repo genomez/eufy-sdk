@@ -1,5 +1,21 @@
 # Recording reads: offline validation receipt
 
+## Persistent path fingerprint follow-up (2026-11-05)
+
+Shared-path suppression now retains a private, account-and-station-bound
+`coverPathKey` HMAC even when the selector is null. This lets a persistent store
+reject reuse in later windows without retaining additional raw paths. The public
+projection is unchanged. A new synthetic normalization test covers shared paths,
+later-window stability, account isolation, invalid paths and projection privacy.
+
+On Node `v24.15.0` / npm `11.12.1`, `npm run typecheck` and `npm run build` passed.
+`npm test -- src/transport/rtc/__tests__/recordings.spec.ts src/transport/rtc/__tests__/recordings-arbitration.spec.ts src/client/__tests__/rtc-last-seen.spec.ts`
+passed 113 tests, with zero failures or skips. `npm test` passed 6621 tests,
+with zero failures and 8 existing skips across 303 files. All five existing
+`scripts/ci/guard-*.sh` ownership/decorrelation/consumer/doc-reference/line guards
+passed using Git Bash. Changed-file Prettier and `git diff --check` passed.
+Fixtures remain synthetic; no live acceptance is claimed.
+
 Date: 2026-11-05. Branch: `recordings-browse-20261105`, based on `2164d4e5b7adc55aa7029286f4c0e2fe5a2e01c8`. Run from the SDK root with Node `v24.15.0`, npm `11.12.1`, locally installed Vitest `5.0.1`, and synthetic v1 fixtures generated in `recordings-fixture.ts`. No dependencies were installed and no remote endpoint, device, session file, secret or real capture was used. Build output is the existing `dist/` directory.
 
 The commit containing this receipt has the tested source state. Only this receipt was added after the final full-suite run.
