@@ -384,8 +384,8 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
     this.wireSendFailed = false;
     try {
       this.framer.sendFrame(portalPacket);
-    } catch (e) {
-      this.logger.warn(`[rtc] command send failed: ${e instanceof Error ? e.message : String(e)}`);
+    } catch {
+      this.logger.warn("[rtc] command send failed");
       return false;
     }
     return !this.wireSendFailed;

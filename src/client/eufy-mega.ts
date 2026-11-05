@@ -30,6 +30,14 @@ import { type P2PSession, type P2PFrame } from "../transport/p2p/p2p-session.js"
 import { P2PCommandRouter } from "../transport/p2p/command-router.js";
 import { consumeRetiredInformationRead } from "../transport/rtc/retired-information-read.js";
 import { RtcCommandRouter } from "../transport/rtc/command-router.js";
+import {
+  recordingAccountNamespace,
+  type RecordingReadScope,
+  type RecordingReadOptions,
+  type InternalCoverSelector,
+  type CatalogReadResult,
+  type CoverReadResult,
+} from "../transport/rtc/recordings.js";
 import { commandOutcome, RtcCommandRejection } from "../transport/rtc/command-diagnostics.js";
 import { RtcLateEffectReconciler } from "./rtc-late-effect.js";
 import { RtcLateContraryObserver, type RtcReportIdentity } from "./rtc-late-contrary.js";
@@ -563,6 +571,7 @@ export class EufyMega extends EventEmitter {
     }
     this.registry = new DeviceRegistry({
       mega: this.mega,
+      accountIdentity: () => this.mega.auth?.userId,
       onRoster: () => {
         this.reconcileStationContexts();
         this.cameraHealthIngress?.roster(this.registry.list());
@@ -606,6 +615,9 @@ export class EufyMega extends EventEmitter {
       onFrame: (stationSn, f) => this.onP2PFrame(stationSn, f),
     });
     this.rtc = new RtcCommandRouter({
+      recordings: opts.rtc?.recordings,
+      recordingsAllowed: (scope) => this.recordingsAllowed(scope),
+      recordingsTopology: () => this.getInventoryScope(),
       identity: () => this.mega.rtcIdentity(),
       shard: () => this.mega.rtcShard,
       country: opts.countryCode,
@@ -637,6 +649,9 @@ export class EufyMega extends EventEmitter {
       ffmpegPath: opts.ffmpegPath,
       ffmpegLogLevel: opts.ffmpegLogLevel,
       onError: (e) => this.reportError(e, "rtc_session"),
+    });
+    this.commandIntents.subscribe((_previous, current) => {
+      if (current) this.rtc.preemptRecordingReads(current.station);
     });
     this.mqtt = new MqttCommandRouter({
       mega: this.mega,
@@ -869,6 +884,7 @@ export class EufyMega extends EventEmitter {
     sn: string | undefined,
     params: Record<number, string>,
     rssiSource: "hub_report" | "realtime_overlay" = "realtime_overlay",
+    receivedAtMs?: number,
   ): void {
     if (!sn) return;
     this.cameraHealthIngress.recordRssiSuppression(sn, params, rssiSource);
@@ -876,7 +892,8 @@ export class EufyMega extends EventEmitter {
     const reported = Object.keys(params).map(Number);
     const widens = known ? reported.some((id) => !known.has(id)) : false;
     if (widens && known) this.boundParamIds.set(sn, new Set([...known, ...reported]));
-    this.registry.applyRealtimeParams(sn, params);
+    if (receivedAtMs === undefined) this.registry.applyRealtimeParams(sn, params);
+    else this.registry.applyRealtimeParams(sn, params, receivedAtMs);
     const device = this.liveDeviceToAnnounce(sn);
     if (device) {
       const realtime = this.realtimeParamIds.get(device) ?? new Map<number, number>();
@@ -895,7 +912,7 @@ export class EufyMega extends EventEmitter {
     if (rtcReportParameters(stationSn, frame, this.registry).size) this.scheduleReportRefresh(stationSn);
     for (const [sn, params] of rtcStateParameters(stationSn, frame, this.registry)) {
       this.cameraHealthIngress.params(sn, params, "hub_report");
-      this.applyRealtimeState(sn, params, "hub_report");
+      this.applyRealtimeState(sn, params, "hub_report", this.rtc.informationFrameReceivedAtMs(frame));
       this.lateEffects.observe(sn, params);
       if (identity) this.lateContrary.observe(sn, params, identity);
       const device = this.liveDevices.get(sn)?.deref();
@@ -1043,6 +1060,86 @@ export class EufyMega extends EventEmitter {
     }
   }
 
+  /** Cache-only opaque namespace; no identity is returned when no authenticated account is installed. */
+  getRecordingAccountNamespace(identityKey: Uint8Array): string | null {
+    if (identityKey?.length !== 32) return null;
+    const identity = this.mega.rtcIdentity();
+    const account = identity?.accountUserId ?? identity?.userId;
+    return account ? recordingAccountNamespace(identityKey, account) : null;
+  }
+
+  /** Production browse read on the existing healthy idle owner, with no discovery or acquisition. */
+  async readRecordingCatalog(scope: RecordingReadScope, opts: RecordingReadOptions = {}): Promise<CatalogReadResult> {
+    try {
+      if (!this.opts.rtc?.recordings?.enabled) return { status: "unavailable", reason: "disabled" };
+      if (scope.identityKey?.length !== 32) return { status: "unavailable", reason: "store_unavailable" };
+      if (!this.recordingsAllowed(scope)) return { status: "deferred", reason: "scope_invalid" };
+      const generation = this.realtimeGeneration!;
+      const signal = opts.signal ? AbortSignal.any([opts.signal, generation.abort.signal]) : generation.abort.signal;
+      return await this.rtc.readRecordingCatalog(scope, { ...opts, signal });
+    } catch {
+      return { status: "unavailable", reason: "scope_invalid" };
+    }
+  }
+
+  /** Fetch exactly one internally sealed observed selector, without a table or live-image fallback. */
+  async readRecordingCover(
+    scope: RecordingReadScope,
+    selector: InternalCoverSelector,
+    opts: RecordingReadOptions = {},
+  ): Promise<CoverReadResult> {
+    try {
+      if (!this.opts.rtc?.recordings?.enabled) return { status: "unavailable", reason: "disabled" };
+      if (scope.identityKey?.length !== 32) return { status: "unavailable", reason: "store_unavailable" };
+      if (!this.recordingsAllowed(scope)) return { status: "deferred", reason: "scope_invalid" };
+      const generation = this.realtimeGeneration!;
+      const signal = opts.signal ? AbortSignal.any([opts.signal, generation.abort.signal]) : generation.abort.signal;
+      return await this.rtc.readRecordingCover(scope, selector, { ...opts, signal });
+    } catch {
+      return { status: "unavailable", reason: "scope_invalid" };
+    }
+  }
+
+  /** Lifecycle, correction and exact enrolled topology gate, evaluated without network activity. */
+  private recordingsAllowed(scope: RecordingReadScope): boolean {
+    const policy = this.opts.rtc?.recordings;
+    if (
+      !policy?.enabled ||
+      !this.automaticInformationAllowed() ||
+      this.stateRefreshSweep ||
+      this.reportRefreshes.has(scope.stationSn) ||
+      this.lateEffects.has(scope.stationSn) ||
+      this.commandRefreshes.size ||
+      this.stateTransitions.size ||
+      this.propertyPreparations.size ||
+      this.registry.conflicts().length ||
+      this.getRecordingAccountNamespace(scope.identityKey) !== scope.accountNamespace
+    )
+      return false;
+    const allowed = new Set(policy.allowedCameras);
+    if (
+      scope.stationSn !== policy.stationBinding ||
+      allowed.size !== 5 ||
+      scope.cameraSns.size !== allowed.size ||
+      [...scope.cameraSns].some((sn) => !allowed.has(sn))
+    )
+      return false;
+    for (const sn of allowed) {
+      const device = this.registry.list().find((entry) => entry.sn === sn);
+      const channel = (device?.raw as { device_channel?: unknown } | undefined)?.device_channel;
+      if (
+        !device ||
+        device.stationSn !== scope.stationSn ||
+        !/^T84(?:2|A)/i.test(device.model ?? "") ||
+        device.name?.trim().toLowerCase() === "j safe" ||
+        typeof channel !== "number" ||
+        this.registry.serialForFrame(scope.stationSn, channel) !== sn
+      )
+        return false;
+    }
+    return true;
+  }
+
   /** Background reads share the current realtime generation's authentication and failure holds. */
   private automaticInformationAllowed(): boolean {
     const generation = this.realtimeGeneration;
@@ -1072,6 +1169,7 @@ export class EufyMega extends EventEmitter {
 
   /** Debounce reports; an active late-effect intent permits one bounded deferral onto the station queue. */
   private scheduleReportRefresh(stationSn: string, deferred = false): void {
+    this.rtc.preemptRecordingReads(stationSn);
     const generation = this.realtimeGeneration;
     if (
       this.opts.autoRealtime === false ||
@@ -1168,9 +1266,20 @@ export class EufyMega extends EventEmitter {
         throw new Error("State refresh is unavailable for this device");
       phase = "transport";
       const result = await this.rtc.refreshInformation(station.sn, opts);
-      if (epoch !== this.realtimeEpoch) throw new Error("State refresh was interrupted");
+      if (
+        epoch !== this.realtimeEpoch ||
+        opts.signal?.aborted ||
+        !this.rtc.informationResultCurrent(station.sn, result)
+      )
+        throw new Error("State refresh was interrupted");
       phase = "processing";
       const updates = rtcStateParameters(station.sn, result.frame, this.registry);
+      const receivedAtMs = result.informationReceivedAtMs;
+      if (receivedAtMs !== undefined)
+        for (const [deviceSn, params] of updates) {
+          if (Object.keys(params).length && this.registry.markSeen(deviceSn, receivedAtMs))
+            this.emit("deviceState", this.deviceState(deviceSn));
+        }
       completed = true;
       return {
         notificationCorrelation: result.notificationCorrelation,
@@ -2554,6 +2663,7 @@ export class EufyMega extends EventEmitter {
     generation: RealtimeGeneration,
     trigger: StateRefreshTrigger,
   ): Promise<StateRefreshResult> {
+    this.rtc.preemptRecordingReads();
     const { epoch, abort } = generation;
     if (this.opts.autoRealtime === false || epoch !== this.realtimeEpoch || abort.signal.aborted)
       return Promise.resolve({ refreshed: true, retiredSession: false });

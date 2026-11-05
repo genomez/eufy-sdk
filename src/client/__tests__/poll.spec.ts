@@ -1354,6 +1354,9 @@ describe("generation-owned RTC state refresh", () => {
       rtc.deps.shard = () => "us-pr";
       rtc.deps.createSession = () => session;
       const exchange = vi.spyOn(rtc, "readInformation").mockResolvedValue({
+        currentAtArrival: true,
+        sessionGeneration: 1,
+        informationReceivedAtMs: Date.now(),
         notificationCorrelation: "temporal-only",
         frame: {
           commandId: 1103,
@@ -2100,6 +2103,7 @@ describe("generation-owned RTC state refresh", () => {
   it("distinguishes successful transport from client processing failure and keeps bounded detached evidence", async () => {
     const { eufy, refresh } = fixture({ pollMs: 0 });
     refresh.mockRestore();
+    vi.spyOn((eufy as any).rtc, "informationResultCurrent").mockReturnValue(true);
     const exchange = vi.spyOn((eufy as any).rtc, "refreshInformation").mockResolvedValue({
       notificationCorrelation: "temporal-only",
       get frame() {

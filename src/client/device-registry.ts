@@ -162,6 +162,8 @@ function deviceClassOf(codec: Codec, realtime: RealtimeKind): DeviceClass {
 
 export interface DeviceRegistryDeps {
   mega: MegaHttpClient;
+  /** Current in-memory account identity; changes discard local receipt overlays. */
+  accountIdentity?: () => string | undefined;
   /** Synchronous notification after a refreshed roster and its topology caches are installed. */
   onRoster?: () => void;
   /** Actual cloud parameter receipt, independent of vendor freshness timestamps. */
@@ -183,6 +185,9 @@ export interface DeviceRegistryDeps {
 const LIST_REUSE_MS = 5_000;
 
 export class DeviceRegistry {
+  private readonly localReceiptMs = new Map<string, number>();
+  private receiptAccount?: string;
+  private readonly accountIdentity?: DeviceRegistryDeps["accountIdentity"];
   private readonly mega: MegaHttpClient;
   private readonly onError: (e: unknown) => void;
   private readonly logger: Logger;
@@ -242,6 +247,7 @@ export class DeviceRegistry {
   private pollSnapshot?: { devices: Map<string, PolledState>; complete: boolean };
 
   constructor(deps: DeviceRegistryDeps) {
+    this.accountIdentity = deps.accountIdentity;
     this.mega = deps.mega;
     this.onError = deps.onError;
     this.logger = deps.logger ?? noopLogger;
@@ -251,6 +257,7 @@ export class DeviceRegistry {
 
   /** The current device cache (last {@link getDevices} result). */
   list(): EufyDevice[] {
+    this.syncReceiptAccount();
     return this.devices;
   }
 
@@ -277,6 +284,7 @@ export class DeviceRegistry {
    * who has to know. It rejects; the devices it already knew stay known.
    */
   async getDevices(): Promise<EufyDevice[]> {
+    this.syncReceiptAccount();
     // get_devs_list is quirkily house-scoped: the bare {} call returns a set
     // that the per-house calls may NOT, and vice-versa. Query {} AND every
     // house_id, then merge + dedupe by serial.
@@ -347,7 +355,12 @@ export class DeviceRegistry {
     if (partial) for (const sn of this.inventoryConflicts) conflicts.add(sn);
     this.inventoryConflicts = conflicts;
     if (partial) for (const prev of this.devices) if (!seen.has(prev.sn)) seen.set(prev.sn, prev);
+    this.syncReceiptAccount();
     this.devices = [...seen.values()];
+    for (const device of this.devices)
+      device.lastSeenMs =
+        Math.max(lastSeenMsOf(device.paramUpdatedAt ?? {}) ?? 0, this.localReceiptMs.get(device.sn) ?? 0) || undefined;
+    if (!partial) for (const sn of this.localReceiptMs.keys()) if (!seen.has(sn)) this.localReceiptMs.delete(sn);
     // Device list changed → drop stale (station,channel)→caps and serial→caps entries. Params feed
     // capability resolution, so a refresh can legitimately change a device's capability set.
     this.frameCapsCache.clear();
@@ -565,17 +578,40 @@ export class DeviceRegistry {
    * What lands here outranks the cloud half in {@link record}, and stays there until
    * {@link retireRealtimeParams} says the cloud has moved that id itself.
    */
-  applyRealtimeParams(sn: string, params: Record<number, string>): void {
+  applyRealtimeParams(sn: string, params: Record<number, string>, receivedAtMs = Date.now()): void {
     if (!Object.keys(params).length) return;
     this.dpParams.set(sn, { ...this.dpParams.get(sn), ...params });
-    const dev = this.devices.find((d) => d.sn === sn);
-    if (dev) dev.lastSeenMs = Date.now();
+    this.markSeen(sn, receivedAtMs);
     this.deviceCapsCache.delete(sn);
     const waiters = this.stateWaiters.get(sn);
     if (waiters) {
       this.stateWaiters.delete(sn);
       for (const resolve of waiters) resolve();
     }
+  }
+
+  /** Account replacement removes local receipt provenance, independently of RTC owner renewal. */
+  private syncReceiptAccount(): void {
+    if (!this.accountIdentity) return;
+    const account = this.accountIdentity();
+    if (account !== this.receiptAccount) {
+      this.localReceiptMs.clear();
+      for (const device of this.devices) device.lastSeenMs = lastSeenMsOf(device.paramUpdatedAt ?? {});
+      this.receiptAccount = account;
+    }
+  }
+
+  /** Receipt high-water mark only; does not change parameters, vendor timestamps or state waiters. */
+  markSeen(sn: string, receivedAtMs: number): boolean {
+    this.syncReceiptAccount();
+    if (!Number.isSafeInteger(receivedAtMs) || receivedAtMs <= 0) return false;
+    const device = this.devices.find((candidate) => candidate.sn === sn);
+    if (!device || this.inventoryConflicts.has(sn) || this.inventoryConflicts.has(stationOf(device))) return false;
+    const receipt = Math.max(this.localReceiptMs.get(sn) ?? 0, receivedAtMs);
+    this.localReceiptMs.set(sn, receipt);
+    if (receipt <= (device.lastSeenMs ?? 0)) return false;
+    device.lastSeenMs = receipt;
+    return true;
   }
 
   /**

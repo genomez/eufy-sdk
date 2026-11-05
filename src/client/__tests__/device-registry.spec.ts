@@ -29,6 +29,105 @@ function rawDevice(sn: string, extra: Record<string, unknown> = {}) {
 }
 
 describe("DeviceRegistry", () => {
+  describe("local receipt high-water overlay", () => {
+    function receipts() {
+      let devices = [rawDevice("synthetic-a"), rawDevice("synthetic-b")];
+      let partial = false;
+      let account = "synthetic-account";
+      const mega = fakeMega({
+        post: async (_s, path) => {
+          if (path.endsWith("get_house_list")) {
+            if (partial) throw new Error("synthetic partial roster");
+            return { house_infos: [] };
+          }
+          return { devices };
+        },
+      });
+      const registry = new DeviceRegistry({ mega, accountIdentity: () => account, onError: () => {} });
+      return {
+        registry,
+        roster: (next: typeof devices) => {
+          devices = next;
+        },
+        partial: () => {
+          partial = true;
+        },
+        account: () => {
+          account = "synthetic-other";
+        },
+      };
+    }
+    it("validates receipt time and known identity without altering params or vendor timestamps", async () => {
+      const f = receipts();
+      await f.registry.getDevices();
+      for (const value of [0, -1, NaN, Infinity, 1.5]) expect(f.registry.markSeen("synthetic-a", value)).toBe(false);
+      expect(f.registry.markSeen("unknown", 1000)).toBe(false);
+      expect(f.registry.markSeen("synthetic-a", 1000)).toBe(true);
+      expect(f.registry.markSeen("synthetic-a", 999)).toBe(false);
+      expect(f.registry.markSeen("synthetic-a", 1000)).toBe(false);
+      expect(f.registry.list()[0]).toMatchObject({ lastSeenMs: 1000, params: { 1101: "88" }, paramUpdatedAt: {} });
+      expect(f.registry.hasRealtimeState("synthetic-a")).toBe(false);
+      expect(f.registry.list()[1]!.lastSeenMs).toBeUndefined();
+    });
+    it("keeps local receipts across stale roster rebuilds and accepts newer valid cloud freshness", async () => {
+      const f = receipts();
+      await f.registry.getDevices();
+      f.registry.markSeen("synthetic-a", 5000);
+      f.roster([rawDevice("synthetic-a", { params: [{ param_type: 1101, param_value: "88", update_time: 1 }] })]);
+      expect((await f.registry.getDevices())[0]!.lastSeenMs).toBe(5000);
+      f.roster([rawDevice("synthetic-a", { params: [{ param_type: 1101, param_value: "88", update_time: 8 }] })]);
+      expect((await f.registry.getDevices())[0]!.lastSeenMs).toBe(8000);
+      expect(f.registry.markSeen("synthetic-a", 6000)).toBe(false);
+    });
+    it("retains receipts through partial refreshes", async () => {
+      const f = receipts();
+      await f.registry.getDevices();
+      f.registry.markSeen("synthetic-b", 5000);
+      f.roster([rawDevice("synthetic-a")]);
+      f.partial();
+      expect((await f.registry.getDevices()).find((d) => d.sn === "synthetic-b")!.lastSeenMs).toBe(5000);
+    });
+    it("retains a receipt arriving between house queries during a roster rebuild", async () => {
+      let refreshing = false;
+      const mega = fakeMega({
+        post: async (_s, path, body) => {
+          if (path.endsWith("get_house_list")) return { house_infos: [{ house_id: "synthetic-house" }] };
+          if ((body as { house_id?: string }).house_id) {
+            if (refreshing) registry.markSeen("synthetic-a", 9000);
+            return { devices: [] };
+          }
+          return { devices: [rawDevice("synthetic-a")] };
+        },
+      });
+      const registry = new DeviceRegistry({ mega, onError: () => {} });
+      await registry.getDevices();
+      refreshing = true;
+      expect((await registry.getDevices())[0]!.lastSeenMs).toBe(9000);
+    });
+    it("prunes confirmed removals, so rediscovery is not fresh contact", async () => {
+      const f = receipts();
+      await f.registry.getDevices();
+      f.registry.markSeen("synthetic-b", 5000);
+      f.roster([rawDevice("synthetic-a")]);
+      await f.registry.getDevices();
+      f.roster([rawDevice("synthetic-a"), rawDevice("synthetic-b")]);
+      expect((await f.registry.getDevices())[1]!.lastSeenMs).toBeUndefined();
+    });
+    it("prunes an account replacement without persisting receipt times", async () => {
+      const f = receipts();
+      await f.registry.getDevices();
+      f.registry.markSeen("synthetic-a", 5000);
+      f.account();
+      expect((await f.registry.getDevices())[0]!.lastSeenMs).toBeUndefined();
+    });
+    it("uses the same nonregressing receipt helper for realtime params", async () => {
+      const f = receipts();
+      await f.registry.getDevices();
+      f.registry.applyRealtimeParams("synthetic-a", { 1400: "0" }, 5000);
+      f.registry.applyRealtimeParams("synthetic-a", { 1400: "0" }, 4000);
+      expect((await f.registry.getDevices())[0]!.lastSeenMs).toBe(5000);
+    });
+  });
   describe("getDevices — house-scoped merge/dedupe", () => {
     it("queries {} + every house_id, unions and dedupes by serial (last write wins)", async () => {
       const errors: unknown[] = [];

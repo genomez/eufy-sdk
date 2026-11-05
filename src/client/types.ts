@@ -118,6 +118,8 @@ export interface EufyMegaOptions extends MegaClientConfig {
    * completes DTLS only through TURN. See `transport/rtc/command-router.ts`.
    */
   rtc?: {
+    /** Optional internal recording enrollment; disabled when absent. */
+    recordings?: import("../transport/rtc/recordings.js").RecordingPolicy;
     icePolicy?: "relay" | "all";
     ackTimeoutMs?: number;
     /** ACK acceptance for passive commands, independently of information-read timing; defaults to 12 seconds. */

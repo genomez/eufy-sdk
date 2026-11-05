@@ -147,7 +147,7 @@ function facade() {
   });
   const internals = eufy as unknown as {
     registry: DeviceRegistry;
-    rtc: Pick<RtcCommandRouter, "refreshInformation"> & {
+    rtc: Pick<RtcCommandRouter, "refreshInformation" | "informationResultCurrent"> & {
       deps: { onFrame: (sn: string, frame: PortalResponse) => void };
     };
     liveDevices: Map<string, WeakRef<Device>>;
@@ -201,6 +201,7 @@ describe("RTC state through the facade", () => {
     const { eufy, internals } = facade();
     const report = frame([entry({ channel: 0 })]);
     const apply = vi.spyOn(internals.registry, "applyRealtimeParams");
+    vi.spyOn(internals.rtc, "informationResultCurrent").mockReturnValue(true);
     const refresh = vi.spyOn(internals.rtc, "refreshInformation").mockImplementation(async () => {
       internals.rtc.deps.onFrame(HUB, report);
       return { frame: report, notificationCorrelation: "temporal-only" };
