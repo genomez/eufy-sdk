@@ -339,6 +339,7 @@ export class MegaHttpClient {
   private estimatedDomain = "";
   private bootstrapDomain?: string;
   private sessionKey?: SessionEntry;
+  private mainKeyPersistencePending = false;
   /** Per-host ECDH session keys for non-mega gateways (e.g. eufylife) keyed by host. */
   private readonly sessionKeys = new Map<string, SessionEntry>();
   /**
@@ -662,7 +663,10 @@ export class MegaHttpClient {
     }
     const entry = finishKeyExchange(prep, env.data.server_public_key);
     if (isEufylife) this.sessionKeys.set(targetHost!, entry);
-    else this.sessionKey = entry;
+    else {
+      this.sessionKey = entry;
+      if (this.auth_ && !this.loggingIn && !this.pending2fa) this.mainKeyPersistencePending = true;
+    }
     return entry;
   }
 
@@ -716,7 +720,10 @@ export class MegaHttpClient {
       const res = await this.httpPost(`https://${host}${path}`, encBody, headers);
       const env = res.data as ApiEnvelope<unknown>;
       if (res.status === 200 && env?.code === 0) {
-        if (authed) this.noteSessionWorking();
+        if (authed) {
+          this.noteSessionWorking();
+          this.persistPendingMainKey(entry, sentToken);
+        }
         this.contentTypeByHost.set(host, contentType); // remember what worked
         if (typeof env.data === "string" && env.data.length > 0) {
           const pt = decryptBody(env.data, entry.shareKey).toString("utf-8");
@@ -768,7 +775,6 @@ export class MegaHttpClient {
         this.clearSession();
         throw new SessionExpiredError(`${path} failed (key re-exchange rejected): ${last?.msg}`);
       }
-      this.persist(); // remember the fresh key-ident
       return this.postSigned<T>(host, path, body, authed, { ...retry, identity: true }, headerOverrides);
     }
     // Two ways to conclude the TOKEN is finished rather than this request refused: a fresh key-ident that
@@ -1376,6 +1382,26 @@ export class MegaHttpClient {
     return { status: LoginStatus.Ok, session: { userId, authToken, geoKey: this.auth_.geoKey, raw: res } };
   }
 
+  /** Cache-write and diagnostic failures preserve the accepted session; cache writes retry on a later successful call. */
+  private persistPendingMainKey(acceptedKey: SessionEntry, acceptedToken: string | undefined): void {
+    if (
+      !this.mainKeyPersistencePending ||
+      !this.auth_ ||
+      this.loggingIn ||
+      this.pending2fa ||
+      acceptedKey !== this.sessionKey ||
+      acceptedToken !== this.auth_.authToken
+    )
+      return;
+    try {
+      this.persist();
+    } catch {
+      try {
+        this.logger.warn("[mega] active session key cache save failed; retrying after a later successful request");
+      } catch {}
+    }
+  }
+
   /** Save the current token + session key for reuse across runs. */
   private persist(): void {
     if (!this.auth_ || !this.sessionKey) return;
@@ -1393,12 +1419,14 @@ export class MegaHttpClient {
       tokenExpiresAt: this.tokenExpiresAt,
       savedAt: Date.now(),
     });
+    this.mainKeyPersistencePending = false;
   }
 
   /** Forget the persisted session (e.g. after the token is rejected). */
   clearSession(): void {
     this.auth_ = undefined;
     this.sessionKey = undefined;
+    this.mainKeyPersistencePending = false;
     this.pendingCaptchaId = undefined;
     this.pending2fa = false;
     this.store.clear();
