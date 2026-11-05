@@ -17,12 +17,14 @@ export type CaptureOutcome =
   | "preempted"
   | "owner_changed"
   | "timeout";
+export type PlaybackSelectionOutcome = "selected" | "no_rows" | "no_camera_rows" | "time_invalid" | "end_not_past";
 export interface PlaybackReceipt extends PlaybackIngressEvidence {
   admissionGate: number;
+  selectionOutcome: PlaybackSelectionOutcome;
   captureOutcome: CaptureOutcome;
   cessationOutcome: "not_started" | "ceased" | "media_continues" | "cessation_unknown";
   releaseOutcome: "not_started" | "release_confirmed" | "stop_unconfirmed" | "release_unknown";
-  healthOutcome: "degraded";
+  healthOutcome: "clean" | "degraded";
   accepted: false;
   boundedMediaObserved: boolean;
   timeBasis: "owner_accepted_America_Chicago";
@@ -83,28 +85,43 @@ export function chicagoInstant(value: unknown): number | undefined {
   return matches.length === 1 ? matches[0] : undefined;
 }
 
-/** Largest eligible numeric selector is policy only; there is no fallback after time validation. */
+/**
+ * Descending record selectors define recency; clips must have unique times and end at least 60 seconds ago.
+ * Malformed rows and invalid or duplicate selectors refuse the entire table as time_invalid.
+ * A time-valid but recent clip takes precedence over invalid times when no clip is selectable.
+ */
 export function selectPlayback(
   rows: unknown[],
   cameras: ReadonlySet<string>,
   excluded: ReadonlySet<string>,
   now = Date.now(),
-): { record: number; begin: number } | undefined {
+):
+  | { selectionOutcome: "selected"; record: number; begin: number }
+  | { selectionOutcome: Exclude<PlaybackSelectionOutcome, "selected"> } {
+  if (!rows.length) return { selectionOutcome: "no_rows" };
   const seen = new Set<number>();
   const eligible: Record<string, unknown>[] = [];
   for (const row of rows) {
-    if (!row || typeof row !== "object" || Array.isArray(row)) return;
+    if (!row || typeof row !== "object" || Array.isArray(row)) return { selectionOutcome: "time_invalid" };
     const r = row as Record<string, unknown>;
-    if (!Number.isSafeInteger(r.record_id) || (r.record_id as number) <= 0 || seen.has(r.record_id as number)) return;
+    if (!Number.isSafeInteger(r.record_id) || (r.record_id as number) <= 0 || seen.has(r.record_id as number))
+      return { selectionOutcome: "time_invalid" };
     seen.add(r.record_id as number);
     if (typeof r.device_sn === "string" && cameras.has(r.device_sn) && !excluded.has(r.device_sn)) eligible.push(r);
   }
-  const row = eligible.sort((a, b) => (b.record_id as number) - (a.record_id as number))[0];
-  if (!row) return;
-  const begin = chicagoInstant(row.start_time),
-    end = chicagoInstant(row.end_time);
-  if (begin === undefined || end === undefined || end < begin || end * 1000 > now) return;
-  return { record: row.record_id as number, begin };
+  if (!eligible.length) return { selectionOutcome: "no_camera_rows" };
+  let selectionOutcome: PlaybackSelectionOutcome = "time_invalid";
+  for (const row of eligible.sort((a, b) => (b.record_id as number) - (a.record_id as number))) {
+    const begin = chicagoInstant(row.start_time),
+      end = chicagoInstant(row.end_time);
+    if (begin === undefined || end === undefined || end < begin) continue;
+    if (end * 1000 > now - 60000) {
+      selectionOutcome = "end_not_past";
+      continue;
+    }
+    return { selectionOutcome: "selected", record: row.record_id as number, begin };
+  }
+  return { selectionOutcome };
 }
 
 /** Both adjacent selectors remain reserved until owner retirement, including refused invocations. */
@@ -203,6 +220,7 @@ export class EventPlaybackCandidate {
     });
     this.receipt = {
       admissionGate: 0,
+      selectionOutcome: "no_rows",
       ...this.ingress.evidence,
       captureOutcome: "not_admitted",
       cessationOutcome: "not_started",
@@ -314,6 +332,7 @@ export class EventPlaybackCandidate {
           ) {
             this.persistLatch(false);
             this.receipt.latchRetained = false;
+            this.receipt.latchCleared = true;
             resolve();
             return;
           }
@@ -398,6 +417,21 @@ export class EventPlaybackCandidate {
               : "cessation_unknown";
       }
       this.receipt.ownerContinuous = this.opts.continuous();
+      if (
+        !this.receipt.startAttempted &&
+        this.receipt.ownerContinuous &&
+        !this.receipt.latchPersistenceFailed &&
+        !this.lateLatched
+      ) {
+        try {
+          if (this.receipt.latchRetained) {
+            this.persistLatch(false);
+            this.receipt.latchRetained = false;
+            this.receipt.latchCleared = true;
+          }
+          this.receipt.healthOutcome = "clean";
+        } catch {}
+      }
       if (this.receipt.startAttempted) {
         if (
           this.receipt.ownerContinuous &&

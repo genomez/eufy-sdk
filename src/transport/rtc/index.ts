@@ -24,3 +24,4 @@ export type {
 export type { EventTableReceipt } from "./event-table-candidate.js";
 
 export type { EventThumbnailReceipt } from "./event-thumb-candidate.js";
+export type { PlaybackReceipt, PlaybackSelectionOutcome } from "./event-playback-candidate.js";

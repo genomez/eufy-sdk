@@ -1352,7 +1352,8 @@ export class RtcCommandRouter {
             }
             if (table.outcome !== "success" || !startAllowed() || signal.aborted) return;
             const selected = selectPlayback(rows, opts.cameras!, opts.excluded!);
-            if (!selected) {
+            candidate.receipt.selectionOutcome = selected.selectionOutcome;
+            if (selected.selectionOutcome !== "selected") {
               candidate.end("time_refused");
               return;
             }

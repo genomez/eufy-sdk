@@ -27,6 +27,11 @@ class Session extends EventEmitter {
   releaseStatus = true;
   eof = true;
   corruptMedia = false;
+  tableReply = true;
+  tableResultCode = 0;
+  tableRows: unknown[] = [
+    { device_sn: camera, record_id: 40, start_time: "2026-01-15 12:00:00", end_time: "2026-01-15 12:00:01" },
+  ];
   attachIngressGuard(guard: RtcIngressGuard | undefined) {
     this.guard = guard;
   }
@@ -92,17 +97,15 @@ class Session extends EventEmitter {
       }
       this.input(h.commandId, Buffer.alloc(4), 0, h.channel, 1, h.segment);
       if (p.cmd === 1103) this.input(1103, { params: [] }, 2, 2);
-      if (p.cmd === 1306)
+      if (p.cmd === 1306 && this.tableReply)
         this.input(
           1306,
           {
             cmd: 10000,
             table: "history_record_info",
             transaction: p.payload.transaction,
-            mIntRet: 0,
-            data: [
-              { device_sn: camera, record_id: 40, start_time: "2026-01-15 12:00:00", end_time: "2026-01-15 12:00:01" },
-            ],
+            mIntRet: this.tableResultCode,
+            data: this.tableRows,
           },
           2,
           255,
@@ -181,6 +184,45 @@ const options = () => ({
   excluded: new Set(["excluded-synthetic"]),
   fresh: () => true,
 });
+it.each(["time_refused", "table_failed", "table_timeout", "selectors_exhausted", "admission_after_dispatch"])(
+  "no-start %s leaves the playback slot clear and health clean",
+  async (refusal) => {
+    const { router, session, marker } = await fixture();
+    const owner = Reflect.get(router, "sessions").get(station);
+    if (refusal === "time_refused")
+      session.tableRows = [{ device_sn: camera, record_id: 40, start_time: "invalid", end_time: "invalid" }];
+    if (refusal === "table_failed") session.tableResultCode = -1;
+    if (refusal === "table_timeout") session.tableReply = false;
+    if (refusal === "selectors_exhausted")
+      for (let selector = 6; selector <= 249; selector++) owner.playbackSelectors.add(selector);
+    let fresh = true;
+    const beforeDispatch = vi.fn(() => {
+      if (refusal === "admission_after_dispatch") fresh = false;
+    });
+    const pending = router.readEventPlaybackCandidate(station, { ...options(), beforeDispatch, fresh: () => fresh });
+    await vi.advanceTimersByTimeAsync(8100);
+    const result = await pending;
+    expect(result).toMatchObject({
+      startAttempted: false,
+      pauseSent: false,
+      stopSent: false,
+      ownerContinuous: true,
+      healthOutcome: "clean",
+      cessationOutcome: "not_started",
+      releaseOutcome: "not_started",
+      latchPersisted: false,
+      latchRetained: false,
+      latchPersistenceFailed: false,
+    });
+    if (refusal === "time_refused")
+      expect(result).toMatchObject({ captureOutcome: "time_refused", selectionOutcome: "time_invalid" });
+    if (refusal === "selectors_exhausted") expect(result.selectionOutcome).toBe("selected");
+    expect(beforeDispatch).toHaveBeenCalledOnce();
+    expect(marker).toEqual([]);
+    expect(session.sent.filter((packet) => parsePortalHeader(packet)!.commandId === 1700)).toHaveLength(0);
+    expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: false, active: false });
+  },
+);
 it("full current-table/start/pause/next-selector stop path uses one original owner and releases its scheduler", async () => {
   const { router, session, sessions, marker } = await fixture();
   const enqueue = vi.spyOn(Reflect.get(router, "sessions").get(station).scheduler, "enqueue");

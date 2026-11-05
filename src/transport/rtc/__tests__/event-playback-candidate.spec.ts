@@ -64,20 +64,47 @@ describe("database-backed Chicago conversion", () => {
     "2026-07-01 12:00:60",
     "私密",
   ])("refuses %s", (local) => expect(chicagoInstant(local)).toBeUndefined());
-  it("never falls back after highest eligible row has an ambiguous time", () => {
-    expect(
-      selectPlayback(
-        [row("2026-07-01 12:00:00", undefined, 39), row("2026-11-01 01:30:00")],
-        new Set(["camera-synthetic"]),
-        new Set(["excluded-synthetic"]),
-      ),
-    ).toBeUndefined();
-  });
+  it.each(["2026-11-01 01:30:00", "2026-07-02 12:00:00", "2026-07-01 12:00:30"])(
+    "selects an older valid clip when the newest time is %s",
+    (newest) => {
+      expect(
+        selectPlayback(
+          [row("2026-07-01 12:00:00", undefined, 39), row(newest)],
+          new Set(["camera-synthetic"]),
+          new Set(["excluded-synthetic"]),
+          Date.parse("2026-07-01T17:01:00Z"),
+        ),
+      ).toEqual({ selectionOutcome: "selected", record: 39, begin: chicagoInstant("2026-07-01 12:00:00") });
+    },
+  );
   it("excludes private camera policy and duplicate selectors", () => {
     const r = row("2026-07-01 12:00:00");
-    expect(selectPlayback([r], new Set(["camera-synthetic"]), new Set(["camera-synthetic"]))).toBeUndefined();
-    expect(selectPlayback([r, r], new Set(["camera-synthetic"]), new Set())).toBeUndefined();
+    expect(selectPlayback([r], new Set(["camera-synthetic"]), new Set(["camera-synthetic"]))).toEqual({
+      selectionOutcome: "no_camera_rows",
+    });
+    expect(selectPlayback([r, r], new Set(["camera-synthetic"]), new Set())).toEqual({
+      selectionOutcome: "time_invalid",
+    });
   });
+  it.each([
+    [[], "no_rows"],
+    [[{ ...row("2026-07-01 12:00:00"), device_sn: "other-synthetic" }], "no_camera_rows"],
+    [[row("invalid")], "time_invalid"],
+    [[row("2026-07-01 12:00:00", "2026-06-30 12:00:00")], "time_invalid"],
+    [[row("2026-07-01 12:00:00", "2026-07-01 12:00:01")], "end_not_past"],
+    [[row("2026-07-02 12:00:00")], "end_not_past"],
+  ])("reports selection outcome for %j", (rows, selectionOutcome) => {
+    expect(
+      selectPlayback(rows as unknown[], new Set(["camera-synthetic"]), new Set(), Date.parse("2026-07-01T17:01:00Z")),
+    ).toEqual({ selectionOutcome });
+  });
+  it.each([null, [], "malformed", { record_id: 0 }, { record_id: 1.5 }, { record_id: "41" }])(
+    "refuses the entire table for malformed row %j",
+    (bad) =>
+      expect(selectPlayback([row("2026-07-01 12:00:00"), bad], new Set(["camera-synthetic"]), new Set())).toEqual({
+        selectionOutcome: "time_invalid",
+      }),
+  );
 });
 
 it("reserves both selectors without wrap or reuse", () => {
@@ -336,6 +363,59 @@ function candidateSetup({
     },
   };
 }
+
+it.each(["time_refused", "timeout"] as const)(
+  "no-start %s reports clean health without touching a latch",
+  async (reason) => {
+    const s = candidateSetup();
+    s.candidate.end(reason);
+    expect(await s.candidate.observe()).toMatchObject({
+      captureOutcome: reason,
+      startAttempted: false,
+      ownerContinuous: true,
+      healthOutcome: "clean",
+      latchPersisted: false,
+      latchRetained: false,
+    });
+    expect(s.sent).toHaveLength(0);
+    expect(s.markers).toEqual([]);
+    expect(s.latch()).toBe(false);
+  },
+);
+
+it("clears a persisted prestart latch when admission changes before sending", async () => {
+  let allowed = true,
+    latched = false;
+  const markers: boolean[] = [],
+    send = vi.fn();
+  const candidate = new EventPlaybackCandidate({
+    deadlineMs: nativePerformance.now() + 24000,
+    continuous: () => true,
+    startAllowed: () => allowed,
+    send,
+    segment: () => 1,
+    account: "synthetic",
+    marker: (value) => {
+      markers.push(value);
+      if (value) allowed = false;
+    },
+    latch: (value) => {
+      latched = value;
+    },
+    signal: new AbortController().signal,
+  });
+  await candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+  expect(await candidate.observe()).toMatchObject({
+    startAttempted: false,
+    healthOutcome: "clean",
+    latchPersisted: true,
+    latchRetained: false,
+    latchCleared: true,
+  });
+  expect(markers).toEqual([true, false]);
+  expect(latched).toBe(false);
+  expect(send).not.toHaveBeenCalled();
+});
 
 it.each([0, 1, 2, 3, 5, 9])(
   "continued rejected traffic on route %s prevents silence until the global deadline",
