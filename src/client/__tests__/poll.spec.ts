@@ -1025,6 +1025,57 @@ describe("generation-owned RTC state refresh", () => {
     expect(refresh).toHaveBeenCalledTimes(2);
   });
 
+  it("holds a scheduled read while a stored-playback capture runs, then keeps the cadence", async () => {
+    const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
+    await (eufy as any).ensureRealtime();
+    await vi.advanceTimersByTimeAsync(0);
+    const base = refresh.mock.calls.length;
+    const active = vi.spyOn((eufy as any).rtc, "playbackActive").mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(refresh).toHaveBeenCalledTimes(base);
+    active.mockReturnValue(false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const held = refresh.mock.calls.length;
+    expect(held).toBeGreaterThan(base);
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ failures: 0, retryAttempt: 0 });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(refresh).toHaveBeenCalledTimes(held);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(refresh.mock.calls.length).toBeGreaterThan(held);
+    await eufy.disconnect();
+  });
+
+  it("a capture that never ends holds the scheduled read for at most 60 s", async () => {
+    const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
+    await (eufy as any).ensureRealtime();
+    await vi.advanceTimersByTimeAsync(0);
+    const base = refresh.mock.calls.length;
+    vi.spyOn((eufy as any).rtc, "playbackActive").mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(30_000 + 59_999);
+    expect(refresh).toHaveBeenCalledTimes(base);
+    await vi.advanceTimersByTimeAsync(1);
+    const forced = refresh.mock.calls.length;
+    expect(forced).toBeGreaterThan(base);
+    expect(eufy.getStateRefreshDiagnostics()).toMatchObject({ failures: 0 });
+    await vi.advanceTimersByTimeAsync(30_000 + 59_999);
+    expect(refresh).toHaveBeenCalledTimes(forced);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(refresh.mock.calls.length).toBeGreaterThan(forced);
+    await eufy.disconnect();
+  });
+
+  it("teardown cancels a held read", async () => {
+    const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
+    await (eufy as any).ensureRealtime();
+    await vi.advanceTimersByTimeAsync(0);
+    const base = refresh.mock.calls.length;
+    vi.spyOn((eufy as any).rtc, "playbackActive").mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(32_000);
+    await eufy.disconnect();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(refresh).toHaveBeenCalledTimes(base);
+  });
+
   it("coalesces a scheduled read with a cloud sweep and waits for completion before rearming", async () => {
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     await (eufy as any).ensureRealtime();

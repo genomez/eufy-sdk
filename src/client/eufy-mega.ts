@@ -261,6 +261,9 @@ interface StateRefreshResult {
   retiredSession: boolean;
 }
 
+const STATE_REFRESH_PLAYBACK_DEFER_MS = 5_000;
+const STATE_REFRESH_PLAYBACK_DEFERRALS = 12;
+
 interface RealtimeGeneration {
   readonly epoch: number;
   readonly readiness: MutableRealtimeReadiness;
@@ -272,6 +275,8 @@ interface RealtimeGeneration {
   settled: boolean;
   stateRefreshFailures?: number;
   stateRefreshDeferrals?: { retryAttempt: number; count: number };
+  /** Consecutive scheduled reads held back by an active stored-playback capture. */
+  stateRefreshPlaybackDeferrals?: number;
 }
 
 class RealtimeStartupSupersededError extends Error {}
@@ -2545,6 +2550,7 @@ export class EufyMega extends EventEmitter {
       return this.stateRefreshSweep.promise;
     }
     generation.stateRefreshDeferrals = undefined;
+    generation.stateRefreshPlaybackDeferrals = undefined;
     const evidence: StateRefreshSweepEvidence = {
       startedAtMs: Date.now(),
       finishedAtMs: 0,
@@ -2700,6 +2706,19 @@ export class EufyMega extends EventEmitter {
     if (generation.epoch !== this.realtimeEpoch || generation.abort.signal.aborted) return;
     const schedule = this.stateRefreshSchedule;
     const lifecycle = this.stateRefreshLifecycle;
+    // Station work queued during a stored-playback capture aborts it, so the scheduled read waits for
+    // the bounded capture to finish: 5 s steps, at most 60 s, without counting a failure.
+    if (this.stateRefreshSweep?.epoch !== generation.epoch && this.rtc.playbackActive()) {
+      const held = generation.stateRefreshPlaybackDeferrals ?? 0;
+      if (held < STATE_REFRESH_PLAYBACK_DEFERRALS) {
+        generation.stateRefreshPlaybackDeferrals = held + 1;
+        this.stateRefreshTimer.arm(STATE_REFRESH_PLAYBACK_DEFER_MS, () => {
+          if (this.stateRefreshSchedule === schedule && this.stateRefreshLifecycle === lifecycle)
+            void this.runScheduledStateRefresh(generation);
+        });
+        return;
+      }
+    }
     const failuresAtStart = generation.stateRefreshFailures ?? 0;
     if (failuresAtStart >= 3 && this.stateRefreshSweep?.epoch !== generation.epoch) {
       const renewal = this.rtc.getSessionRefreshDiagnostics();
@@ -4062,7 +4081,10 @@ export class EufyMega extends EventEmitter {
     this.stateRefreshTimer.cancel();
     this.stateRefreshSchedule = undefined;
     this.stateRefreshLifecycle++;
-    if (this.realtimeGeneration) this.realtimeGeneration.stateRefreshDeferrals = undefined;
+    if (this.realtimeGeneration) {
+      this.realtimeGeneration.stateRefreshDeferrals = undefined;
+      this.realtimeGeneration.stateRefreshPlaybackDeferrals = undefined;
+    }
     for (const entry of this.reportRefreshes.values()) clearTimeout(entry.timer);
     this.reportRefreshes.clear();
     this.lastStateAnnounced.clear();

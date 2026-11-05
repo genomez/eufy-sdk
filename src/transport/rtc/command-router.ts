@@ -1169,6 +1169,11 @@ export class RtcCommandRouter {
     }
   }
 
+  /** A stored-playback capture is running on some station. */
+  playbackActive(): boolean {
+    return this.playbackProbes.size > 0;
+  }
+
   /** Fixed counters expose normal taint/drop/re-establishment without retaining public identities. */
   getPlaybackSafetyDiagnostics() {
     return {
