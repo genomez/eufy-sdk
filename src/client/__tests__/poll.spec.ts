@@ -1064,6 +1064,30 @@ describe("generation-owned RTC state refresh", () => {
     await eufy.disconnect();
   });
 
+  it("a cloud poll during stored playback leaves the read to the held schedule", async () => {
+    const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
+    await (eufy as any).ensureRealtime();
+    await vi.advanceTimersByTimeAsync(0);
+    const base = refresh.mock.calls.length;
+    const active = vi.spyOn((eufy as any).rtc, "playbackActive").mockReturnValue(true);
+    await (eufy as any).pollOnce();
+    expect(refresh).toHaveBeenCalledTimes(base);
+    active.mockReturnValue(false);
+    await (eufy as any).pollOnce();
+    expect(refresh.mock.calls.length).toBeGreaterThan(base);
+    await eufy.disconnect();
+  });
+
+  it("a held retry reports its real due time", async () => {
+    const { eufy, refresh } = await reachThirdDeadline();
+    vi.spyOn((eufy as any).rtc, "playbackActive").mockReturnValue(true);
+    const before = refresh.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(refresh).toHaveBeenCalledTimes(before);
+    expect(eufy.getStateRefreshDiagnostics().nextRetryAtMs).toBe(Date.now() + 5_000);
+    await eufy.disconnect();
+  });
+
   it("teardown cancels a held read", async () => {
     const { eufy, refresh } = fixture({ pollMs: 0, rtc: { stateRefreshMs: 30_000 } });
     await (eufy as any).ensureRealtime();

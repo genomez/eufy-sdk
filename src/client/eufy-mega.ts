@@ -1088,8 +1088,21 @@ export class EufyMega extends EventEmitter {
     if (pending?.timer) clearTimeout(pending.timer);
     const entry: { timer?: ReturnType<typeof setTimeout>; promise?: ReturnType<EufyMega["refreshDeviceState"]> } = {};
     this.reportRefreshes.set(stationSn, entry);
-    entry.timer = setTimeout(() => {
+    let held = 0;
+    const fire = () => {
       entry.timer = undefined;
+      // A read queued during stored playback aborts the capture; hold it (bounded), never drop it.
+      if (
+        held < STATE_REFRESH_PLAYBACK_DEFERRALS &&
+        generation.epoch === this.realtimeEpoch &&
+        !generation.abort.signal.aborted &&
+        this.rtc.playbackActive()
+      ) {
+        held++;
+        entry.timer = setTimeout(fire, STATE_REFRESH_PLAYBACK_DEFER_MS);
+        entry.timer.unref?.();
+        return;
+      }
       if (
         generation.epoch !== this.realtimeEpoch ||
         generation.abort.signal.aborted ||
@@ -1123,7 +1136,8 @@ export class EufyMega extends EventEmitter {
         .finally(() => {
           if (this.reportRefreshes.get(stationSn) === entry) this.reportRefreshes.delete(stationSn);
         });
-    }, 1_500);
+    };
+    entry.timer = setTimeout(fire, 1_500);
     entry.timer.unref?.();
   }
 
@@ -2712,6 +2726,7 @@ export class EufyMega extends EventEmitter {
       const held = generation.stateRefreshPlaybackDeferrals ?? 0;
       if (held < STATE_REFRESH_PLAYBACK_DEFERRALS) {
         generation.stateRefreshPlaybackDeferrals = held + 1;
+        if (schedule?.nextRetryAtMs != null) schedule.nextRetryAtMs = Date.now() + STATE_REFRESH_PLAYBACK_DEFER_MS;
         this.stateRefreshTimer.arm(STATE_REFRESH_PLAYBACK_DEFER_MS, () => {
           if (this.stateRefreshSchedule === schedule && this.stateRefreshLifecycle === lifecycle)
             void this.runScheduledStateRefresh(generation);
@@ -2869,7 +2884,12 @@ export class EufyMega extends EventEmitter {
       for (const sn of new Set(params.map((change) => change.deviceSn)))
         if (!reconciled.has(sn)) await this.widenCapabilities(sn);
       const generation = this.realtimeGeneration;
-      if (generation?.epoch === epoch && (await this.refreshRealtimeStates(generation, "cloud_poll")).refreshed)
+      // During stored playback the held scheduled read covers this one.
+      if (
+        generation?.epoch === epoch &&
+        !this.rtc.playbackActive() &&
+        (await this.refreshRealtimeStates(generation, "cloud_poll")).refreshed
+      )
         this.scheduleStateRefresh(generation, true);
     } catch (e) {
       this.reportError(e, "cloud_poll");

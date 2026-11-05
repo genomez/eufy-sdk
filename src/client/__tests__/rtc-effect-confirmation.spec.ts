@@ -606,6 +606,45 @@ describe("unsolicited RTC report refresh", () => {
     }
   });
 
+  it("holds a report refresh while stored playback runs, then still sends it", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    automatic(f);
+    const lease = await f.client.rtc.sessionFor(HUB);
+    lease.release();
+    const active = vi.spyOn(f.client.rtc, "playbackActive").mockReturnValue(true);
+    try {
+      f.session.binary(0);
+      await vi.advanceTimersByTimeAsync(1000);
+      f.session.report({ cmd: 1400, payload: { data: { value: 0 } } });
+      await vi.advanceTimersByTimeAsync(1500 + 20_000);
+      expect(informationPackets(f.session)).toHaveLength(0);
+      active.mockReturnValue(false);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(informationPackets(f.session)).toHaveLength(1);
+    } finally {
+      await f.eufy.disconnect();
+    }
+  });
+
+  it("a report refresh held by playback that never ends is sent after at most 60 s", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    automatic(f);
+    const lease = await f.client.rtc.sessionFor(HUB);
+    vi.spyOn(f.client.rtc, "playbackActive").mockReturnValue(true);
+    try {
+      f.session.binary(0);
+      await vi.advanceTimersByTimeAsync(1500 + 59_999);
+      expect(informationPackets(f.session)).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(informationPackets(f.session)).toHaveLength(1);
+    } finally {
+      lease.release();
+      await f.eufy.disconnect();
+    }
+  });
+
   it("refreshes while a media lease keeps the ready session open", async () => {
     vi.useFakeTimers();
     const f = fixture();
