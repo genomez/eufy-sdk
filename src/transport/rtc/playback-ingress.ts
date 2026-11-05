@@ -1,4 +1,4 @@
-import { parsePortalHeader, PortalLinkType } from "./portal-packet.js";
+import { isPortalPacket, parsePortalHeader, PortalLinkType } from "./portal-packet.js";
 import { parsePtcsHeader, PtcsReassembler, type PtcsInspection, type PtcsRejectionReason } from "./ptcs-framer.js";
 import { PORTAL_KEEPALIVE } from "./portal-keepalive.js";
 import { performance } from "node:perf_hooks";
@@ -13,6 +13,8 @@ const PLAYBACK_PARTIAL_AGE_MS = 15000;
 const PLAYBACK_RESERVED_BYTES = 16 * 1024 * 1024;
 export const PLAYBACK_WORK_BYTES = 32 * 1024 * 1024;
 const PLAYBACK_LATE_FRAME_BYTES = 256 * 1024;
+/** Bits 0x8000 and 0x1000 are never seen on playback. 0x2000 marks the frames of a video keyframe. */
+const PLAYBACK_FORBIDDEN_FLAGS = 0x9000;
 export type PlaybackSizeBucket = "unknown" | "zero" | "le8KiB" | "le256KiB" | "le8MiB" | "gt8MiB";
 export type PlaybackRejectedClass =
   "none" | "nonbinary" | "unknown" | "bare" | "control" | "playback" | "live" | "other";
@@ -374,7 +376,7 @@ export class PlaybackIngress implements RtcIngressGuard {
       if (!this.tombstone || h.index !== 0 || !h.last) return false;
       if (
         binary[4] !== 3 ||
-        (binary.readUInt16LE(18) & 0xb000) !== 0 ||
+        (binary.readUInt16LE(18) & PLAYBACK_FORBIDDEN_FLAGS) !== 0 ||
         !(binary.readUInt16LE(18) & 0x4000) ||
         h.frameLength > PLAYBACK_LATE_FRAME_BYTES ||
         h.payloadLength !== h.frameLength ||
@@ -407,7 +409,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     if (this.evidence.cutoff) return false;
     if (
       binary[4] !== 3 ||
-      (binary.readUInt16LE(18) & 0xb000) !== 0 ||
+      (binary.readUInt16LE(18) & PLAYBACK_FORBIDDEN_FLAGS) !== 0 ||
       !(binary.readUInt16LE(18) & 0x4000) ||
       h.frameLength > PLAYBACK_FRAME_BYTES ||
       h.index >= 16384 ||
@@ -418,7 +420,7 @@ export class PlaybackIngress implements RtcIngressGuard {
         true,
         binary[4] !== 3
           ? "header"
-          : (binary.readUInt16LE(18) & 0xb000) !== 0 || !(binary.readUInt16LE(18) & 0x4000)
+          : (binary.readUInt16LE(18) & PLAYBACK_FORBIDDEN_FLAGS) !== 0 || !(binary.readUInt16LE(18) & 0x4000)
             ? "flags"
             : h.frameLength > PLAYBACK_FRAME_BYTES || h.index >= 16384
               ? "limits"
@@ -426,7 +428,11 @@ export class PlaybackIngress implements RtcIngressGuard {
       );
     let reservation = this.assemblies.get(h.frameId);
     if (!reservation) {
-      const allowance = binary.readUInt16LE(18) & 0x0800 ? PLAYBACK_FRAME_BYTES : h.frameLength;
+      // The station sets 0x0800 on plain portal frames here too. A first fragment that starts with the
+      // portal magic cannot be Zstandard, so it reserves its declared size, not the inflation ceiling.
+      const plain =
+        h.index === 0 && h.payloadLength >= 4 && isPortalPacket(binary.subarray(28, 28 + h.payloadLength));
+      const allowance = binary.readUInt16LE(18) & 0x0800 && !plain ? PLAYBACK_FRAME_BYTES : h.frameLength;
       if (
         this.reservedOutput + allowance > PLAYBACK_RESERVED_BYTES ||
         this.reservedFrames + this.evidence.wrongRouteFrames >= 256 ||

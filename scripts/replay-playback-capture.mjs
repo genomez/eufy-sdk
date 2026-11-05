@@ -22,7 +22,7 @@ export async function replayPlaybackCapture(file) {
   await build({
     stdin: {
       contents:
-        'export { PlaybackIngress } from "./src/transport/rtc/playback-ingress.ts"; export { PtcsFramer } from "./src/transport/rtc/ptcs-framer.ts"; export { parsePortalHeader } from "./src/transport/rtc/portal-packet.ts";',
+        'export { PlaybackIngress } from "./src/transport/rtc/playback-ingress.ts"; export { PtcsFramer } from "./src/transport/rtc/ptcs-framer.ts"; export { parsePortalHeader } from "./src/transport/rtc/portal-packet.ts"; export { PORTAL_KEEPALIVE } from "./src/transport/rtc/portal-keepalive.ts";',
       resolveDir: root,
     },
     outfile: entry,
@@ -32,7 +32,7 @@ export async function replayPlaybackCapture(file) {
     target: "node24",
     logLevel: "silent",
   });
-  const { PlaybackIngress, PtcsFramer, parsePortalHeader } = await import(pathToFileURL(entry));
+  const { PlaybackIngress, PtcsFramer, parsePortalHeader, PORTAL_KEEPALIVE } = await import(pathToFileURL(entry));
   let now = 0,
     previous = 0;
   const ingress = new PlaybackIngress({ now: () => now, end: () => {}, media: () => {} });
@@ -71,7 +71,9 @@ export async function replayPlaybackCapture(file) {
         continue;
       }
       const message = kind === 2 ? payload.toString("utf8") : payload;
-      if (ingress.native(message)) ingress.received(framer.recvPacket(payload));
+      // The peer consumes the keepalive echo before the framer, as here.
+      if (ingress.native(message) && !(kind === 0 && payload.equals(PORTAL_KEEPALIVE)))
+        ingress.received(framer.recvPacket(payload));
     }
     const keys = [
       "firstRejectionReason",
