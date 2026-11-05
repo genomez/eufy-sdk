@@ -33,14 +33,14 @@ describe("independent playback expiry", () => {
     const { guard, packets, assembler, end } = setup();
     try {
       guard.native(packets[0]);
-      await vi.advanceTimersByTimeAsync(1749);
+      await vi.advanceTimersByTimeAsync(14999);
       expect(assembler.bufferedBytes).toBe(1000);
       await vi.advanceTimersByTimeAsync(1);
       expect(assembler.bufferedBytes).toBe(0);
       expect(assembler.pending).toBe(0);
-      expect(guard.evidence).toMatchObject({ unknown: true, rejected: 1 });
+      expect(guard.evidence).toMatchObject({ unknown: false, rejected: 1 });
       expect(end).toHaveBeenCalledExactlyOnceWith("invalid_media");
-      expect(guard.lastPlausibleMs).toBe(1750);
+      expect(guard.lastPlausibleMs).toBe(15000);
       expect(guard.observationComplete()).toBe(false);
     } finally {
       guard.stopExpiry();
@@ -55,24 +55,24 @@ describe("independent playback expiry", () => {
       await vi.advanceTimersByTimeAsync(1000);
       guard.native(packets[1]);
       expect(assembler.bufferedBytes).toBe(2000);
-      await vi.advanceTimersByTimeAsync(750);
+      await vi.advanceTimersByTimeAsync(14000);
       expect(assembler.pending).toBe(0);
-      expect(guard.lastPlausibleMs).toBe(1750);
+      expect(guard.lastPlausibleMs).toBe(15000);
     } finally {
       guard.stopExpiry();
     }
   });
 
-  it("expires an idle frame within 2000ms at the worst sweep phase", async () => {
+  it("expires an idle frame within 15250ms at the worst sweep phase", async () => {
     const { guard, packets, assembler } = setup();
     try {
       await vi.advanceTimersByTimeAsync(1);
       guard.native(packets[0]);
-      await vi.advanceTimersByTimeAsync(1749);
+      await vi.advanceTimersByTimeAsync(14999);
       expect(assembler.pending).toBe(1);
       await vi.advanceTimersByTimeAsync(PLAYBACK_EXPIRY_SWEEP_MS);
       expect(assembler.pending).toBe(0);
-      expect(guard.lastPlausibleMs - 1).toBeLessThanOrEqual(2000);
+      expect(guard.lastPlausibleMs - 1).toBeLessThanOrEqual(15250);
     } finally {
       guard.stopExpiry();
     }
@@ -86,16 +86,16 @@ describe("independent playback expiry", () => {
       guard.native(packets[0]);
       expect(guard.lastPlausibleMs).toBe(1500);
       expect(assembler.getDiagnostics().duplicateFragments).toBe(1);
-      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(13500);
       expect(assembler.bufferedBytes).toBe(0);
-      expect(guard.evidence.unknown).toBe(true);
-      expect(guard.lastPlausibleMs).toBe(1750);
+      expect(guard.evidence.unknown).toBe(false);
+      expect(guard.lastPlausibleMs).toBe(15000);
     } finally {
       guard.stopExpiry();
     }
   });
 
-  it("conflicting fragments discard state and remain unknown", () => {
+  it("conflicting fragments discard state and require fresh silence", () => {
     const { guard, packets, assembler, end } = setup();
     try {
       guard.native(packets[0]);
@@ -104,7 +104,7 @@ describe("independent playback expiry", () => {
       guard.native(conflict);
       expect(assembler.bufferedBytes).toBe(0);
       expect(assembler.getDiagnostics().conflicts).toBe(1);
-      expect(guard.evidence.unknown).toBe(true);
+      expect(guard.evidence.unknown).toBe(false);
       expect(end).toHaveBeenCalledWith("invalid_media");
     } finally {
       guard.stopExpiry();
@@ -115,10 +115,10 @@ describe("independent playback expiry", () => {
     const { guard, packets, assembler } = setup();
     guard.native(packets[0]);
     guard.capturing = false;
-    await vi.advanceTimersByTimeAsync(1750);
+    await vi.advanceTimersByTimeAsync(15000);
     expect(assembler.pending).toBe(0);
-    expect(guard.evidence.unknown).toBe(true);
-    expect(guard.lastPlausibleMs).toBe(1750);
+    expect(guard.evidence.unknown).toBe(false);
+    expect(guard.lastPlausibleMs).toBe(15000);
     guard.quarantine();
     expect(vi.getTimerCount()).toBe(1);
     guard.native(packets[0]);
@@ -162,7 +162,7 @@ describe("invocation timer teardown", () => {
       await vi.advanceTimersByTimeAsync(5010);
       await pending;
       const observation = candidate.observe();
-      await vi.advanceTimersByTimeAsync(6010);
+      await vi.advanceTimersByTimeAsync(24010);
       await observation;
       expect(vi.getTimerCount()).toBe(0);
     },

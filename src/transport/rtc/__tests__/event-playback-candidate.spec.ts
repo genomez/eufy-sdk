@@ -222,11 +222,11 @@ describe("A1 real framing path", () => {
       guard = new PlaybackIngress({ end, media });
     guard.reserve(6, 7);
     guard.capturing = true;
-    const oversized = wrapped(Buffer.alloc(262145))[0]!;
+    const oversized = wrapped(Buffer.alloc(8388609))[0]!;
     expect(guard.native(oversized)).toBe(false);
-    for (const p of wrapped(binary(1300, Buffer.alloc(262145)), 4, true)) guard.native(p);
+    for (const p of wrapped(binary(1300, Buffer.alloc(8388609)), 4, true)) guard.native(p);
     expect(media).not.toHaveBeenCalled();
-    expect(guard.evidence.unknown).toBe(true);
+    expect(guard.evidence.unknown).toBe(false);
   });
   it("collects compressed playback with bounded native output", () => {
     const media = vi.fn(),
@@ -235,7 +235,7 @@ describe("A1 real framing path", () => {
     guard.capturing = true;
     for (const p of wrapped(video(), 4, true)) guard.native(p);
     expect(media).toHaveBeenCalledOnce();
-    expect(guard.evidence.decodedWorkBytes).toBe(262144);
+    expect(guard.evidence.decodedWorkBytes).toBe(8388608);
   });
   it("refuses decode after capture and resets cessation for duplicate fragments", () => {
     let now = 1;
@@ -251,7 +251,7 @@ describe("A1 real framing path", () => {
     now = 2500;
     guard.native(p);
     expect(guard.lastPlausibleMs).toBe(2500);
-    expect(guard.observationComplete()).toBe(false);
+    expect(guard.observationComplete()).toBe(true);
     expect(media).not.toHaveBeenCalled();
   });
   it("retains unresolved control partials when unrelated ACK completes", () => {
@@ -328,7 +328,7 @@ function candidateSetup({
 }
 
 it.each([0, 1, 2, 3, 5, 9])(
-  "rejected compressed input on route %s prevents actual-framer cessation and latch clear",
+  "continued rejected traffic on route %s prevents silence until the global deadline",
   async (route) => {
     const s = candidateSetup({ eof: true });
     await s.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
@@ -342,7 +342,7 @@ it.each([0, 1, 2, 3, 5, 9])(
     );
     try {
       const pending = s.candidate.observe();
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < 26; i++) {
         await vi.advanceTimersByTimeAsync(900);
         const p = packetize(Buffer.from("invalid compressed synthetic bytes"), {
           channel: route,
@@ -356,12 +356,12 @@ it.each([0, 1, 2, 3, 5, 9])(
         expect(s.candidate.ingress.lastPlausibleMs).toBe(performance.now());
         expect(s.candidate.ingress.observationComplete()).toBe(false);
       }
-      await vi.advanceTimersByTimeAsync(700);
+      await vi.advanceTimersByTimeAsync(610);
       expect(await pending).toMatchObject({
         cessationOutcome: "cessation_unknown",
         latchRetained: true,
         latchCleared: false,
-        unknown: true,
+        unknown: false,
       });
       expect(s.markers).toEqual([true]);
       expect(s.latch()).toBe(true);
@@ -424,7 +424,7 @@ describe("mandatory finalizer and observational release", () => {
     if (!eof) controller.abort();
     await capture;
     const pending = candidate.observe();
-    await vi.advanceTimersByTimeAsync(5010);
+    await vi.advanceTimersByTimeAsync(24010);
     expect((await pending).releaseOutcome).toBe(eof ? "release_confirmed" : "stop_unconfirmed");
   });
   it("never sends through a replacement owner", async () => {
@@ -445,4 +445,105 @@ describe("mandatory finalizer and observational release", () => {
     controller.abort();
     await capture;
   });
+});
+
+it.each([true, false])(
+  "rejected capture with stop confirmation=%s preserves failure and qualifies cleanup independently",
+  async (release) => {
+    const s = candidateSetup({ release });
+    const capture = s.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+    const p = wrapped(Buffer.from("invalid synthetic zstd"))[0]!;
+    p.writeUInt16LE(p.readUInt16LE(18) | 0x0800, 18);
+    s.candidate.ingress.native(p);
+    await capture;
+    const observe = s.candidate.observe();
+    await vi.advanceTimersByTimeAsync(release ? 5010 : 24010);
+    const result = await observe;
+    expect(result).toMatchObject({
+      captureOutcome: "invalid_media",
+      boundedMediaObserved: false,
+      cessationOutcome: release ? "ceased" : "cessation_unknown",
+      releaseOutcome: release ? "release_confirmed" : "stop_unconfirmed",
+      latchCleared: release,
+      latchRetained: !release,
+      unknown: false,
+      firstRejectionReason: "zstd-header",
+      firstRejectedClass: "playback",
+      compressionState: "flagged",
+      rejectionCount: 1,
+      declaredSizeBucket: "le8KiB",
+      assembledSizeBucket: "le8KiB",
+      outputSizeBucket: "unknown",
+      zstdWindowBucket: "unknown",
+      assemblerDecompression: 1,
+    });
+    expect(s.latch()).toBe(!release);
+  },
+);
+
+it("accepts a synthetic non-single-segment 8 MiB zstd window and output above 256 KiB", () => {
+  const collected = vi.fn();
+  const guard = new PlaybackIngress({ end: vi.fn(), media: collected });
+  guard.reserve(6, 7);
+  guard.capturing = true;
+  const bytes = binary(1300, Buffer.alloc(400000));
+  const chunks: Buffer[] = [Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x68])];
+  for (let i = 0; i < bytes.length; i += 131072) {
+    const part = bytes.subarray(i, i + 131072),
+      header = Buffer.alloc(3);
+    header.writeUIntLE((part.length << 3) | (i + part.length === bytes.length ? 1 : 0), 0, 3);
+    chunks.push(header, part);
+  }
+  const wire = packetize(Buffer.concat(chunks), { channel: 4, frameId: ++frameId });
+  for (const p of wire) {
+    p.writeUInt16LE(p.readUInt16LE(18) | 0x0800, 18);
+    guard.native(p);
+  }
+  expect(collected).toHaveBeenCalledExactlyOnceWith(bytes);
+  expect(guard.evidence).toMatchObject({
+    rejected: 0,
+    decodedWorkBytes: 8388608,
+    compressionState: "decoded",
+    zstdWindowBucket: "le8MiB",
+    outputSizeBucket: "le8MiB",
+  });
+  const malformed = Buffer.from("invalid");
+  guard.native(malformed);
+  const frozen = { ...guard.evidence };
+  for (const p of wrapped(video(), 4, true)) guard.native(p);
+  expect(guard.evidence.firstRejectionReason).toBe(frozen.firstRejectionReason);
+  expect(guard.evidence.compressionState).toBe(frozen.compressionState);
+});
+
+it("waits within the global deadline for a delayed stop and five fresh seconds", async () => {
+  const s = candidateSetup({ release: false });
+  const capture = s.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+  s.candidate.ingress.native(Buffer.from("synthetic-invalid"));
+  await capture;
+  const observe = s.candidate.observe();
+  await vi.advanceTimersByTimeAsync(7000);
+  expect(s.latch()).toBe(true);
+  s.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 2, code: 15 } }), 3);
+  await vi.advanceTimersByTimeAsync(4999);
+  expect(s.latch()).toBe(true);
+  await vi.advanceTimersByTimeAsync(20);
+  expect(await observe).toMatchObject({
+    captureOutcome: "invalid_media",
+    releaseOutcome: "release_confirmed",
+    cessationOutcome: "ceased",
+    latchCleared: true,
+  });
+});
+
+it("releases concurrent reservations while bounding cumulative decoder work", () => {
+  const media = vi.fn(),
+    end = vi.fn();
+  const guard = new PlaybackIngress({ end, media });
+  guard.reserve(6, 7);
+  guard.capturing = true;
+  for (let n = 0; n < 5; n++) for (const p of wrapped(video(), 4, true)) guard.native(p);
+  expect(media).toHaveBeenCalledTimes(4);
+  expect(guard.evidence.decodedWorkBytes).toBe(33554432);
+  expect(guard.evidence.firstRejectionReason).toBe("limits");
+  expect(end).toHaveBeenLastCalledWith("invalid_media");
 });

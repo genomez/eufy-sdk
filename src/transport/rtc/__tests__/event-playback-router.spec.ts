@@ -26,6 +26,7 @@ class Session extends EventEmitter {
   counter = 0;
   releaseStatus = true;
   eof = true;
+  corruptMedia = false;
   attachIngressGuard(guard: RtcIngressGuard | undefined) {
     this.guard = guard;
   }
@@ -75,7 +76,14 @@ class Session extends EventEmitter {
           media.writeUInt32LE(7);
           media[5] = 1;
           Buffer.from([0, 0, 0, 1, 0x26, 1, 0x80]).copy(media, 22);
-          this.input(1300, media, 4, 101, h.isResponse);
+          if (this.corruptMedia) {
+            const bad = packetize(Buffer.from("synthetic-invalid-compression"), {
+              channel: 4,
+              frameId: ++this.counter,
+            })[0]!;
+            bad.writeUInt16LE(bad.readUInt16LE(18) | 0x0800, 18);
+            this.inject(bad);
+          } else this.input(1300, media, 4, 101, h.isResponse);
           if (this.eof) this.input(1351, { cmd: 6001, payload: { state: 2, code: 14 } });
         }
         if (p.data.cmd === 3 && this.releaseStatus)
@@ -230,7 +238,7 @@ it("missing release survives a new owner and blocks live while ordinary control 
   const { router, session, sessions } = await fixture();
   session.releaseStatus = false;
   const pending = router.readEventPlaybackCandidate(station, options());
-  await vi.advanceTimersByTimeAsync(5100);
+  await vi.advanceTimersByTimeAsync(24010);
   expect((await pending).releaseOutcome).toBe("stop_unconfirmed");
   await expect(router.mediaProviderFor(camera).live!()).rejects.toThrow("playback_slot_uncertain");
   session.close();
@@ -321,4 +329,28 @@ it("dormant unresolved state preserves the cross-restart media block required by
   await vi.advanceTimersByTimeAsync(1);
   await control;
   expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(true);
+});
+
+it("a failed capture drains cleanly and permits another attempt on the same owner", async () => {
+  const { router, session, sessions, marker } = await fixture();
+  session.corruptMedia = true;
+  const beforeDispatch = vi.fn();
+  const failed = router.readEventPlaybackCandidate(station, { ...options(), beforeDispatch });
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await failed).toMatchObject({
+    captureOutcome: "invalid_media",
+    boundedMediaObserved: false,
+    releaseOutcome: "release_confirmed",
+    cessationOutcome: "ceased",
+    latchCleared: true,
+    unknown: false,
+  });
+  expect(beforeDispatch).toHaveBeenCalledOnce();
+  expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(false);
+  session.corruptMedia = false;
+  const next = router.readEventPlaybackCandidate(station, options());
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await next).toMatchObject({ captureOutcome: "eof", releaseOutcome: "release_confirmed", latchCleared: true });
+  expect(sessions).toHaveLength(1);
+  expect(marker).toEqual([true, false, true, false]);
 });

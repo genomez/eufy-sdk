@@ -130,57 +130,97 @@ export function packetize(
   return packets;
 }
 
+export type PtcsRejectionReason =
+  | "native"
+  | "header"
+  | "flags"
+  | "limits"
+  | "metadata"
+  | "conflict"
+  | "expiry"
+  | "zstd-header"
+  | "zstd-content-size"
+  | "zstd-window"
+  | "zstd-structure"
+  | "zstd-decoder"
+  | "portal-header"
+  | "extent"
+  | "channel"
+  | "selector"
+  | "command"
+  | "baseline";
+export interface PtcsInspection {
+  reason?: PtcsRejectionReason;
+  compressionState?: "unknown" | "uncompressed" | "flagged" | "decoder_attempted" | "decoded";
+  declaredSize?: number;
+  assembledSize?: number;
+  outputSize?: number;
+  zstdWindow?: number;
+}
+
 /**
  * Decode exactly one complete Zstandard frame within output and window budgets. Envelope validation
  * rejects truncated headers, blocks, checksums and trailing data before invoking the native decoder;
  * the native decoder validates compressed content and checksums.
  */
-function decompressFrame(frame: Buffer, maxBytes: number): Buffer | undefined {
-  if (frame.length < 6 || frame.readUInt32LE(0) !== 0xfd2fb528) return undefined;
+function decompressFrame(
+  frame: Buffer,
+  maxBytes: number,
+  inspect: (value: PtcsInspection) => void,
+): Buffer | undefined {
+  const fail = (reason: PtcsRejectionReason) => {
+    inspect({ reason });
+    return undefined;
+  };
+  inspect({ compressionState: "flagged", assembledSize: frame.length });
+  if (frame.length < 6 || frame.readUInt32LE(0) !== 0xfd2fb528) return fail("zstd-header");
   const descriptor = frame[4]!;
-  if (descriptor & 0x08) return undefined;
+  if (descriptor & 0x08) return fail("zstd-header");
   const singleSegment = (descriptor & 0x20) !== 0;
   const contentFlag = descriptor >>> 6;
   const contentBytes = contentFlag === 0 ? (singleSegment ? 1 : 0) : 1 << contentFlag;
   const dictionaryBytes = [0, 1, 2, 4][descriptor & 3]!;
   let offset = 5 + (singleSegment ? 0 : 1) + dictionaryBytes;
-  if (offset + contentBytes > frame.length) return undefined;
+  if (offset + contentBytes > frame.length) return fail("zstd-header");
   let contentSize: bigint | undefined;
   if (contentBytes) {
     contentSize = 0n;
     for (let i = 0; i < contentBytes; i++) contentSize |= BigInt(frame[offset + i]!) << BigInt(i * 8);
     if (contentBytes === 2) contentSize += 256n;
-    if (contentSize > BigInt(maxBytes)) return undefined;
+    if (contentSize > BigInt(maxBytes)) return fail("zstd-content-size");
   }
   offset += contentBytes;
   const windowLog = Math.min(23, Math.max(10, Math.ceil(Math.log2(maxBytes))));
   const windowBase = singleSegment ? 0 : 2 ** (10 + (frame[5]! >>> 3));
   const windowSize = singleSegment ? Number(contentSize!) : windowBase + (windowBase / 8) * (frame[5]! & 7);
-  if (windowSize > 2 ** windowLog) return undefined;
+  inspect({ zstdWindow: windowSize });
+  if (windowSize > 2 ** windowLog) return fail("zstd-window");
   while (true) {
-    if (offset + 3 > frame.length) return undefined;
+    if (offset + 3 > frame.length) return fail("zstd-structure");
     const block = frame.readUIntLE(offset, 3);
     offset += 3;
     const blockType = (block >>> 1) & 3;
-    if (blockType === 3) return undefined;
+    if (blockType === 3) return fail("zstd-structure");
     const blockSize = block >>> 3;
-    if (blockSize > Math.min(windowSize, 128 * 1024)) return undefined;
+    if (blockSize > Math.min(windowSize, 128 * 1024)) return fail("zstd-structure");
     const storedBytes = blockType === 1 ? 1 : blockSize;
-    if (storedBytes > frame.length - offset) return undefined;
+    if (storedBytes > frame.length - offset) return fail("zstd-structure");
     offset += storedBytes;
     if (block & 1) break;
   }
   if (descriptor & 4) offset += 4;
-  if (offset !== frame.length) return undefined;
+  if (offset !== frame.length) return fail("zstd-structure");
+  inspect({ compressionState: "decoder_attempted" });
   try {
     const decoded = zstdDecompressSync(frame, {
       maxOutputLength: maxBytes,
       params: { [zlibConstants.ZSTD_d_windowLogMax]: windowLog },
     });
-    if (contentSize !== undefined && BigInt(decoded.length) !== contentSize) return undefined;
+    if (contentSize !== undefined && BigInt(decoded.length) !== contentSize) return fail("zstd-content-size");
+    inspect({ compressionState: "decoded", outputSize: decoded.length });
     return decoded;
   } catch {
-    return undefined;
+    return fail("zstd-decoder");
   }
 }
 
@@ -212,6 +252,7 @@ export interface PtcsReassemblerOptions {
   /** Idle lifetime in milliseconds; duplicates do not count as progress. Defaults to 15,000. */
   staleMs?: number;
   now?: () => number;
+  inspect?: (value: PtcsInspection) => void;
 }
 
 /**
@@ -223,7 +264,7 @@ export interface PtcsReassemblerOptions {
  */
 export class PtcsReassembler {
   private readonly partials = new Map<string, Partial>();
-  private readonly limits: Required<Omit<PtcsReassemblerOptions, "now">>;
+  private readonly limits: Required<Omit<PtcsReassemblerOptions, "now" | "inspect">>;
   private readonly now: () => number;
   private retainedBytes = 0;
   private readonly counters = {
@@ -245,7 +286,7 @@ export class PtcsReassembler {
 
   constructor(
     private readonly onFrame: (frame: Buffer, channel: number) => void,
-    opts: PtcsReassemblerOptions = {},
+    private readonly opts: PtcsReassemblerOptions = {},
   ) {
     this.now = opts.now ?? Date.now;
     this.limits = {
@@ -360,8 +401,13 @@ export class PtcsReassembler {
     const parts: Buffer[] = [];
     for (let i = 0; i <= p.lastIndex; i++) parts.push(p.chunks.get(i)!);
     let frame: Buffer = Buffer.concat(parts, p.bytes);
+    this.opts.inspect?.({
+      assembledSize: frame.length,
+      compressionState: p.compressed ? "flagged" : "uncompressed",
+      ...(p.compressed ? {} : { outputSize: frame.length }),
+    });
     if (p.compressed) {
-      const decoded = decompressFrame(frame, this.limits.maxFrameBytes);
+      const decoded = decompressFrame(frame, this.limits.maxFrameBytes, (value) => this.opts.inspect?.(value));
       if (!decoded) {
         this.count("decompression");
         return false;
@@ -384,6 +430,11 @@ export class PtcsReassembler {
       if (now - p.touched >= this.limits.staleMs || now - p.created >= this.limits.maxAgeMs) {
         this.drop(key);
         dropped++;
+        this.opts.inspect?.({
+          declaredSize: p.frameLength,
+          assembledSize: p.bytes,
+          compressionState: p.compressed ? "flagged" : "uncompressed",
+        });
         this.count("expiry");
       }
     }
@@ -418,6 +469,18 @@ export class PtcsReassembler {
   }
 
   private count(counter: keyof PtcsReassembler["counters"]): void {
+    if (this.opts.inspect) {
+      const reason: { [K in keyof PtcsReassembler["counters"]]?: PtcsRejectionReason } = {
+        invalidMetadata: "metadata",
+        conflicts: "conflict",
+        frameLimit: "limits",
+        fragmentLimit: "limits",
+        bufferLimit: "limits",
+        capacity: "limits",
+        expiry: "expiry",
+      };
+      if (reason[counter]) this.opts.inspect({ reason: reason[counter] });
+    }
     this.counters[counter] = Math.min(Number.MAX_SAFE_INTEGER, this.counters[counter] + 1);
   }
 }

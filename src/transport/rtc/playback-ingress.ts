@@ -1,26 +1,59 @@
 import { parsePortalHeader, PortalLinkType } from "./portal-packet.js";
-import { parsePtcsHeader, PtcsReassembler } from "./ptcs-framer.js";
+import { parsePtcsHeader, PtcsReassembler, type PtcsInspection, type PtcsRejectionReason } from "./ptcs-framer.js";
 import { PORTAL_KEEPALIVE } from "./portal-keepalive.js";
 import { performance } from "node:perf_hooks";
 
 export const PLAYBACK_BYTES = 2 * 1024 * 1024;
-export const PLAYBACK_FRAME_BYTES = 256 * 1024;
+export const PLAYBACK_FRAME_BYTES = 8 * 1024 * 1024;
 export const PLAYBACK_EXPIRY_SWEEP_MS = 250;
 export const PLAYBACK_LATE_WINDOW_MS = 1000;
 export const PLAYBACK_LATE_WINDOW_BYTES = 64 * 1024 * 1024;
 export const PLAYBACK_LATE_WINDOW_FRAMES = 1024;
-const PLAYBACK_PARTIAL_AGE_MS = 2000 - PLAYBACK_EXPIRY_SWEEP_MS;
+const PLAYBACK_PARTIAL_AGE_MS = 15000;
+const PLAYBACK_RESERVED_BYTES = 16 * 1024 * 1024;
+export const PLAYBACK_WORK_BYTES = 32 * 1024 * 1024;
+const PLAYBACK_LATE_FRAME_BYTES = 256 * 1024;
+export type PlaybackSizeBucket = "unknown" | "zero" | "le8KiB" | "le256KiB" | "le8MiB" | "gt8MiB";
+export type PlaybackRejectedClass =
+  "none" | "nonbinary" | "unknown" | "bare" | "control" | "playback" | "live" | "other";
+export const playbackSizeBucket = (bytes?: number): PlaybackSizeBucket =>
+  bytes === undefined
+    ? "unknown"
+    : bytes === 0
+      ? "zero"
+      : bytes <= 8192
+        ? "le8KiB"
+        : bytes <= 262144
+          ? "le256KiB"
+          : bytes <= 8388608
+            ? "le8MiB"
+            : "gt8MiB";
 
 /** Header-first native admission and post-inflation classification, before downstream parsers. */
 export interface RtcIngressGuard {
   native(message: unknown): boolean;
+  sent?(message: Buffer): void;
   decoded(frame: Buffer, link: number): boolean;
   stale(): void;
   received?(outcome: "accepted" | "rejected" | "unknown" | void): void;
 }
 
-/** Fixed numeric/boolean evidence; packet identities and payloads never enter this ledger. */
+/**
+ * Closed diagnostic enums and bounded counters, without packet identities or payloads. Declared size
+ * is the PTCS extent, assembled size is retained input, output size is measured decoded output.
+ * Diagnostic values freeze at the first rejection; counters continue during drain.
+ */
 export interface PlaybackIngressEvidence {
+  firstRejectionReason: "none" | PtcsRejectionReason;
+  firstRejectedClass: PlaybackRejectedClass;
+  compressionState: NonNullable<PtcsInspection["compressionState"]>;
+  declaredSizeBucket: PlaybackSizeBucket;
+  assembledSizeBucket: PlaybackSizeBucket;
+  outputSizeBucket: PlaybackSizeBucket;
+  zstdWindowBucket: PlaybackSizeBucket;
+  rejectionCount: number;
+  assemblerDecompression: number;
+  assemblerInvalidMetadata: number;
   nativeBytes: number;
   nativeMessages: number;
   mediaBytes: number;
@@ -43,6 +76,16 @@ const add = (a: number, b: number) => Math.min(Number.MAX_SAFE_INTEGER, a + b);
  */
 export class PlaybackIngress implements RtcIngressGuard {
   readonly evidence: PlaybackIngressEvidence = {
+    firstRejectionReason: "none",
+    firstRejectedClass: "none",
+    compressionState: "unknown",
+    declaredSizeBucket: "unknown",
+    assembledSizeBucket: "unknown",
+    outputSizeBucket: "unknown",
+    zstdWindowBucket: "unknown",
+    rejectionCount: 0,
+    assemblerDecompression: 0,
+    assemblerInvalidMetadata: 0,
     nativeBytes: 0,
     nativeMessages: 0,
     mediaBytes: 0,
@@ -57,10 +100,20 @@ export class PlaybackIngress implements RtcIngressGuard {
   };
   lastPlausibleMs = Number.NEGATIVE_INFINITY;
   capturing = false;
+  private rejectedAt = Number.NEGATIVE_INFINITY;
+  private packetClass: PlaybackRejectedClass = "unknown";
+  private inspection: PtcsInspection = {};
   private reservedOutput = 0;
   private reservedFrames = 0;
   private readonly assemblies = new Map<number, { bytes: number }>();
   private readonly assembler: PtcsReassembler;
+  private readonly lateAssembler = new PtcsReassembler(
+    (frame) => {
+      this.chargeLate(frame.length);
+      this.lateFrame(frame, true);
+    },
+    { maxFrameBytes: PLAYBACK_LATE_FRAME_BYTES },
+  );
   private expiryTimer?: NodeJS.Timeout;
   private selectors = new Set<number>();
   private tombstone = false;
@@ -79,18 +132,24 @@ export class PlaybackIngress implements RtcIngressGuard {
   }
 
   stale(): void {
-    this.plausible(true);
-    this.opts.end("invalid_media");
+    this.inspection = {};
+    this.packetClass = "unknown";
+    this.evidence.unknown = true;
+    this.reject("invalid_media", true, "baseline");
   }
 
   /** Rejected or unclassified baseline work cannot prove the absence of incoming media. */
   received(outcome: "accepted" | "rejected" | "unknown" | void): void {
-    if (outcome !== "accepted") this.reject("invalid_media", true);
+    if (outcome !== "accepted") {
+      if (outcome !== "rejected") this.evidence.unknown = true;
+      this.reject("invalid_media", true, "baseline");
+    }
   }
 
   constructor(
     private readonly opts: {
       now?: () => number;
+      nativeMessage?: (direction: "in" | "out", message: unknown) => void;
       end: (reason: "capped" | "capped_wrong_route" | "transport_mismatch" | "invalid_media") => void;
       media: (frame: Buffer) => void;
       control?: (frame: Buffer, link: number) => boolean;
@@ -101,17 +160,20 @@ export class PlaybackIngress implements RtcIngressGuard {
   ) {
     this.assembler = new PtcsReassembler(
       (frame) => {
-        this.assemblies.delete(this.completingId);
+        this.releaseReservation(this.completingId);
         this.complete(frame);
       },
       {
         maxFrameBytes: PLAYBACK_FRAME_BYTES,
         maxPendingFrames: 8,
-        maxBufferedBytes: 1024 * 1024,
-        maxFragmentsPerFrame: 1024,
+        maxBufferedBytes: 16 * 1024 * 1024,
+        maxFragmentsPerFrame: 16384,
         maxAgeMs: PLAYBACK_PARTIAL_AGE_MS,
         staleMs: PLAYBACK_PARTIAL_AGE_MS,
         now: () => this.now(),
+        inspect: (value) => {
+          Object.assign(this.inspection, value);
+        },
       },
     );
   }
@@ -120,7 +182,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     return this.opts.now?.() ?? performance.now();
   }
 
-  /** Independent invocation sweep: 1,750 ms age plus at most 250 ms scheduling granularity. */
+  /** Independent 15-second expiry, with at most 250 ms scheduling granularity. */
   startExpiry(): void {
     this.expiryTimer ??= setInterval(() => this.expire(), PLAYBACK_EXPIRY_SWEEP_MS);
     this.expiryTimer.unref();
@@ -136,9 +198,14 @@ export class PlaybackIngress implements RtcIngressGuard {
   /** The assembler owns progress timestamps; duplicate fragments never renew the idle deadline. */
   private expire(): void {
     if (this.assembler.expire()) {
-      this.reject("invalid_media", true);
+      this.packetClass = "playback";
+      this.reject("invalid_media", true, "expiry");
       this.finishCapture();
     }
+  }
+
+  invalidMedia(reason: PtcsRejectionReason): void {
+    this.reject("invalid_media", true, reason);
   }
 
   reserve(start: number, stop: number): void {
@@ -147,22 +214,41 @@ export class PlaybackIngress implements RtcIngressGuard {
 
   private plausible(unknown = false): void {
     this.lastPlausibleMs = this.now();
-    if (unknown) this.evidence.unknown = true;
+    if (unknown) this.rejectedAt = this.now();
+    if (unknown && (this.tombstone || this.opts.observeOnly)) this.evidence.unknown = true;
   }
 
-  private reject(reason: "capped" | "transport_mismatch" | "invalid_media", unknown = false): false {
+  private reject(
+    reason: "capped" | "transport_mismatch" | "invalid_media",
+    unknown = false,
+    diagnostic: PtcsRejectionReason = "metadata",
+  ): false {
+    const counters = this.assembler.getDiagnostics();
+    this.evidence.assemblerDecompression = counters.decompression;
+    this.evidence.assemblerInvalidMetadata = counters.invalidMetadata;
+    if (this.evidence.firstRejectionReason === "none") {
+      this.evidence.firstRejectionReason = this.inspection.reason ?? diagnostic;
+      this.evidence.firstRejectedClass = this.packetClass;
+      this.evidence.compressionState = this.inspection.compressionState ?? "unknown";
+      this.evidence.declaredSizeBucket = playbackSizeBucket(this.inspection.declaredSize);
+      this.evidence.assembledSizeBucket = playbackSizeBucket(this.inspection.assembledSize);
+      this.evidence.outputSizeBucket = playbackSizeBucket(this.inspection.outputSize);
+      this.evidence.zstdWindowBucket = playbackSizeBucket(this.inspection.zstdWindow);
+    }
+    this.evidence.rejectionCount = Math.min(255, this.evidence.rejectionCount + 1);
     this.nonControlTraffic = true;
     this.plausible(unknown);
     this.evidence.rejected = add(this.evidence.rejected, 1);
-    this.opts.end(reason);
+    this.opts.end(reason === "capped" ? "invalid_media" : reason);
     return false;
   }
 
-  /** No payload work remains after capture; reservations persist for this owner's lifetime. */
+  /** Discard partial payload and release concurrent output reservations; cumulative work remains charged. */
   finishCapture(): void {
     this.capturing = false;
-    if (this.assemblies.size) this.plausible(true);
+    if (this.assemblies.size) this.plausible();
     this.assemblies.clear();
+    this.reservedOutput = 0;
     this.assembler.clear();
   }
 
@@ -173,7 +259,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     this.lateWindow = { since: this.now(), bytes: 0, frames: 0 };
   }
 
-  /** Incomplete assemblies or expired/rejected traffic cannot manufacture cessation. */
+  /** Capture errors require a fresh quiet interval; observation loss remains permanently uncertain. */
   observationComplete(): boolean {
     const now = this.now();
     this.expire();
@@ -183,11 +269,32 @@ export class PlaybackIngress implements RtcIngressGuard {
         this.controlPartials.delete(key);
       }
     }
-    return !this.evidence.unknown && this.assemblies.size === 0 && this.controlPartials.size === 0;
+    return (
+      !this.evidence.unknown &&
+      now - this.rejectedAt >= 5000 &&
+      this.assemblies.size === 0 &&
+      this.controlPartials.size === 0
+    );
+  }
+
+  sent(message: Buffer): void {
+    try {
+      this.opts.nativeMessage?.("out", message);
+    } catch {}
+  }
+
+  private releaseReservation(id: number): void {
+    this.reservedOutput -= this.assemblies.get(id)?.bytes ?? 0;
+    this.assemblies.delete(id);
   }
 
   native(message: unknown): boolean {
+    try {
+      this.opts.nativeMessage?.("in", message);
+    } catch {}
     this.expire();
+    this.inspection = {};
+    this.packetClass = "unknown";
     this.currentControlKey = undefined;
     const binary = Buffer.isBuffer(message)
       ? message
@@ -198,7 +305,10 @@ export class PlaybackIngress implements RtcIngressGuard {
           : undefined;
     this.evidence.nativeMessages = add(this.evidence.nativeMessages, 1);
     this.evidence.nativeBytes = add(this.evidence.nativeBytes, binary?.length ?? 0);
-    if (!binary) return this.reject("invalid_media", true);
+    if (!binary) {
+      this.packetClass = "nonbinary";
+      return this.reject("invalid_media", true, "native");
+    }
     if (!this.tombstone && (this.evidence.nativeBytes >= 4 * 1024 * 1024 || this.evidence.nativeMessages >= 16384)) {
       this.evidence.cutoff = true;
       this.opts.end("capped");
@@ -216,6 +326,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     if (!h) {
       const inner = parsePortalHeader(binary);
       if (inner) {
+        this.packetClass = "bare";
         if (this.opts.observeOnly) {
           if (inner.commandId === 1300 || inner.commandId === 1301 || inner.commandId === 1303) {
             this.nonControlTraffic = true;
@@ -233,8 +344,20 @@ export class PlaybackIngress implements RtcIngressGuard {
         if (inner.paramLength + 16 !== binary.length) return this.reject("invalid_media", true);
         return true;
       }
-      return this.reject("invalid_media", true);
+      return this.reject("invalid_media", true, "header");
     }
+    this.packetClass =
+      h.channel === 4
+        ? "playback"
+        : h.channel === 5 || h.channel === 1
+          ? "live"
+          : h.channel === 0 || h.channel === 2
+            ? "control"
+            : "other";
+    this.inspection = {
+      declaredSize: h.frameLength,
+      compressionState: binary.readUInt16LE(18) & 0x0800 ? "flagged" : "uncompressed",
+    };
     if (h.channel !== 4) {
       this.currentControlKey = `${h.channel}:${h.frameId}`;
       if (h.index !== 0 || !h.last) {
@@ -253,7 +376,7 @@ export class PlaybackIngress implements RtcIngressGuard {
         binary[4] !== 3 ||
         (binary.readUInt16LE(18) & 0xb000) !== 0 ||
         !(binary.readUInt16LE(18) & 0x4000) ||
-        h.frameLength > PLAYBACK_FRAME_BYTES ||
+        h.frameLength > PLAYBACK_LATE_FRAME_BYTES ||
         h.payloadLength !== h.frameLength ||
         h.payloadLength > binary.length - 28
       )
@@ -261,7 +384,7 @@ export class PlaybackIngress implements RtcIngressGuard {
       const compressed = !!(binary.readUInt16LE(18) & 0x0800);
       const now = this.now();
       if (now - this.lateWindow.since >= PLAYBACK_LATE_WINDOW_MS) this.lateWindow = { since: now, bytes: 0, frames: 0 };
-      const allowance = compressed ? PLAYBACK_FRAME_BYTES : h.payloadLength;
+      const allowance = compressed ? PLAYBACK_LATE_FRAME_BYTES : h.payloadLength;
       if (
         this.lateWindow.frames >= PLAYBACK_LATE_WINDOW_FRAMES ||
         this.lateWindow.bytes + allowance > PLAYBACK_LATE_WINDOW_BYTES
@@ -273,10 +396,10 @@ export class PlaybackIngress implements RtcIngressGuard {
         this.lateFrame(binary.subarray(28, 28 + h.payloadLength), true);
         return false;
       }
-      const inspected = this.assembler.push(binary);
-      this.assembler.clear();
+      const inspected = this.lateAssembler.push(binary);
+      this.lateAssembler.clear();
       if (!inspected) {
-        this.chargeLate(PLAYBACK_FRAME_BYTES);
+        this.chargeLate(PLAYBACK_LATE_FRAME_BYTES);
         return this.lateUnknown("invalid_media");
       }
       return false;
@@ -287,19 +410,29 @@ export class PlaybackIngress implements RtcIngressGuard {
       (binary.readUInt16LE(18) & 0xb000) !== 0 ||
       !(binary.readUInt16LE(18) & 0x4000) ||
       h.frameLength > PLAYBACK_FRAME_BYTES ||
-      h.index >= 1024 ||
+      h.index >= 16384 ||
       h.payloadLength > binary.length - 28
     )
-      return this.reject("invalid_media", true);
+      return this.reject(
+        "invalid_media",
+        true,
+        binary[4] !== 3
+          ? "header"
+          : (binary.readUInt16LE(18) & 0xb000) !== 0 || !(binary.readUInt16LE(18) & 0x4000)
+            ? "flags"
+            : h.frameLength > PLAYBACK_FRAME_BYTES || h.index >= 16384
+              ? "limits"
+              : "extent",
+      );
     let reservation = this.assemblies.get(h.frameId);
     if (!reservation) {
       const allowance = binary.readUInt16LE(18) & 0x0800 ? PLAYBACK_FRAME_BYTES : h.frameLength;
       if (
-        this.reservedOutput + this.evidence.wrongRouteBytes + allowance > PLAYBACK_BYTES ||
+        this.reservedOutput + allowance > PLAYBACK_RESERVED_BYTES ||
         this.reservedFrames + this.evidence.wrongRouteFrames >= 256 ||
-        this.evidence.decodedWorkBytes + allowance > 4 * 1024 * 1024
+        this.evidence.decodedWorkBytes + allowance > PLAYBACK_WORK_BYTES
       )
-        return this.reject("capped");
+        return this.reject("capped", false, "limits");
       if (this.assemblies.size >= 8) return this.reject("invalid_media", true);
       this.reservedOutput += allowance;
       this.reservedFrames++;
@@ -309,10 +442,20 @@ export class PlaybackIngress implements RtcIngressGuard {
     }
     this.completingId = h.frameId;
     if (!this.assembler.push(binary)) {
-      this.assemblies.delete(h.frameId);
+      this.releaseReservation(h.frameId);
       return this.reject("invalid_media", true);
     }
-    if (!this.assembler.pending) this.assemblies.clear();
+    if (!this.assembler.pending) {
+      this.assemblies.clear();
+      this.reservedOutput = 0;
+    }
+    if (this.evidence.firstRejectionReason === "none") {
+      this.evidence.compressionState = this.inspection.compressionState ?? this.evidence.compressionState;
+      this.evidence.declaredSizeBucket = playbackSizeBucket(this.inspection.declaredSize);
+      this.evidence.assembledSizeBucket = playbackSizeBucket(this.inspection.assembledSize);
+      this.evidence.outputSizeBucket = playbackSizeBucket(this.inspection.outputSize);
+      this.evidence.zstdWindowBucket = playbackSizeBucket(this.inspection.zstdWindow);
+    }
     return false;
   }
 
@@ -326,7 +469,8 @@ export class PlaybackIngress implements RtcIngressGuard {
   }
 
   /**
-   * One-second windows admit 64 MiB and 1,024 complete packets. At 30 fps and the 256 KiB
+   * Post-release inspection keeps its 256 KiB ceiling. One-second windows admit 64 MiB
+   * and 1,024 complete packets. At 30 fps and the 256 KiB
    * per-frame ceiling, a stream uses at most 7.5 MiB/s; byte headroom exceeds eight streams.
    * Successful inflation charges actual output; failed inflation consumes its full bounded allowance.
    */
@@ -353,7 +497,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     if (!this.tombstone) return;
     const h = parsePortalHeader(frame);
     const reservedMedia = h && (h.commandId === 1300 || h.commandId === 1301) && this.selectors.has(h.isResponse);
-    if (!h || h.paramLength + 16 !== frame.length || frame.length > PLAYBACK_FRAME_BYTES) {
+    if (!h || h.paramLength + 16 !== frame.length || frame.length > PLAYBACK_LATE_FRAME_BYTES) {
       if (playbackRoute || reservedMedia) this.lateUnknown("invalid_media");
       return;
     }
@@ -410,7 +554,19 @@ export class PlaybackIngress implements RtcIngressGuard {
       !this.selectors.has(h.isResponse) ||
       (h.commandId !== 1300 && h.commandId !== 1301)
     ) {
-      this.reject("invalid_media", true);
+      this.reject(
+        "invalid_media",
+        true,
+        !h
+          ? "portal-header"
+          : h.paramLength + 16 !== frame.length
+            ? "extent"
+            : h.channel !== 101
+              ? "channel"
+              : !this.selectors.has(h.isResponse)
+                ? "selector"
+                : "command",
+      );
       return;
     }
     if (

@@ -51,15 +51,15 @@ describe("offline retained-state and budget matrix", () => {
   it("refuses a fragment position beyond the strict limit", () => {
     const s = ingress(),
       p = packets(media())[0]!;
-    p.writeUInt16LE(1024, 16);
+    p.writeUInt16LE(16384, 16);
     expect(s.guard.native(p)).toBe(false);
-    expect(s.guard.evidence.unknown).toBe(true);
+    expect(s.guard.evidence.unknown).toBe(false);
     expect(s.delivered).not.toHaveBeenCalled();
   });
   it("refuses a ninth simultaneous partial without collecting", () => {
     const s = ingress();
     for (let n = 0; n < 9; n++) s.guard.native(packets(media(5000))[0]);
-    expect(s.guard.evidence.unknown).toBe(true);
+    expect(s.guard.evidence.unknown).toBe(false);
     expect(s.delivered).not.toHaveBeenCalled();
   });
   it.each([1300, 1301])("charges the combined frame cap for media %s", (command) => {
@@ -153,7 +153,7 @@ describe("offline absolute deadline and cessation matrix", () => {
     await run;
     expect(s.sent).toEqual([0, 1, 3]);
     const result = s.c.observe();
-    await vi.advanceTimersByTimeAsync(6000);
+    await vi.advanceTimersByTimeAsync(24010);
     expect((await result).releaseOutcome).toBe("stop_unconfirmed");
   });
   it("no video ends capture at five seconds and not just before it", async () => {
@@ -166,7 +166,7 @@ describe("offline absolute deadline and cessation matrix", () => {
     expect(s.sent).toEqual([0, 1, 3]);
     expect(s.c.receipt.captureOutcome).toBe("no_media");
     const result = s.c.observe();
-    await vi.advanceTimersByTimeAsync(6000);
+    await vi.advanceTimersByTimeAsync(24010);
     await result;
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -184,7 +184,7 @@ describe("offline absolute deadline and cessation matrix", () => {
     await run;
     expect(s.sent).toEqual([0, 1, 3]);
     const result = s.c.observe();
-    await vi.advanceTimersByTimeAsync(6000);
+    await vi.advanceTimersByTimeAsync(24010);
     await result;
   });
   it("cleanup never sends at hard expiry", async () => {
@@ -215,8 +215,8 @@ describe("offline absolute deadline and cessation matrix", () => {
     const result = s.c.observe();
     await vi.advanceTimersByTimeAsync(4999);
     s.c.ingress.native(packets(media(5000))[0]);
-    await vi.advanceTimersByTimeAsync(1001);
-    expect((await result).cessationOutcome).toBe("media_continues");
+    await vi.advanceTimersByTimeAsync(19011);
+    expect((await result).cessationOutcome).toBe("cessation_unknown");
     expect(s.c.receipt.latchRetained).toBe(true);
   });
 });

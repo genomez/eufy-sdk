@@ -1204,6 +1204,8 @@ export class RtcCommandRouter {
       cameras?: ReadonlySet<string>;
       excluded?: ReadonlySet<string>;
       fresh?: () => boolean;
+      beforeDispatch?: () => void;
+      nativeMessage?: (direction: "in" | "out", message: unknown) => void;
     } = {},
   ): Promise<PlaybackReceipt> {
     const started = performance.now();
@@ -1235,6 +1237,7 @@ export class RtcCommandRouter {
       st!.scheduler.snapshot().queued === 0 &&
       renewalAt() - Date.now() > deadlineMs - performance.now() + 5000;
     const candidate = new EventPlaybackCandidate({
+      nativeMessage: opts.nativeMessage,
       deadlineMs,
       continuous,
       startAllowed,
@@ -1294,6 +1297,7 @@ export class RtcCommandRouter {
       return candidate.observe();
     }
     if (!st) return candidate.observe();
+    opts.beforeDispatch?.();
     st.session.attachIngressGuard(candidate.ingress);
     this.playbackProbes.set(stationSn, { controller, candidate });
     st.leases++;

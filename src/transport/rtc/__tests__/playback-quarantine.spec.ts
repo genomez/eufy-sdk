@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { zstdCompressSync } from "node:zlib";
 import {
   PlaybackIngress,
-  PLAYBACK_FRAME_BYTES,
   PLAYBACK_LATE_WINDOW_MS,
   PLAYBACK_LATE_WINDOW_BYTES,
   PLAYBACK_LATE_WINDOW_FRAMES,
@@ -10,6 +9,7 @@ import {
 import { PtcsFramer, packetize } from "../ptcs-framer.js";
 import { buildPortalHeader } from "../portal-packet.js";
 
+const PLAYBACK_FRAME_BYTES = 256 * 1024;
 let id = 0;
 const frame = (command: number, selector: number, size = 5000) =>
   Buffer.concat([buildPortalHeader(command, size, 101, 9, selector), Buffer.alloc(size)]);

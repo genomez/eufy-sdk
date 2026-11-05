@@ -164,6 +164,7 @@ export class EventPlaybackCandidate {
   private finalized = false;
   private stoppedAt?: number;
   private releaseSeen = false;
+  private releaseAt?: number;
   private eofSeen = false;
   private absentSeen = false;
   private conflict = false;
@@ -183,9 +184,11 @@ export class EventPlaybackCandidate {
       latch: (unresolved: boolean) => void;
       signal: AbortSignal;
       liveAllowed?: () => boolean;
+      nativeMessage?: (direction: "in" | "out", message: unknown) => void;
     },
   ) {
     this.ingress = new PlaybackIngress({
+      nativeMessage: opts.nativeMessage,
       end: (reason) => this.end(reason),
       media: (frame) => this.media(frame),
       control: (frame, link) => this.control(frame, link),
@@ -257,9 +260,10 @@ export class EventPlaybackCandidate {
 
   end(reason: CaptureOutcome): void {
     if (this.finalized) {
-      if (reason === "capped_wrong_route") this.receipt.captureOutcome = reason;
+      if (reason === "capped_wrong_route" || reason === "invalid_media") this.receipt.captureOutcome = reason;
       return;
     }
+    if (this.receipt.captureOutcome === "invalid_media" && reason !== "invalid_media") return;
     this.receipt.captureOutcome = reason;
     this.ingress.finishCapture();
     this.finish?.();
@@ -373,13 +377,15 @@ export class EventPlaybackCandidate {
   async observe(): Promise<PlaybackReceipt> {
     try {
       this.finalize();
-      const deadline = Math.min(this.opts.deadlineMs, (this.stoppedAt ?? performance.now()) + 6000);
+      const deadline = this.opts.deadlineMs;
       if (this.stoppedAt !== undefined) {
         while (performance.now() < deadline && this.opts.continuous()) {
           const complete = this.ingress.observationComplete();
-          const quiet = performance.now() - Math.max(this.stoppedAt, this.ingress.lastPlausibleMs);
+          const quiet =
+            performance.now() -
+            Math.max(this.stoppedAt, this.releaseAt ?? this.stoppedAt, this.ingress.lastPlausibleMs);
           this.receipt.silenceMs = Math.max(0, Math.floor(quiet));
-          if (complete && quiet >= 5000) {
+          if (complete && quiet >= 5000 && (this.releaseSeen || (this.absentSeen && this.eofSeen))) {
             this.receipt.cessationOutcome = "ceased";
             break;
           }
@@ -387,12 +393,17 @@ export class EventPlaybackCandidate {
         }
         if (this.receipt.cessationOutcome !== "ceased")
           this.receipt.cessationOutcome =
-            this.opts.continuous() && this.ingress.observationComplete() ? "media_continues" : "cessation_unknown";
+            this.opts.continuous() &&
+            this.ingress.observationComplete() &&
+            (this.releaseSeen || (this.absentSeen && this.eofSeen))
+              ? "media_continues"
+              : "cessation_unknown";
       }
       this.receipt.ownerContinuous = this.opts.continuous();
       if (this.receipt.startAttempted) {
         if (
           this.receipt.ownerContinuous &&
+          this.receipt.stopSent &&
           this.receipt.cessationOutcome === "ceased" &&
           !this.conflict &&
           (this.releaseSeen || (this.absentSeen && this.eofSeen))
@@ -420,6 +431,7 @@ export class EventPlaybackCandidate {
         this.receipt.pauseAttempted &&
         this.receipt.stopAttempted &&
         !this.receipt.unknown &&
+        this.receipt.rejected === 0 &&
         this.receipt.wrongRouteFrames === 0;
       this.ingress.quarantine();
       return { ...this.receipt };
@@ -431,7 +443,7 @@ export class EventPlaybackCandidate {
   private media(frame: Buffer): void {
     const h = parsePortalHeader(frame)!;
     if (h.isResponse !== this.startSelector) {
-      this.end("invalid_media");
+      this.ingress.invalidMedia("selector");
       return;
     }
     if (h.commandId === 1301) {
@@ -440,12 +452,12 @@ export class EventPlaybackCandidate {
     }
     const body = frame.subarray(16);
     if (body.length < 22 || body.readUInt32LE(0) !== body.length - 22 || body[5] !== 1) {
-      this.end("invalid_media");
+      this.ingress.invalidMedia("metadata");
       return;
     }
     const data = body.subarray(22);
     if (!(data.length >= 6 && (data.readUInt32BE(0) === 1 || data.readUIntBE(0, 3) === 1))) {
-      this.end("invalid_media");
+      this.ingress.invalidMedia("metadata");
       return;
     }
     this.receipt.videoFrames++;
@@ -500,6 +512,7 @@ export class EventPlaybackCandidate {
       this.end("eof");
     } else if (p.state === 2 && p.code === 15 && this.stoppedAt !== undefined) {
       this.releaseSeen = true;
+      this.releaseAt = performance.now();
       this.receipt.stopStatusCount = Math.min(Number.MAX_SAFE_INTEGER, this.receipt.stopStatusCount + 1);
       this.receipt.segmenComparable = typeof p.segmen === "number" && Number.isFinite(p.segmen);
       this.receipt.segmenMatchesRequest = this.receipt.segmenComparable && p.segmen === this.segments[3];
@@ -510,6 +523,7 @@ export class EventPlaybackCandidate {
         : "exclusive_timing";
     } else if (p.state === 0 && p.code === 7 && this.stoppedAt !== undefined) {
       this.absentSeen = true;
+      this.releaseAt = performance.now();
       this.receipt.correlationBasis = "exclusive_timing";
     } else {
       this.conflict = true;

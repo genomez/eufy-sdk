@@ -601,6 +601,7 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
     let accepted: boolean;
     const bytes = packet.length;
     try {
+      this.ingressGuard?.sent?.(packet);
       accepted = dc.sendMessageBinary(packet);
     } catch (error) {
       this.transportEvidence.nativeSend(kind, bytes, "thrown");
