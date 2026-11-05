@@ -385,7 +385,7 @@ export class EventPlaybackCandidate {
             performance.now() -
             Math.max(this.stoppedAt, this.releaseAt ?? this.stoppedAt, this.ingress.lastPlausibleMs);
           this.receipt.silenceMs = Math.max(0, Math.floor(quiet));
-          if (complete && quiet >= 5000 && (this.releaseSeen || (this.absentSeen && this.eofSeen))) {
+          if (complete && quiet >= 5000 && this.stopConfirmed()) {
             this.receipt.cessationOutcome = "ceased";
             break;
           }
@@ -393,9 +393,7 @@ export class EventPlaybackCandidate {
         }
         if (this.receipt.cessationOutcome !== "ceased")
           this.receipt.cessationOutcome =
-            this.opts.continuous() &&
-            this.ingress.observationComplete() &&
-            (this.releaseSeen || (this.absentSeen && this.eofSeen))
+            this.opts.continuous() && this.ingress.observationComplete() && this.stopConfirmed()
               ? "media_continues"
               : "cessation_unknown";
       }
@@ -438,6 +436,11 @@ export class EventPlaybackCandidate {
     } finally {
       this.ingress.stopExpiry();
     }
+  }
+
+  /** Cessation evidence counts only after a stop that was actually sent and confirmed without conflict. */
+  private stopConfirmed(): boolean {
+    return this.receipt.stopSent && !this.conflict && (this.releaseSeen || (this.absentSeen && this.eofSeen));
   }
 
   private media(frame: Buffer): void {

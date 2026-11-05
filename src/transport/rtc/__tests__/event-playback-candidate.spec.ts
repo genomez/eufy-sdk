@@ -271,6 +271,7 @@ function candidateSetup({
   release = true,
   absent = false,
   eof = false,
+  stopSend = "sent" as "sent" | "refused" | "throws",
 } = {}) {
   vi.useFakeTimers();
   vi.spyOn(nativePerformance, "now").mockImplementation(() => performance.now());
@@ -305,6 +306,15 @@ function candidateSetup({
         if (ownerChanged) continuous = false;
       }
       if (body.data.cmd === 1 && pauseThrows) throw new Error("synthetic");
+      if (body.data.cmd === 3 && stopSend !== "sent") {
+        // A status notification still arrives asynchronously even though this send failed.
+        setTimeout(
+          () => candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 2, code: 15, segmen: body.segmen } }), 3),
+          50,
+        );
+        if (stopSend === "throws") throw new Error("synthetic_stop");
+        return false;
+      }
       if (body.data.cmd === 3 && release)
         candidate.ingress.decoded(
           json({ cmd: 6001, payload: { state: 2, code: 15, segmen: matching ? body.segmen : 200 } }),
@@ -368,6 +378,22 @@ it.each([0, 1, 2, 3, 5, 9])(
     } finally {
       framer.destroy();
     }
+  },
+);
+
+it.each(["refused", "throws"] as const)(
+  "stop send %s with a delayed stop status never reports ceased or clears the latch",
+  async (stopSend) => {
+    const s = candidateSetup({ stopSend, eof: true });
+    await s.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+    const pending = s.candidate.observe();
+    await vi.advanceTimersByTimeAsync(24000);
+    const result = await pending;
+    expect(result.stopSent).toBe(false);
+    expect(result.cessationOutcome).toBe("cessation_unknown");
+    expect(result.latchCleared).toBe(false);
+    expect(result.latchRetained).toBe(true);
+    expect(s.latch()).toBe(true);
   },
 );
 
