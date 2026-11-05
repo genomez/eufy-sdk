@@ -71,3 +71,9 @@ The changed source and documentation were formatted with the installed Prettier 
 The selector MAC additionally binds the opaque account namespace. `identityStartBasis` stores an HMAC rather than a source token, retaining stable identity without persisting unknown vendor strings. Neither changes a public contract. A cache-only namespace getter and safe row projection are exported for the internal caller.
 
 Persistence, browse budgets, store-wide collision and cross-window path-ambiguity checks remain caller responsibilities. Within one observed table, conflicting identities are rejected and shared cover paths have no selector. A seal proves observed provenance, not firmware path uniqueness or continued retention. Historical-cover attribution, actual five-camera data and foreground hardware latency remain unqualified. No deployment, live test, PR, push or tag is part of this implementation.
+
+Follow-up local validation (2026-11-05): `npm run typecheck` passed;
+`npm test` passed 6,624 tests with 8 existing skips. The follow-up adds stable-ID
+growth, sanitized rejection/time-shape diagnostics, and bounded cursor admission
+regressions. `npm run build` creates the distribution used by the paired bridge.
+All fixture rows and station sessions are synthetic; no live paging claim is made.

@@ -119,12 +119,12 @@ describe("recording admission without station side effects", () => {
     expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "deferred", reason: "reply_capacity" });
     expect(i.eventTableReplies.size + i.eventThumbReplies.size).toBe(16);
   });
-  it.each(["model", "excluded", "station", "account", "key", "expanded"])(
+  it.each(["parent", "excluded", "station", "account", "key", "expanded"])(
     "refuses invalid %s scope with zero send",
     async (kind) => {
       const f = await fixture();
       let input = scope;
-      if (kind === "model") f.devices.get(cameras[0]!)!.model = "T8134";
+      if (kind === "parent") f.devices.get(cameras[0]!)!.stationSn = "unbound";
       if (kind === "excluded") f.devices.get(cameras[0]!)!.name = "J Safe";
       if (kind === "station") f.devices.get(cameras[0]!)!.stationSn = "other";
       if (kind === "account") f.changeAccount();

@@ -1119,7 +1119,7 @@ export class EufyMega extends EventEmitter {
     const allowed = new Set(policy.allowedCameras);
     if (
       scope.stationSn !== policy.stationBinding ||
-      allowed.size !== 5 ||
+      allowed.size < 1 ||
       scope.cameraSns.size !== allowed.size ||
       [...scope.cameraSns].some((sn) => !allowed.has(sn))
     )
@@ -1130,7 +1130,12 @@ export class EufyMega extends EventEmitter {
       if (
         !device ||
         device.stationSn !== scope.stationSn ||
-        !/^T84(?:2|A)/i.test(device.model ?? "") ||
+        resolveDevice({
+          model: device.model,
+          deviceType: cachedDeviceType(device),
+          category: device.category,
+          params: device.params ?? {},
+        }).codec !== "camera" ||
         device.name?.trim().toLowerCase() === "j safe" ||
         typeof channel !== "number" ||
         this.registry.serialForFrame(scope.stationSn, channel) !== sn

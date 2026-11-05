@@ -31,6 +31,8 @@ export interface RecordingReadScope {
 export interface RecordingReadOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Private exclusive upper record bound for a continuation of the current catalog cycle. */
+  beforeRecordId?: number;
 }
 
 /** Fixed refusal codes contain no transport exception, identifier, vendor value or path. */
@@ -102,9 +104,21 @@ export interface InternalRecordingRow {
 export interface RecordingDiagnostics {
   rejected: number;
   identity_conflict: number;
+  rejectedByReason: { not_in_scope: number; bad_record_id: number; bad_start_time: number; other: number };
+  unknownStartTimeShapes: { shape: string; count: number }[];
+}
+/** Private paging evidence, never a public metadata projection. Cursor semantics require runtime qualification. */
+export interface RecordingPage {
+  count: number;
+  nextBefore: number | null;
+  newestRecordId: number | null;
+  oldestAtMs: number | null;
+  newestAtMs: number | null;
+  consistent: boolean;
 }
 export type CatalogReadResult =
-  { status: "ok"; rows: InternalRecordingRow[]; diagnostics: RecordingDiagnostics } | RecordingReadFailure;
+  | { status: "ok"; rows: InternalRecordingRow[]; diagnostics: RecordingDiagnostics; page: RecordingPage }
+  | RecordingReadFailure;
 export type CoverReadResult = { status: "ok"; jpeg: Buffer } | RecordingReadFailure;
 
 /** Explicit public projection excludes all internal identity bases and selectors. */
@@ -218,7 +232,37 @@ export function normalizeRecordingRows(
   const keyed = { ...scope, identityKey };
   const scopeFull = mac(identityKey, "recordings.scope.v1", scope.accountNamespace, scope.stationSn);
   const scopeId = opaque("s_", scopeFull);
-  const diagnostics = { rejected: 0, identity_conflict: 0 };
+  const diagnostics: RecordingDiagnostics = {
+    rejected: 0,
+    identity_conflict: 0,
+    rejectedByReason: { not_in_scope: 0, bad_record_id: 0, bad_start_time: 0, other: 0 },
+    unknownStartTimeShapes: [],
+  };
+  const reject = (reason: keyof RecordingDiagnostics["rejectedByReason"]) => {
+    diagnostics.rejected++;
+    diagnostics.rejectedByReason[reason]++;
+  };
+  const ids: number[] = [];
+  const times: number[] = [];
+  let consistent = true;
+  for (const raw of rows) {
+    const row = raw as Record<string, unknown> | null;
+    if (!row || typeof row.record_id !== "number" || !Number.isSafeInteger(row.record_id) || row.record_id <= 0) {
+      consistent = false;
+      continue;
+    }
+    ids.push(row.record_id);
+    const time = parseRecordingTime(row.start_time).atMs;
+    if (time !== null) times.push(time);
+  }
+  const page: RecordingPage = {
+    count: rows.length,
+    nextBefore: ids.length ? Math.min(...ids) : null,
+    newestRecordId: ids.length ? Math.max(...ids) : null,
+    oldestAtMs: times.length ? Math.min(...times) : null,
+    newestAtMs: times.length ? Math.max(...times) : null,
+    consistent: consistent && new Set(ids).size === rows.length && times.length === rows.length,
+  };
   const result = new Map<string, InternalRecordingRow>();
   const hashes = new Map<string, string>();
   const conflicted = new Set<string>();
@@ -226,17 +270,21 @@ export function normalizeRecordingRows(
   const cameraHashes = new Map<string, string>();
   for (const raw of rows) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      diagnostics.rejected++;
+      reject("other");
       continue;
     }
     const row = raw as Record<string, unknown>;
     if (typeof row.device_sn !== "string" || !scope.cameraSns.has(row.device_sn)) {
-      diagnostics.rejected++;
+      reject("not_in_scope");
       continue;
     }
     const basis = startIdentity(row.start_time);
-    if (typeof row.record_id !== "number" || !Number.isSafeInteger(row.record_id) || row.record_id <= 0 || !basis) {
-      diagnostics.rejected++;
+    if (typeof row.record_id !== "number" || !Number.isSafeInteger(row.record_id) || row.record_id <= 0) {
+      reject("bad_record_id");
+      continue;
+    }
+    if (!basis) {
+      reject("bad_start_time");
       continue;
     }
     const cameraFull = mac(identityKey, "recordings.camera.v1", scopeId, row.device_sn);
@@ -255,6 +303,20 @@ export function normalizeRecordingRows(
     if (previousStart && previousStart !== basis) diagnostics.identity_conflict++;
     records.set(recordKey, basis);
     const start = parseRecordingTime(typeof row.start_time === "string" ? basis.slice(7) : row.start_time);
+    if (start.timeStatus !== "valid") {
+      const shape =
+        typeof row.start_time === "string"
+          ? [...row.start_time]
+              .slice(0, 32)
+              .map((c) => (/\p{N}/u.test(c) ? "9" : /\p{L}/u.test(c) ? "a" : /[ :/.+\-]/.test(c) ? c : "?"))
+              .join("")
+          : typeof row.start_time === "number"
+            ? "9"
+            : "?";
+      const entry = diagnostics.unknownStartTimeShapes.find((entry) => entry.shape === shape);
+      if (entry) entry.count++;
+      else diagnostics.unknownStartTimeShapes.push({ shape, count: 1 });
+    }
     const end = parseRecordingTime(row.end_time);
     const duration = start.atMs !== null && end.atMs !== null ? (end.atMs - start.atMs) / 1000 : null;
     const durationSeconds = duration !== null && duration >= 0 && duration <= 86400 ? duration : null;
@@ -312,6 +374,7 @@ export function normalizeRecordingRows(
   return {
     status: "ok",
     diagnostics,
+    page,
     rows: [...result.values()].sort((a, b) =>
       a.startedAtMs !== null && b.startedAtMs !== null
         ? b.startedAtMs - a.startedAtMs || eventOrder(a, b)

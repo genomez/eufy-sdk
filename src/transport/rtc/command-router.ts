@@ -352,14 +352,20 @@ function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
 /** Anonymous process-local ordinal; never derived from connection or account data. */
 let nextRefreshOwnerIncarnation = 0;
 
+interface RecordingAttemptBudget {
+  catalog?: number;
+  coverFinished?: number;
+  covers: number[];
+  nextBefore?: number | null;
+  extraPages?: number;
+  tableFinished?: number;
+}
+
 export class RtcCommandRouter {
   private readonly informationReceiptTimes = new WeakMap<object, number>();
   private readonly wireReceiptTimes = new WeakMap<Buffer, number>();
   private readonly recordingReads = new Map<string, AbortController>();
-  private readonly recordingAttempts = new Map<
-    string,
-    { catalog?: number; coverFinished?: number; covers: number[] }
-  >();
+  private readonly recordingAttempts = new Map<string, RecordingAttemptBudget>();
   private readonly recordingDemandAt = new Map<string, number>();
   private readonly connectionEvidence = new ConnectionEvidenceRecorder();
   private readonly eventTableProbes = new Map<string, AbortController>();
@@ -1233,7 +1239,7 @@ export class RtcCommandRouter {
       !account ||
       recordingAccountNamespace(scope.identityKey, account) !== scope.accountNamespace ||
       scope.stationSn !== policy.stationBinding ||
-      allowed.size !== 5 ||
+      allowed.size < 1 ||
       scope.cameraSns.size !== allowed.size ||
       [...scope.cameraSns].some((sn) => !allowed.has(sn))
     )
@@ -1242,12 +1248,7 @@ export class RtcCommandRouter {
     if (!station || !RtcCommandRouter.claimsDevice(station)) return "scope_invalid";
     for (const sn of allowed) {
       const camera = this.deps.findDevice(sn);
-      if (
-        !camera ||
-        camera.stationSn !== station.sn ||
-        !/^T84(?:2|A)/i.test(camera.model ?? "") ||
-        camera.name?.trim().toLowerCase() === "j safe"
-      )
+      if (!camera || camera.stationSn !== station.sn || camera.name?.trim().toLowerCase() === "j safe")
         return "scope_invalid";
     }
     if (this.deps.recordingsAllowed?.(scope) === false) return "busy";
@@ -1317,6 +1318,11 @@ export class RtcCommandRouter {
     const timeout = opts.timeoutMs ?? CATALOG_TIMEOUT_MS;
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > CATALOG_TIMEOUT_MS)
       return failure("invalid_options", "unavailable");
+    if (
+      opts.beforeRecordId !== undefined &&
+      (selector || !Number.isSafeInteger(opts.beforeRecordId) || opts.beforeRecordId <= 1)
+    )
+      return failure("invalid_options", "unavailable");
     if (opts.signal?.aborted) return failure("aborted", "unavailable");
     if (input?.identityKey?.length !== 32) return failure("store_unavailable", "unavailable");
     try {
@@ -1334,12 +1340,23 @@ export class RtcCommandRouter {
         );
       if (selected && !verifyRecordingSelector(scope, selected)) return failure("selector_invalid", "unavailable");
       if (selected && this.eventThumbReplies.has(selected.thumbPath)) return failure("selector_reserved");
-      const budget = this.recordingAttempts.get(scope.stationSn) ?? { covers: [] };
+      const budget: RecordingAttemptBudget = this.recordingAttempts.get(scope.stationSn) ?? { covers: [] };
+      const continuation = opts.beforeRecordId !== undefined;
+      if (continuation && started - (budget.tableFinished ?? -Infinity) < COVER_START_GAP_MS)
+        return failure("quiet_period");
+      if (
+        continuation &&
+        (budget.catalog === undefined ||
+          started - budget.catalog >= 60_000 ||
+          opts.beforeRecordId !== budget.nextBefore ||
+          (budget.extraPages ?? 0) >= 4)
+      )
+        return failure("invalid_options", "unavailable");
       budget.covers = budget.covers.filter((time) => started - time < 60_000);
       if (
         selected
           ? budget.covers.length >= COVER_ATTEMPTS_PER_MINUTE
-          : started - (budget.catalog ?? -Infinity) < CATALOG_MIN_ATTEMPT_MS
+          : !continuation && started - (budget.catalog ?? -Infinity) < CATALOG_MIN_ATTEMPT_MS
       )
         return failure("rate_limited");
       const st = this.sessions.get(scope.stationSn)!;
@@ -1371,7 +1388,14 @@ export class RtcCommandRouter {
       );
       this.recordingAttempts.set(scope.stationSn, budget);
       if (selected) budget.covers.push(started);
-      else budget.catalog = started;
+      else if (continuation) {
+        budget.extraPages = (budget.extraPages ?? 0) + 1;
+        budget.nextBefore = null;
+      } else {
+        budget.catalog = started;
+        budget.extraPages = 0;
+        budget.nextBefore = null;
+      }
       this.recordingReads.set(scope.stationSn, controller);
       st.leases++;
       st.pendingExchanges++;
@@ -1449,9 +1473,20 @@ export class RtcCommandRouter {
                   deadlineMs,
                   continuity,
                   observation,
-                  (rows) => {
+                  (rows, envelopeValid) => {
                     normalized = normalizeRecordingRows(rows, scope);
+                    if (normalized.status === "ok") {
+                      normalized.page.consistent &&= envelopeValid;
+                      if (
+                        continuation &&
+                        (normalized.page.newestRecordId === null ||
+                          normalized.page.newestRecordId >= opts.beforeRecordId!)
+                      )
+                        normalized.page.consistent = false;
+                      budget.nextBefore = normalized.page.consistent ? normalized.page.nextBefore : null;
+                    }
                   },
+                  opts.beforeRecordId,
                 );
                 result =
                   (table.outcome === "success" || table.outcome === "empty") && normalized
@@ -1489,7 +1524,8 @@ export class RtcCommandRouter {
           ? this.eventThumbReplies.get(selected.thumbPath)
           : this.eventTableReplies.get(transaction);
         if (issued?.owner === st) issued.expiresAtMs = performance.now() + 60_000;
-        if (selected) budget.coverFinished = performance.now();
+        if (!selected) budget.tableFinished = performance.now();
+        if (selected || opts.beforeRecordId !== undefined) budget.coverFinished = performance.now();
         if (this.recordingReads.get(scope.stationSn) === controller) this.recordingReads.delete(scope.stationSn);
         st.pendingExchanges--;
         this.release(scope.stationSn, st);

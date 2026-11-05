@@ -54,3 +54,15 @@ The caller owns browse interests, cover budgets and queueing, persistent identit
 Only strict `YYYY-MM-DD HH:mm:ss` Chicago wall-clock syntax is supported. A repeated DST hour is ambiguous; a spring gap is invalid. UTC and offset-bearing local fields are null unless an instant is unique. Numeric duration is unqualified; only a bounded nonnegative end-minus-start duration is published. The shared helper preserves playback's original acceptance and seconds output.
 
 Fixture version: synthetic v1, generated locally by `recordings-fixture.ts`. No live schema, five-camera coverage or historical-path qualification is established by these tests. Deployment and live acceptance remain separate gates.
+
+Catalog continuations use the optional private `beforeRecordId` read option.
+The station query retains its existing payload fields and count 20, setting
+`start_id` to the exclusive bound minus one and retaining `end_id: 1`.
+These paging semantics are unverified on hardware. Private `page` evidence
+contains record bounds and normalized time bounds; it must never be serialized
+as public metadata or diagnostics. A continuation must match the preceding
+successful cursor, occur within 60 seconds of the first attempt, respect a
+five-second completion gap, and consume one of four extra read slots. It repeats
+all owner, renewal, preemption and scope checks and never acquires a camera owner.
+The installed camera set can grow without changing scope or existing camera HMACs.
+The client validates camera codec and station-channel ownership from cached inventory.

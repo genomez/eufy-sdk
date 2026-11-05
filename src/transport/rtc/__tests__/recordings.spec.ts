@@ -229,7 +229,7 @@ describe("internal normalization and privacy", () => {
       }),
     ]);
     expect(JSON.stringify(result.rows.map(projectRecordingRow))).not.toContain(canary);
-    expect(JSON.stringify(result)).not.toContain("73927491");
+    expect(JSON.stringify({ rows: result.rows, diagnostics: result.diagnostics })).not.toContain("73927491");
     expect(result.rows[0]!.identityStartBasis).not.toContain(canary);
   });
 });
@@ -342,5 +342,85 @@ describe("production bounded reads", () => {
     );
     expect(await pending).toEqual({ status: "unavailable", reason: "invalid_reply" });
     expect(f.logger.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe("catalog continuation metadata", () => {
+  it("preserves existing camera and event identities when enrollment grows", () => {
+    const before = normalizeRecordingRows([row()], scope);
+    const after = normalizeRecordingRows([row()], {
+      ...scope,
+      cameraSns: new Set([...scope.cameraSns, "synthetic-battery"]),
+    });
+    expect(before.status).toBe("ok");
+    expect(after.status).toBe("ok");
+    if (before.status === "ok" && after.status === "ok") {
+      expect(after.rows[0]!.cameraId).toBe(before.rows[0]!.cameraId);
+      expect(after.rows[0]!.eventId).toBe(before.rows[0]!.eventId);
+    }
+  });
+  it("counts rejection reasons and exports only masked unknown time shapes", () => {
+    const result = normalizeRecordingRows(
+      [
+        row({ start_time: "SECRET_CANARY123!?" }),
+        row({ device_sn: "outside" }),
+        row({ record_id: "bad" }),
+        row({ start_time: null }),
+        null,
+      ],
+      scope,
+    );
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      expect(result.diagnostics.rejectedByReason).toEqual({
+        not_in_scope: 1,
+        bad_record_id: 1,
+        bad_start_time: 1,
+        other: 1,
+      });
+      expect(result.diagnostics.unknownStartTimeShapes).toEqual([{ shape: "aaaaaa?aaaaaa999??", count: 1 }]);
+      expect(JSON.stringify(result.diagnostics)).not.toContain("SECRET");
+      expect(result.page.consistent).toBe(false);
+    }
+  });
+});
+
+describe("bounded catalog page admission", () => {
+  it("requires the preceding cursor, completion gap and four-page cycle budget", async () => {
+    const f = await recordingFixture();
+    routers.push(f.router);
+    expect(await f.router.readRecordingCatalog(scope, { beforeRecordId: 101 })).toEqual({
+      status: "unavailable",
+      reason: "invalid_options",
+    });
+    const page = async (start: number, beforeRecordId?: number) => {
+      const count = f.session.sent.length;
+      const read = f.router.readRecordingCatalog(scope, { beforeRecordId });
+      await sent(f.session, count + 1);
+      const rows = Array.from({ length: 20 }, (_, i) => row({ record_id: start - i, thumb_path: "" }));
+      f.session.table(rows, { version: "1", count: 20, start_id: start, end_id: start - 19 });
+      expect((await read).status).toBe("ok");
+    };
+    await page(100);
+    expect(await f.router.readRecordingCatalog(scope, { beforeRecordId: 81 })).toEqual({
+      status: "deferred",
+      reason: "quiet_period",
+    });
+    for (let i = 1; i <= 4; i++) {
+      f.advance(5_000);
+      expect(await f.router.readRecordingCatalog(scope, { beforeRecordId: 200 })).toEqual({
+        status: "unavailable",
+        reason: "invalid_options",
+      });
+      await page(100 - i * 20, 101 - i * 20);
+      const packet = JSON.parse(f.session.sent.at(-1)!.subarray(16).toString());
+      expect(packet.payload.payload).toMatchObject({ count: 20, start_id: 100 - i * 20, end_id: 1 });
+    }
+    f.advance(5_000);
+    expect(await f.router.readRecordingCatalog(scope, { beforeRecordId: 1 })).toEqual({
+      status: "unavailable",
+      reason: "invalid_options",
+    });
+    expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "deferred", reason: "rate_limited" });
   });
 });
