@@ -307,3 +307,27 @@ describe("PtcsFramer receive limits", () => {
     }
   });
 });
+
+describe("PTCS frame identity", () => {
+  it("assembles two playback frames that share a frame id but not a sequence", () => {
+    const frame = vi.fn();
+    const r = new PtcsReassembler(frame);
+    const a = packets(6, 7, 4, 1);
+    const b = packetize(Buffer.alloc(4, 9), { frameId: 7, channel: 4, sequence: 2, payloadBytes: 2 });
+    for (const p of [a[0]!, b[0]!, a[1]!, b[1]!, a[2]!]) expect(r.push(p)).toBe(true);
+    expect(frame).toHaveBeenCalledTimes(2);
+    expect(frame).toHaveBeenCalledWith(Buffer.alloc(4, 9), 4);
+    expect(frame).toHaveBeenCalledWith(Buffer.alloc(6, 7), 4);
+    expect(r.pending).toBe(0);
+  });
+
+  it("still treats a sequence change within one frame id as a conflict off the playback channel", () => {
+    const frame = vi.fn();
+    const r = new PtcsReassembler(frame);
+    const a = packets(6, 7, 0, 1);
+    const b = packets(6, 7, 0, 2);
+    expect(r.push(a[0]!)).toBe(true);
+    expect(r.push(b[1]!)).toBe(false);
+    expect(frame).not.toHaveBeenCalled();
+  });
+});

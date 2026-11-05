@@ -314,7 +314,10 @@ export class PtcsReassembler {
     const compressed = (packet.readUInt16LE(18) & FLAG_COMPRESSED) !== 0;
     const now = this.now();
     this.expireAt(now);
-    const key = `${h.channel}:${h.frameId}`;
+    // On playback the station draws frame ids from a millisecond clock without nudging them, so an audio
+    // and a video frame can share one; the per-frame sequence tells them apart.
+    const key =
+      h.channel === PtcsChannel.PLAYBACK ? `${h.channel}:${h.frameId}:${h.sequence}` : `${h.channel}:${h.frameId}`;
     const body = packet.subarray(PTCS_HEADER_LENGTH, PTCS_HEADER_LENGTH + h.payloadLength);
     if (
       body.length !== h.payloadLength ||

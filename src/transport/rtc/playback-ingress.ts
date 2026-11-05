@@ -107,7 +107,7 @@ export class PlaybackIngress implements RtcIngressGuard {
   private inspection: PtcsInspection = {};
   private reservedOutput = 0;
   private reservedFrames = 0;
-  private readonly assemblies = new Map<number, { bytes: number }>();
+  private readonly assemblies = new Map<string, { bytes: number }>();
   private readonly assembler: PtcsReassembler;
   private readonly lateAssembler = new PtcsReassembler(
     (frame) => {
@@ -120,7 +120,7 @@ export class PlaybackIngress implements RtcIngressGuard {
   private selectors = new Set<number>();
   private tombstone = false;
   private lateWindow = { since: 0, bytes: 0, frames: 0 };
-  private completingId = 0;
+  private completingId = "";
   private readonly controlPartials = new Map<string, number>();
   private currentControlKey?: string;
   readonly observedSinceMs = performance.now();
@@ -285,7 +285,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     } catch {}
   }
 
-  private releaseReservation(id: number): void {
+  private releaseReservation(id: string): void {
     this.reservedOutput -= this.assemblies.get(id)?.bytes ?? 0;
     this.assemblies.delete(id);
   }
@@ -426,7 +426,8 @@ export class PlaybackIngress implements RtcIngressGuard {
               ? "limits"
               : "extent",
       );
-    let reservation = this.assemblies.get(h.frameId);
+    const frameKey = `${h.frameId}:${h.sequence}`;
+    let reservation = this.assemblies.get(frameKey);
     if (!reservation) {
       // The station sets 0x0800 on plain portal frames here too. A first fragment that starts with the
       // portal magic cannot be Zstandard, so it reserves its declared size, not the inflation ceiling.
@@ -444,11 +445,11 @@ export class PlaybackIngress implements RtcIngressGuard {
       this.reservedFrames++;
       this.evidence.decodedWorkBytes += allowance;
       reservation = { bytes: allowance };
-      this.assemblies.set(h.frameId, reservation);
+      this.assemblies.set(frameKey, reservation);
     }
-    this.completingId = h.frameId;
+    this.completingId = frameKey;
     if (!this.assembler.push(binary)) {
-      this.releaseReservation(h.frameId);
+      this.releaseReservation(frameKey);
       return this.reject("invalid_media", true);
     }
     if (!this.assembler.pending) {
