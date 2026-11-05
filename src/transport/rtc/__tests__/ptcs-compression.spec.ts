@@ -246,3 +246,41 @@ describe("PTCS compressed receive frames", () => {
     }
   });
 });
+
+describe("playback channel compression flag on plain portal frames", () => {
+  // A minimal portal frame: "XZYH", command 1301, param length, zero-filled header remainder, then a body.
+  function portal(body: Buffer): Buffer {
+    const h = Buffer.alloc(16);
+    h.write("XZYH", 0, "ascii");
+    h.writeUInt16LE(1301, 4);
+    h.writeUInt32LE(body.length, 6);
+    h[12] = 101;
+    h[14] = 6;
+    return Buffer.concat([h, body]);
+  }
+  function flagged(frame: Buffer, channel: number): Buffer[] {
+    const packets = packetize(frame, { frameId: 3, channel, payloadBytes: 800 });
+    for (const packet of packets) packet.writeUInt16LE(packet.readUInt16LE(18) | 0x0800, 18);
+    return packets;
+  }
+  it("passes a flagged plain portal frame through on the playback channel", () => {
+    const value = portal(Buffer.alloc(185, 9));
+    const frames: Buffer[] = [];
+    const r = new PtcsReassembler((frame) => frames.push(frame));
+    for (const p of flagged(value, 4)) r.push(p);
+    expect(frames).toEqual([value]);
+  });
+  it("still rejects a flagged plain portal frame on other channels", () => {
+    const value = portal(Buffer.alloc(185, 9));
+    const frames: Buffer[] = [];
+    const r = new PtcsReassembler((frame) => frames.push(frame));
+    for (const p of flagged(value, 2)) r.push(p);
+    expect(frames).toEqual([]);
+  });
+  it("still rejects flagged non-portal, non-zstd bytes on the playback channel", () => {
+    const frames: Buffer[] = [];
+    const r = new PtcsReassembler((frame) => frames.push(frame));
+    for (const p of flagged(Buffer.alloc(200, 7), 4)) r.push(p);
+    expect(frames).toEqual([]);
+  });
+});

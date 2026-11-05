@@ -406,7 +406,15 @@ export class PtcsReassembler {
       compressionState: p.compressed ? "flagged" : "uncompressed",
       ...(p.compressed ? {} : { outputSize: frame.length }),
     });
-    if (p.compressed) {
+    // On the playback channel the station also sets 0x0800 on plain portal frames (observed on stored-event
+    // audio, 2026-11-04). A frame without the Zstandard magic that is itself a portal packet is not compressed.
+    const plainPlayback =
+      p.compressed &&
+      p.channel === PtcsChannel.PLAYBACK &&
+      (frame.length < 4 || frame.readUInt32LE(0) !== 0xfd2fb528) &&
+      isPortalPacket(frame);
+    if (plainPlayback) this.opts.inspect?.({ compressionState: "uncompressed", outputSize: frame.length });
+    if (p.compressed && !plainPlayback) {
       const decoded = decompressFrame(frame, this.limits.maxFrameBytes, (value) => this.opts.inspect?.(value));
       if (!decoded) {
         this.count("decompression");
