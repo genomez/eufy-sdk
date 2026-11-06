@@ -9,6 +9,7 @@ import { packetize, PtcsFramer } from "../ptcs-framer.js";
 import { PORTAL_KEEPALIVE } from "../portal-keepalive.js";
 import { performance as nativePerformance } from "node:perf_hooks";
 import { zstdCompressSync } from "node:zlib";
+import { normalizeRecordingRows, recordingAccountNamespace } from "../recordings.js";
 
 const station = "T9000SYNTHETIC",
   camera = "camera-synthetic";
@@ -183,6 +184,61 @@ const options = () => ({
   cameras: new Set([camera]),
   excluded: new Set(["excluded-synthetic"]),
   fresh: () => true,
+});
+
+it("exact sealed clip bypasses newest selection and returns typed video after clean release", async () => {
+  const { router, session, marker } = await fixture();
+  const scope = {
+    stationSn: station,
+    cameraSns: new Set([camera]),
+    identityKey: new Uint8Array(32).fill(7),
+    accountNamespace: recordingAccountNamespace(new Uint8Array(32).fill(7), "synthetic"),
+  };
+  Reflect.get(router, "deps").recordings = { enabled: true, stationBinding: station, allowedCameras: scope.cameraSns };
+  const result = normalizeRecordingRows(session.tableRows, scope);
+  if (result.status !== "ok") throw Error("fixture");
+  const selector = result.rows[0]!.playbackSelector!,
+    video = vi.fn();
+  const before = session.sent.filter((p) => parsePortalHeader(p)!.commandId === 1350).length;
+  const pending = router.readEventPlaybackCandidate(station, {
+    ...options(),
+    excluded: new Set(),
+    clip: { scope, selector, video },
+  });
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await pending).toMatchObject({
+    admissionGate: 0,
+    captureOutcome: "eof",
+    releaseOutcome: "release_confirmed",
+    latchCleared: true,
+  });
+  expect(video).toHaveBeenCalledOnce();
+  expect(marker).toEqual([true, false]);
+  expect(session.sent.filter((p) => parsePortalHeader(p)!.commandId === 1350)).toHaveLength(before);
+});
+
+it("a clip that cannot fit before renewal refuses without start or latch", async () => {
+  const { router, session, marker } = await fixture();
+  const key = new Uint8Array(32).fill(7),
+    scope = {
+      stationSn: station,
+      cameraSns: new Set([camera]),
+      identityKey: key,
+      accountNamespace: recordingAccountNamespace(key, "synthetic"),
+    };
+  Reflect.get(router, "deps").recordings = { enabled: true, stationBinding: station, allowedCameras: scope.cameraSns };
+  const result = normalizeRecordingRows(
+    [{ ...(session.tableRows[0] as object), end_time: "2026-01-15 12:20:00" }],
+    scope,
+  );
+  if (result.status !== "ok") throw Error("fixture");
+  const receipt = await router.readEventPlaybackCandidate(station, {
+    ...options(),
+    excluded: new Set(),
+    clip: { scope, selector: result.rows[0]!.playbackSelector!, video: () => {} },
+  });
+  expect(receipt).toMatchObject({ admissionGate: 26, startAttempted: false, latchRetained: false });
+  expect(marker).toEqual([]);
 });
 it.each(["time_refused", "table_failed", "table_timeout", "selectors_exhausted", "admission_after_dispatch"])(
   "no-start %s leaves the playback slot clear and health clean",

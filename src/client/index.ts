@@ -12,6 +12,7 @@ export type {
   RecordingTimeStatus,
   RecordingKind,
   InternalRecordingRow,
+  InternalPlaybackSelector,
   InternalCoverSelector,
   CatalogReadResult,
   CoverReadResult,

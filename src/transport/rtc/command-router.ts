@@ -107,6 +107,8 @@ import {
   normalizeRecordingRows,
   recordingAccountNamespace,
   verifyRecordingSelector,
+  verifyPlaybackSelector,
+  type InternalPlaybackSelector,
   recordingPacing,
   type RecordingPacing,
   type RecordingPolicy,
@@ -1252,7 +1254,12 @@ export class RtcCommandRouter {
   }
 
   /** Every admission check is cache-only and is repeated inside the idle scheduler turn. */
-  private recordingGate(scope: RecordingReadScope, own = false, cover = false): RecordingReadReason | undefined {
+  private recordingGate(
+    scope: RecordingReadScope,
+    own = false,
+    cover = false,
+    foreground = false,
+  ): RecordingReadReason | undefined {
     const policy = this.deps.recordings;
     if (!policy?.enabled) return "disabled";
     if (scope.identityKey?.length !== 32) return "store_unavailable";
@@ -1298,7 +1305,7 @@ export class RtcCommandRouter {
       (!own && this.recordingReads.has(scope.stationSn))
     )
       return "busy";
-    if (performance.now() - (this.recordingDemandAt.get(scope.stationSn) ?? -Infinity) < READ_QUIET_MS)
+    if (!foreground && performance.now() - (this.recordingDemandAt.get(scope.stationSn) ?? -Infinity) < READ_QUIET_MS)
       return "quiet_period";
     const renewalEpoch =
       st.refreshBusyCooldownAtMs ??
@@ -1308,6 +1315,7 @@ export class RtcCommandRouter {
     if (renewalMonotonic - performance.now() <= CATALOG_TIMEOUT_MS + RENEWAL_RESERVE_MS) return "renewal_due";
     this.pruneEventTableReplies();
     if (this.eventTableReplies.size + this.eventThumbReplies.size >= 16) return "reply_capacity";
+    if (foreground) return;
     const budget = this.recordingAttempts.get(scope.stationSn);
     const coverToCover = cover && budget?.lastWasCover;
     const quiet = coverToCover ? this.recordingPacing.coverQuietMs : READ_QUIET_MS;
@@ -1618,6 +1626,7 @@ export class RtcCommandRouter {
     stationSn: string,
     opts: {
       enabled?: boolean;
+      clip?: { scope: RecordingReadScope; selector: InternalPlaybackSelector; video: (data: Buffer) => void };
       signal?: AbortSignal;
       timeoutMs?: number;
       deadlineMs?: number;
@@ -1628,10 +1637,26 @@ export class RtcCommandRouter {
       nativeMessage?: (direction: "in" | "out", message: unknown) => void;
     } = {},
   ): Promise<PlaybackReceipt> {
-    this.preemptRecordingReads(stationSn);
+    if (opts.clip) {
+      this.preemptRecordingReads(stationSn);
+      const until = performance.now() + 8000;
+      while (this.recordingReads.has(stationSn) && performance.now() < until && !opts.signal?.aborted)
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     const started = performance.now();
-    const timeout = opts.timeoutMs ?? 24000;
-    if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 24000)
+    if (opts.clip) {
+      if (!verifyPlaybackSelector(opts.clip.scope, opts.clip.selector) || opts.clip.scope.stationSn !== stationSn)
+        throw Object.assign(new Error("Playback selection unavailable"), { reason: "not_found" });
+      const gate = this.recordingGate(opts.clip.scope, false, false, true);
+      if (gate)
+        throw Object.assign(new Error("Playback owner unavailable"), {
+          reason: this.playbackUnresolved ? "cleanup_uncertain" : gate === "busy" ? "busy" : "owner_unavailable",
+        });
+    }
+    this.preemptRecordingReads(stationSn);
+    const captureMs = opts.clip ? opts.clip.selector.expectedMs + 15000 : 8000;
+    const timeout = opts.timeoutMs ?? (opts.clip ? captureMs + 16000 : 24000);
+    if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > (opts.clip ? 2147483647 : 24000))
       throw new RangeError("Playback deadline invalid");
     const deadlineMs = Math.min(started + timeout, opts.deadlineMs ?? started + timeout);
     const st = this.sessions.get(stationSn);
@@ -1659,6 +1684,8 @@ export class RtcCommandRouter {
       renewalAt() - Date.now() > deadlineMs - performance.now() + 5000;
     const candidate = new EventPlaybackCandidate({
       nativeMessage: opts.nativeMessage,
+      captureMs,
+      video: opts.clip?.video,
       deadlineMs,
       continuous,
       startAllowed,
@@ -1689,7 +1716,7 @@ export class RtcCommandRouter {
       () => !opts.enabled,
       () => !this.playbackMarker,
       () => !opts.cameras?.size,
-      () => !opts.excluded?.size,
+      () => !opts.clip && !opts.excluded?.size,
       () => this.playbackUnresolved,
       () => !st,
       () => !continuous(),
@@ -1737,6 +1764,18 @@ export class RtcCommandRouter {
         run: () =>
           (exchange = (async () => {
             if (!startAllowed() || signal.aborted) return;
+            if (opts.clip) {
+              const selection = opts.clip.selector;
+              if (selection.begin * 1000 + selection.expectedMs > Date.now() - 60000) {
+                candidate.end("time_refused");
+                return;
+              }
+              const selectors = reservePlaybackSelectors(st.playbackSelectors);
+              if (!selectors) return;
+              candidate.receipt.selectionOutcome = "selected";
+              await candidate.capture(selection, selectors);
+              return;
+            }
             let rows: unknown[] = [];
             const tableDeadline = Math.min(deadlineMs - 15000, performance.now() + 8000);
             const tableTimer = setTimeout(
@@ -1804,6 +1843,11 @@ export class RtcCommandRouter {
       candidate.ingress.stopExpiry();
       this.release(stationSn, st);
     }
+  }
+
+  /** Full-duration capture holds optional refreshes until same-owner cleanup has finished. */
+  playbackFullClipActive(): boolean {
+    return [...this.playbackProbes.values()].some(({ candidate }) => candidate.fullClip);
   }
 
   /** One opt-in table read on an existing idle owner; absolute deadline, no acquisition or retry. */

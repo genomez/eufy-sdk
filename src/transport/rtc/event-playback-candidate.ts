@@ -149,6 +149,10 @@ export function playbackRequest(
 
 /** One capture and one idempotent cleanup sequence, followed by passive original-owner cessation. */
 export class EventPlaybackCandidate {
+  /** Duration-bound streaming sink is installed for this capture. */
+  get fullClip(): boolean {
+    return !!this.opts.video;
+  }
   readonly ingress: PlaybackIngress;
   readonly receipt: PlaybackReceipt;
   private readonly started = performance.now();
@@ -168,6 +172,8 @@ export class EventPlaybackCandidate {
   constructor(
     private readonly opts: {
       deadlineMs: number;
+      captureMs?: number;
+      video?: (data: Buffer) => void;
       continuous: () => boolean;
       startAllowed: () => boolean;
       send: (packet: Buffer) => boolean;
@@ -181,6 +187,7 @@ export class EventPlaybackCandidate {
     },
   ) {
     this.ingress = new PlaybackIngress({
+      streaming: opts.video ? { frameLimit: Math.ceil(((opts.captureMs ?? 8000) * 256) / 1000) } : undefined,
       nativeMessage: opts.nativeMessage,
       end: (reason) => this.end(reason),
       media: (frame) => this.media(frame),
@@ -291,7 +298,7 @@ export class EventPlaybackCandidate {
         this.opts.signal.addEventListener("abort", abort, { once: true });
         timer = setTimeout(
           () => this.end("capped"),
-          Math.max(0, Math.min(8000, this.opts.deadlineMs - performance.now() - 7000)),
+          Math.max(0, Math.min(this.opts.captureMs ?? 8000, this.opts.deadlineMs - performance.now() - 7000)),
         );
         noMedia = setTimeout(() => {
           if (!this.receipt.videoFrames) this.end("no_media");
@@ -471,6 +478,16 @@ export class EventPlaybackCandidate {
     const data = body.subarray(22);
     if (!(data.length >= 6 && (data.readUInt32BE(0) === 1 || data.readUIntBE(0, 3) === 1))) {
       this.ingress.invalidMedia("metadata");
+      return;
+    }
+    if (this.opts.video && !this.receipt.videoFrames && !isHevcKeyframe(data)) {
+      this.ingress.invalidMedia("metadata");
+      return;
+    }
+    try {
+      this.opts.video?.(data);
+    } catch {
+      this.end("invalid_media");
       return;
     }
     this.receipt.videoFrames++;

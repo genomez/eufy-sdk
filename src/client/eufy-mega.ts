@@ -41,6 +41,7 @@ import {
   type RecordingReadOptions,
   type RecordingPacing,
   type InternalCoverSelector,
+  type InternalPlaybackSelector,
   type CatalogReadResult,
   type CoverReadResult,
 } from "../transport/rtc/recordings.js";
@@ -1111,14 +1112,33 @@ export class EufyMega extends EventEmitter {
     }
   }
 
+  /** Pull one authenticated catalog event on the current owner, delivering Annex-B video only. */
+  async pullRecordingClip(
+    scope: RecordingReadScope,
+    selector: InternalPlaybackSelector,
+    opts: { signal?: AbortSignal; video: (data: Buffer) => void },
+  ) {
+    if (!this.recordingsAllowed(scope))
+      throw Object.assign(new Error("Playback unavailable"), { reason: "owner_unavailable" });
+    const generation = this.realtimeGeneration!;
+    const signal = opts.signal ? AbortSignal.any([opts.signal, generation.abort.signal]) : generation.abort.signal;
+    return this.rtc.readEventPlaybackCandidate(scope.stationSn, {
+      enabled: true,
+      signal,
+      cameras: scope.cameraSns,
+      excluded: new Set(),
+      fresh: () => this.recordingsAllowed(scope, true),
+      clip: { scope, selector, video: opts.video },
+    });
+  }
+
   /** Lifecycle, correction and exact enrolled topology gate, evaluated without network activity. */
-  private recordingsAllowed(scope: RecordingReadScope): boolean {
+  private recordingsAllowed(scope: RecordingReadScope, pulling = false): boolean {
     const policy = this.opts.rtc?.recordings;
     if (
       !policy?.enabled ||
       !this.automaticInformationAllowed() ||
-      this.stateRefreshSweep ||
-      this.reportRefreshes.has(scope.stationSn) ||
+      (!pulling && (this.stateRefreshSweep || this.reportRefreshes.has(scope.stationSn))) ||
       this.lateEffects.has(scope.stationSn) ||
       this.commandRefreshes.size ||
       this.stateTransitions.size ||
@@ -1207,7 +1227,7 @@ export class EufyMega extends EventEmitter {
       entry.timer = undefined;
       // A read queued during stored playback aborts the capture; hold it (bounded), never drop it.
       if (
-        held < STATE_REFRESH_PLAYBACK_DEFERRALS &&
+        (this.rtc.playbackFullClipActive() || held < STATE_REFRESH_PLAYBACK_DEFERRALS) &&
         generation.epoch === this.realtimeEpoch &&
         !generation.abort.signal.aborted &&
         this.rtc.playbackActive()
@@ -2891,7 +2911,7 @@ export class EufyMega extends EventEmitter {
     // the bounded capture to finish: 5 s steps, at most 60 s, without counting a failure.
     if (this.stateRefreshSweep?.epoch !== generation.epoch && this.rtc.playbackActive()) {
       const held = generation.stateRefreshPlaybackDeferrals ?? 0;
-      if (held < STATE_REFRESH_PLAYBACK_DEFERRALS) {
+      if (this.rtc.playbackFullClipActive() || held < STATE_REFRESH_PLAYBACK_DEFERRALS) {
         generation.stateRefreshPlaybackDeferrals = held + 1;
         if (schedule?.nextRetryAtMs != null) schedule.nextRetryAtMs = Date.now() + STATE_REFRESH_PLAYBACK_DEFER_MS;
         this.stateRefreshTimer.arm(STATE_REFRESH_PLAYBACK_DEFER_MS, () => {

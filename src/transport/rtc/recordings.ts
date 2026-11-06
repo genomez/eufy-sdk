@@ -107,6 +107,52 @@ export interface InternalCoverSelector {
   selectorMac: string;
 }
 
+/** Private exact-event authority, authenticated independently of cover availability. */
+export interface InternalPlaybackSelector {
+  sourceKey: string;
+  cameraSn: string;
+  stationBinding: string;
+  record: number;
+  begin: number;
+  expectedMs: number;
+  selectorMac: string;
+}
+
+/** Separate authentication domain for event selection and its duration budget. */
+function playbackMac(scope: RecordingReadScope, value: Omit<InternalPlaybackSelector, "selectorMac">): string {
+  return mac(
+    scope.identityKey,
+    "recordings.playback.v1",
+    scope.accountNamespace,
+    value.sourceKey,
+    value.cameraSn,
+    value.stationBinding,
+    String(value.record),
+    String(value.begin),
+    String(value.expectedMs),
+  );
+}
+
+/** Authenticate exact selection and duration before any transport activity. */
+export function verifyPlaybackSelector(scope: RecordingReadScope, value: InternalPlaybackSelector): boolean {
+  if (
+    !value ||
+    !/^[a-f0-9]{64}$/.test(value.sourceKey) ||
+    value.stationBinding !== scope.stationSn ||
+    !scope.cameraSns.has(value.cameraSn) ||
+    !Number.isSafeInteger(value.record) ||
+    value.record <= 0 ||
+    !Number.isSafeInteger(value.begin) ||
+    value.begin <= 0 ||
+    !Number.isSafeInteger(value.expectedMs) ||
+    value.expectedMs <= 0 ||
+    value.expectedMs > 2147400000 ||
+    !/^[a-f0-9]{64}$/.test(value.selectorMac)
+  )
+    return false;
+  return timingSafeEqual(Buffer.from(value.selectorMac, "hex"), Buffer.from(playbackMac(scope, value), "hex"));
+}
+
 /** Labels are fixed numeric fallbacks until a verified recording-type mapping exists. */
 export interface RecordingKind {
   code: number | null;
@@ -135,6 +181,7 @@ export interface InternalRecordingRow {
   /** Private account-and-station-bound path fingerprint, retained even when a shared path has no selector. */
   coverPathKey: string | null;
   coverSelector: InternalCoverSelector | null;
+  playbackSelector?: InternalPlaybackSelector | null;
 }
 
 /** Bounded counts only; raw rows and arbitrary JSON keys are discarded. */
@@ -366,6 +413,17 @@ export function normalizeRecordingRows(
           observedAtMs: nowMs,
         }
       : null;
+    const playback =
+      start.atMs !== null && durationSeconds !== null && durationSeconds > 0
+        ? {
+            sourceKey,
+            cameraSn: row.device_sn,
+            stationBinding: scope.stationSn,
+            record: row.record_id,
+            begin: start.atMs / 1000,
+            expectedMs: Math.round(durationSeconds * 1000),
+          }
+        : null;
     const normalized: InternalRecordingRow = {
       scopeId,
       cameraId,
@@ -387,6 +445,7 @@ export function normalizeRecordingRows(
       coverPathKey: selector
         ? mac(identityKey, "recordings.path.v1", scope.accountNamespace, scope.stationSn, selector.thumbPath)
         : null,
+      playbackSelector: playback ? { ...playback, selectorMac: playbackMac(keyed, playback) } : null,
       coverSelector: selector ? { ...selector, selectorMac: selectorMac(keyed, selector) } : null,
     };
     const prior = result.get(eventId);

@@ -151,6 +151,7 @@ export class PlaybackIngress implements RtcIngressGuard {
   constructor(
     private readonly opts: {
       now?: () => number;
+      streaming?: { frameLimit: number };
       nativeMessage?: (direction: "in" | "out", message: unknown) => void;
       end: (reason: "capped" | "capped_wrong_route" | "transport_mismatch" | "invalid_media") => void;
       media: (frame: Buffer) => void;
@@ -431,13 +432,13 @@ export class PlaybackIngress implements RtcIngressGuard {
     if (!reservation) {
       // The station sets 0x0800 on plain portal frames here too. A first fragment that starts with the
       // portal magic cannot be Zstandard, so it reserves its declared size, not the inflation ceiling.
-      const plain =
-        h.index === 0 && h.payloadLength >= 4 && isPortalPacket(binary.subarray(28, 28 + h.payloadLength));
+      const plain = h.index === 0 && h.payloadLength >= 4 && isPortalPacket(binary.subarray(28, 28 + h.payloadLength));
       const allowance = binary.readUInt16LE(18) & 0x0800 && !plain ? PLAYBACK_FRAME_BYTES : h.frameLength;
       if (
         this.reservedOutput + allowance > PLAYBACK_RESERVED_BYTES ||
-        this.reservedFrames + this.evidence.wrongRouteFrames >= 256 ||
-        this.evidence.decodedWorkBytes + allowance > PLAYBACK_WORK_BYTES
+        this.reservedFrames + this.evidence.wrongRouteFrames >= (this.opts.streaming?.frameLimit ?? 256) ||
+        this.evidence.decodedWorkBytes + allowance >
+          (this.opts.streaming ? this.opts.streaming.frameLimit * PLAYBACK_FRAME_BYTES : PLAYBACK_WORK_BYTES)
       )
         return this.reject("capped", false, "limits");
       if (this.assemblies.size >= 8) return this.reject("invalid_media", true);
@@ -577,9 +578,9 @@ export class PlaybackIngress implements RtcIngressGuard {
       return;
     }
     if (
-      this.evidence.mediaBytes + frame.length > PLAYBACK_BYTES ||
-      this.evidence.mediaFrames >= 256 ||
-      this.evidence.collectorAttempts >= 256
+      this.evidence.mediaBytes + frame.length > (this.opts.streaming ? 2 * 1024 ** 3 : PLAYBACK_BYTES) ||
+      this.evidence.mediaFrames >= (this.opts.streaming?.frameLimit ?? 256) ||
+      this.evidence.collectorAttempts >= (this.opts.streaming?.frameLimit ?? 256)
     ) {
       this.reject("capped");
       return;
@@ -588,6 +589,10 @@ export class PlaybackIngress implements RtcIngressGuard {
     this.evidence.mediaFrames++;
     this.evidence.collectorAttempts++;
     this.opts.media(frame);
-    if (this.evidence.mediaBytes >= PLAYBACK_BYTES || this.evidence.mediaFrames >= 256) this.opts.end("capped");
+    if (
+      this.evidence.mediaBytes >= (this.opts.streaming ? 2 * 1024 ** 3 : PLAYBACK_BYTES) ||
+      this.evidence.mediaFrames >= (this.opts.streaming?.frameLimit ?? 256)
+    )
+      this.opts.end("capped");
   }
 }
