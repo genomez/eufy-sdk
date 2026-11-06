@@ -101,13 +101,14 @@ import {
   CATALOG_MIN_ATTEMPT_MS,
   CATALOG_TIMEOUT_MS,
   COVER_START_GAP_MS,
-  COVER_ATTEMPTS_PER_MINUTE,
   OWNER_OBSERVE_MS,
   READ_QUIET_MS,
   RENEWAL_RESERVE_MS,
   normalizeRecordingRows,
   recordingAccountNamespace,
   verifyRecordingSelector,
+  recordingPacing,
+  type RecordingPacing,
   type RecordingPolicy,
   type RecordingReadScope,
   type RecordingReadOptions,
@@ -363,9 +364,12 @@ interface RecordingAttemptBudget {
   nextBefore?: number | null;
   extraPages?: number;
   tableFinished?: number;
+  finished?: number;
+  lastWasCover?: boolean;
 }
 
 export class RtcCommandRouter {
+  private recordingPacing = recordingPacing({});
   private readonly informationOwners = new WeakMap<InformationRefreshResult, StationSession>();
   private readonly informationReceiptTimes = new WeakMap<object, number>();
   private readonly wireReceiptTimes = new WeakMap<Buffer, number>();
@@ -1248,7 +1252,7 @@ export class RtcCommandRouter {
   }
 
   /** Every admission check is cache-only and is repeated inside the idle scheduler turn. */
-  private recordingGate(scope: RecordingReadScope, own = false): RecordingReadReason | undefined {
+  private recordingGate(scope: RecordingReadScope, own = false, cover = false): RecordingReadReason | undefined {
     const policy = this.deps.recordings;
     if (!policy?.enabled) return "disabled";
     if (scope.identityKey?.length !== 32) return "store_unavailable";
@@ -1305,8 +1309,18 @@ export class RtcCommandRouter {
     this.pruneEventTableReplies();
     if (this.eventTableReplies.size + this.eventThumbReplies.size >= 16) return "reply_capacity";
     const budget = this.recordingAttempts.get(scope.stationSn);
-    if (performance.now() - (budget?.coverFinished ?? -Infinity) < COVER_START_GAP_MS) return "quiet_period";
+    const coverToCover = cover && budget?.lastWasCover;
+    const quiet = coverToCover ? this.recordingPacing.coverQuietMs : READ_QUIET_MS;
+    const gap = coverToCover ? this.recordingPacing.coverGapMs : COVER_START_GAP_MS;
+    if (performance.now() - (budget?.finished ?? -Infinity) < quiet) return "quiet_period";
+    if (performance.now() - (budget?.coverFinished ?? -Infinity) < gap) return "quiet_period";
     return;
+  }
+
+  /** Atomically replace runtime cover pacing; null resets defaults without changing admission history. */
+  setRecordingPacing(update: Partial<RecordingPacing> | null = null): RecordingPacing {
+    this.recordingPacing = recordingPacing(update, this.recordingPacing);
+    return { ...this.recordingPacing };
   }
 
   /** One latest-20 station query; never acquires, reconnects or retries an owner. */
@@ -1352,7 +1366,7 @@ export class RtcCommandRouter {
         cameraSns: new Set(input.cameraSns),
       };
       const selected = selector ? { ...selector } : undefined;
-      const gate = this.recordingGate(scope);
+      const gate = this.recordingGate(scope, false, !!selected);
       if (gate)
         return failure(
           gate,
@@ -1375,7 +1389,7 @@ export class RtcCommandRouter {
       budget.covers = budget.covers.filter((time) => started - time < 60_000);
       if (
         selected
-          ? budget.covers.length >= COVER_ATTEMPTS_PER_MINUTE
+          ? !!this.recordingPacing.coverRatePerMinute && budget.covers.length >= this.recordingPacing.coverRatePerMinute
           : !continuation && started - (budget.catalog ?? -Infinity) < CATALOG_MIN_ATTEMPT_MS
       )
         return failure("rate_limited");
@@ -1443,7 +1457,7 @@ export class RtcCommandRouter {
           signal,
           run: (sharedSignal) => {
             exchange = (async () => {
-              const gate = this.recordingGate(scope, true);
+              const gate = this.recordingGate(scope, true, !!selected);
               if (
                 gate ||
                 signal.aborted ||
@@ -1545,6 +1559,8 @@ export class RtcCommandRouter {
           : this.eventTableReplies.get(transaction);
         if (issued?.owner === st) issued.expiresAtMs = performance.now() + 60_000;
         if (!selected) budget.tableFinished = performance.now();
+        budget.finished = performance.now();
+        budget.lastWasCover = !!selected;
         if (selected || opts.beforeRecordId !== undefined) budget.coverFinished = performance.now();
         if (this.recordingReads.get(scope.stationSn) === controller) this.recordingReads.delete(scope.stationSn);
         st.pendingExchanges--;

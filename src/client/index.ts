@@ -6,6 +6,7 @@ export type {
   RecordingPolicy,
   RecordingReadScope,
   RecordingReadOptions,
+  RecordingPacing,
   RecordingReadReason,
   RecordingReadFailure,
   RecordingTimeStatus,

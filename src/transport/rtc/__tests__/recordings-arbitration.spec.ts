@@ -30,6 +30,60 @@ const selector = (id = 1) => {
 };
 
 describe("recording admission without station side effects", () => {
+  it("updates cover pacing atomically without weakening foreground or catalog quiet", async () => {
+    const f = await fixture();
+    expect(f.router.setRecordingPacing({ coverGapMs: 0, coverRatePerMinute: null, coverQuietMs: 0 })).toEqual({
+      coverGapMs: 0,
+      coverRatePerMinute: 0,
+      coverQuietMs: 0,
+    });
+    for (let n = 1; n <= 8; n++) {
+      const selected = selector(n);
+      const read = f.router.readRecordingCover(scope, selected);
+      await sent(f.session, n);
+      f.session.notify({ file: selected.thumbPath, content: "/9j/2Q==" }, 1308);
+      expect((await read).status).toBe("ok");
+    }
+    expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "deferred", reason: "quiet_period" });
+    f.router.preemptRecordingReads(station);
+    expect(await f.router.readRecordingCover(scope, selector(9))).toEqual({
+      status: "deferred",
+      reason: "quiet_period",
+    });
+    f.advance(2_000);
+    f.router.setRecordingPacing({ coverRatePerMinute: 2 });
+    expect(await f.router.readRecordingCover(scope, selector(9))).toEqual({
+      status: "deferred",
+      reason: "rate_limited",
+    });
+    expect(f.router.setRecordingPacing()).toEqual({ coverGapMs: 5_000, coverRatePerMinute: 6, coverQuietMs: 2_000 });
+  });
+  it("keeps the configurable cover quiet independent of the start gap", async () => {
+    const f = await fixture();
+    f.router.setRecordingPacing({ coverGapMs: 0, coverRatePerMinute: 0, coverQuietMs: 2_000 });
+    f.session.accept = false;
+    expect(await f.router.readRecordingCover(scope, selector())).toMatchObject({ reason: "send_refused" });
+    expect(await f.router.readRecordingCover(scope, selector(2))).toEqual({
+      status: "deferred",
+      reason: "quiet_period",
+    });
+    f.advance(2_000);
+    expect(await f.router.readRecordingCover(scope, selector(2))).toMatchObject({ reason: "send_refused" });
+  });
+  it.each([-1, NaN, Infinity, "0", undefined])("rejects invalid pacing %s atomically", async (value) => {
+    const f = await fixture();
+    expect(() => f.router.setRecordingPacing({ coverGapMs: 0, coverQuietMs: value } as never)).toThrow(TypeError);
+    expect(f.router.setRecordingPacing({})).toEqual({ coverGapMs: 5_000, coverRatePerMinute: 6, coverQuietMs: 2_000 });
+  });
+  it("accepts large pacing values without low upper limits", async () => {
+    const f = await fixture();
+    expect(f.router.setRecordingPacing({ coverGapMs: 1e12, coverRatePerMinute: 1e9, coverQuietMs: 1e12 })).toEqual({
+      coverGapMs: 1e12,
+      coverRatePerMinute: 1e9,
+      coverQuietMs: 1e12,
+    });
+    expect(() => f.router.setRecordingPacing({ coverRatePerMinute: 0.5 })).toThrow(TypeError);
+  });
   it.each([
     [
       "information taint",
@@ -87,6 +141,7 @@ describe("recording admission without station side effects", () => {
     ],
   ] as const)("refuses %s with zero send", async (_name, mutate) => {
     const f = await fixture();
+    f.router.setRecordingPacing({ coverGapMs: 0, coverQuietMs: 0, coverRatePerMinute: 0 });
     const s = internal(f.router).sessions.get(station);
     mutate(s);
     expect((await f.router.readRecordingCatalog(scope)).status).not.toBe("ok");
@@ -96,6 +151,7 @@ describe("recording admission without station side effects", () => {
     "refuses %s independently of an active feature",
     async (kind) => {
       const f = await fixture();
+      f.router.setRecordingPacing({ coverGapMs: 0, coverQuietMs: 0, coverRatePerMinute: 0 });
       const i = internal(f.router);
       if (kind === "unresolved") i.playbackUnresolved = true;
       if (kind === "playback") i.playbackProbes.set(station, {});
@@ -110,6 +166,7 @@ describe("recording admission without station side effects", () => {
   );
   it("refuses full combined issued-reply bookkeeping without discarding correlations", async () => {
     const f = await fixture();
+    f.router.setRecordingPacing({ coverGapMs: 0, coverQuietMs: 0, coverRatePerMinute: 0 });
     const i = internal(f.router);
     const s = i.sessions.get(station);
     for (let n = 0; n < 8; n++) {
@@ -123,6 +180,7 @@ describe("recording admission without station side effects", () => {
     "refuses invalid %s scope with zero send",
     async (kind) => {
       const f = await fixture();
+      f.router.setRecordingPacing({ coverGapMs: 0, coverQuietMs: 0, coverRatePerMinute: 0 });
       let input = scope;
       if (kind === "parent") f.devices.get(cameras[0]!)!.stationSn = "unbound";
       if (kind === "excluded") f.devices.get(cameras[0]!)!.name = "J Safe";
@@ -160,6 +218,7 @@ describe("recording admission without station side effects", () => {
     const f = await fixture();
     f.session.accept = false;
     expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "unavailable", reason: "send_refused" });
+    f.advance(2_000);
     expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "deferred", reason: "rate_limited" });
     f.advance(120_000);
     expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "unavailable", reason: "send_refused" });

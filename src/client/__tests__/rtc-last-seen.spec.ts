@@ -146,6 +146,18 @@ describe("successful scoped information receipt", () => {
 });
 
 describe("facade cache-only refusals", () => {
+  it("sets pacing through the facade without discovery or session acquisition", () => {
+    const f = fixture();
+    const discovery = vi.spyOn(f.client, "getDevices");
+    const set = vi.spyOn(f.internals.rtc, "setRecordingPacing");
+    expect(f.client.setRecordingPacing({ coverGapMs: 0, coverQuietMs: 0, coverRatePerMinute: 0 })).toEqual({
+      coverGapMs: 0,
+      coverQuietMs: 0,
+      coverRatePerMinute: 0,
+    });
+    expect(set).toHaveBeenCalledOnce();
+    expect(discovery).not.toHaveBeenCalled();
+  });
   it("disabled recording methods do not discover devices, acquire a session or throw private text", async () => {
     const f = fixture();
     const discovery = vi.spyOn(f.client, "getDevices");

@@ -39,6 +39,7 @@ import {
   recordingAccountNamespace,
   type RecordingReadScope,
   type RecordingReadOptions,
+  type RecordingPacing,
   type InternalCoverSelector,
   type CatalogReadResult,
   type CoverReadResult,
@@ -1071,6 +1072,11 @@ export class EufyMega extends EventEmitter {
     const identity = this.mega.rtcIdentity();
     const account = identity?.accountUserId ?? identity?.userId;
     return account ? recordingAccountNamespace(identityKey, account) : null;
+  }
+
+  /** Update process-local cover pacing without clearing admission history; null restores defaults. */
+  setRecordingPacing(pacing: Partial<RecordingPacing> | null = null): RecordingPacing {
+    return this.rtc.setRecordingPacing(pacing);
   }
 
   /** Production browse read on the existing healthy idle owner, with no discovery or acquisition. */

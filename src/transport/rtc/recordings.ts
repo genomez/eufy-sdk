@@ -12,6 +12,43 @@ export const READ_QUIET_MS = 2_000;
 export const COVER_START_GAP_MS = 5_000;
 export const COVER_ATTEMPTS_PER_MINUTE = 6;
 
+/** Runtime cover-to-cover pacing. Foreground demand and catalog quiet periods remain fixed. */
+export interface RecordingPacing {
+  coverGapMs: number;
+  coverRatePerMinute: number | null;
+  coverQuietMs: number;
+}
+
+/** Validate a partial update atomically; null resets defaults and a null rate disables the cap. */
+export function recordingPacing(
+  update: Partial<RecordingPacing> | null,
+  current: RecordingPacing = {
+    coverGapMs: COVER_START_GAP_MS,
+    coverRatePerMinute: COVER_ATTEMPTS_PER_MINUTE,
+    coverQuietMs: READ_QUIET_MS,
+  },
+): RecordingPacing {
+  if (update === null) return recordingPacing({});
+  if (!update || typeof update !== "object" || Array.isArray(update)) throw new TypeError("Invalid recording pacing");
+  const next = { ...current };
+  for (const [key, value] of Object.entries(update)) {
+    if (!["coverGapMs", "coverRatePerMinute", "coverQuietMs"].includes(key))
+      throw new TypeError("Invalid recording pacing");
+    if (key === "coverRatePerMinute" && value === null) next.coverRatePerMinute = 0;
+    else {
+      if (
+        typeof value !== "number" ||
+        !Number.isFinite(value) ||
+        value < 0 ||
+        (key === "coverRatePerMinute" && !Number.isSafeInteger(value))
+      )
+        throw new TypeError("Invalid recording pacing");
+      Object.assign(next, { [key]: value });
+    }
+  }
+  return next;
+}
+
 /** Installed, opt-in internal topology. Names never establish membership. */
 export interface RecordingPolicy {
   enabled: boolean;

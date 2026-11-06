@@ -18,6 +18,13 @@ The scope must match all five installed FLC identities and the current unambiguo
 getRecordingAccountNamespace(identityKey: Uint8Array): string | null;
 readRecordingCatalog(scope: RecordingReadScope, opts?: RecordingReadOptions): Promise<CatalogReadResult>;
 readRecordingCover(scope: RecordingReadScope, selector: InternalCoverSelector, opts?: RecordingReadOptions): Promise<CoverReadResult>;
+setRecordingPacing(pacing?: Partial<RecordingPacing> | null): RecordingPacing;
+
+interface RecordingPacing {
+  coverGapMs: number;
+  coverRatePerMinute: number | null;
+  coverQuietMs: number;
+}
 
 interface RecordingReadScope {
   stationSn: string;
@@ -50,6 +57,21 @@ The selector seal also binds the opaque account namespace, preventing reuse in a
 Admission is idle-only, routine priority, and requires 60 seconds of connected-owner observation plus qualified ordinary information health. Active playback and the unresolved playback latch both deny. Ordinary refresh, correction, queued work, probes, live demand and renewal outrank recordings. A canceled optional collector detaches locally and retains the existing 60-second late-reply reservations. Catalog attempts are spaced by two minutes, including failure; cover completions impose a five-second gap, with six cover attempts per sliding minute. The entire eight-second read plus five-second reserve must fit before the existing renewal deadline. No separate renewal schedule is introduced.
 
 The caller owns browse interests, cover budgets and queueing, persistent identity/store recovery, negative cache and disk quotas. Startup, detection, cache reads and public image transfer must not call these methods automatically. Stored covers and catalog pages can remain readable when new RTC reads are refused.
+
+Runtime cover pacing defaults to `coverGapMs: 5000`, `coverRatePerMinute: 6`,
+and `coverQuietMs: 2000`. Partial updates retain unspecified values; passing null
+or omitting the argument resets defaults. Rate 0 or null disables the minute cap;
+the returned rate is normalized to 0. Gaps are finite nonnegative milliseconds;
+the cap is a nonnegative safe integer. Updates are atomic, process-local and do
+not clear attempt history. No device request is sent by the setter.
+
+Setting both gaps and the cap to 0 admits serialized back-to-back covers. Only
+cover-to-cover quiet and completion spacing change. The fixed two-second quiet
+after foreground demand and around catalog reads, catalog continuation spacing,
+owner/health/observation, playback/live priority, renewal reserve, scope and
+reply-capacity gates remain. Issued reply reservations still last 60 seconds:
+uncapped pacing does not imply unlimited admitted throughput. Reduced pacing is
+for measurement; synthetic validation does not establish firmware tolerance.
 
 Only strict `YYYY-MM-DD HH:mm:ss` Chicago wall-clock syntax is supported. A repeated DST hour is ambiguous; a spring gap is invalid. UTC and offset-bearing local fields are null unless an instant is unique. Numeric duration is unqualified; only a bounded nonnegative end-minus-start duration is published. The shared helper preserves playback's original acceptance and seconds output.
 
