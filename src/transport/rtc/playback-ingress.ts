@@ -109,6 +109,8 @@ export class PlaybackIngress implements RtcIngressGuard {
   };
   lastPlausibleMs = Number.NEGATIVE_INFINITY;
   capturing = false;
+  /** Any playback-link packet or decoded media disqualifies a terminal no-stream refusal. */
+  mediaTrafficObserved = false;
   private rejectedAt = Number.NEGATIVE_INFINITY;
   private packetClass: PlaybackRejectedClass = "unknown";
   private inspection: PtcsInspection = {};
@@ -134,21 +136,87 @@ export class PlaybackIngress implements RtcIngressGuard {
   ordinaryFrames = 0;
   keepalives = 0;
   private nonControlTraffic = false;
-  private liveGraceUntil = Number.NEGATIVE_INFINITY;
+  private lastLiveStart?: number;
+  private lastLiveStop?: number;
+  private readonly poisonCounts = new Map<
+    string,
+    {
+      cause: string;
+      link: number | null;
+      cmd: number | null;
+      channel: number | null;
+      selector: string;
+      liveTargetAmbiguous: boolean;
+      sinceLiveStart: string;
+      sinceLiveStop: string;
+      count: number;
+    }
+  >();
+  private poisonOverflow = 0;
 
-  /** Ten seconds of drain on this owner exempt only well-formed LIVE media on its fixed play slot. */
+  /** Record live-start age independently of target attribution. */
+  liveStarted(): void {
+    this.lastLiveStart = this.now();
+  }
+
+  /** At most 32 count-only poison classes plus a saturating overflow count; no payloads or identities. */
+  observationEvidence() {
+    return {
+      observerAgeMs: Math.max(0, Math.floor(this.now() - this.observedSinceMs)),
+      poisonCounts: [...this.poisonCounts.values()].map((row) => ({ ...row })),
+      poisonOverflow: this.poisonOverflow,
+    };
+  }
+
+  private poison(
+    cause: PtcsRejectionReason | "playback_link" | "bare" | "link",
+    link: number | null = null,
+    frame?: Buffer,
+  ): void {
+    if (!this.opts.observeOnly) return;
+    const h = frame && parsePortalHeader(frame);
+    const bucket = (at?: number) =>
+      at === undefined
+        ? "unknown"
+        : this.now() - at < 1000
+          ? "lt1s"
+          : this.now() - at < 10000
+            ? "lt10s"
+            : this.now() - at < 60000
+              ? "lt60s"
+              : "ge60s";
+    const row = {
+      cause,
+      link,
+      cmd: h?.commandId ?? null,
+      channel: h?.channel ?? null,
+      selector: !h
+        ? "unknown"
+        : h.isResponse === 1
+          ? "1"
+          : h.isResponse >= 6 && h.isResponse <= 249
+            ? "playback"
+            : "other",
+      liveTargetAmbiguous: this.opts.liveTargetAmbiguous?.() === true,
+      sinceLiveStart: bucket(this.lastLiveStart),
+      sinceLiveStop: bucket(this.lastLiveStop),
+      count: 0,
+    };
+    const key = JSON.stringify(row);
+    const current = this.poisonCounts.get(key);
+    if (current) current.count = Math.min(65535, current.count + 1);
+    else if (this.poisonCounts.size < 32) this.poisonCounts.set(key, { ...row, count: 1 });
+    else this.poisonOverflow = Math.min(65535, this.poisonOverflow + 1);
+  }
+
+  /** Record the current owner's live-stop time without imposing a playback admission delay. */
   liveEnded(): void {
-    if (this.opts.observeOnly) this.liveGraceUntil = this.now() + 10000;
+    this.lastLiveStop = this.now();
   }
 
   /** Resolved ordinary fragments are safe before start; media, unknowns and outstanding work are not. */
   prestartSafe(): boolean {
-    return (
-      this.now() >= this.liveGraceUntil &&
-      !this.nonControlTraffic &&
-      this.evidence.wrongRouteFrames === 0 &&
-      this.observationComplete()
-    );
+    return !this.nonControlTraffic && this.evidence.wrongRouteFrames === 0 && this.observationComplete();
   }
 
   stale(): void {
@@ -177,6 +245,7 @@ export class PlaybackIngress implements RtcIngressGuard {
       late?: () => void;
       observeOnly?: boolean;
       liveAllowed?: () => boolean;
+      liveTargetAmbiguous?: () => boolean;
     },
   ) {
     this.assembler = new PtcsReassembler(
@@ -243,8 +312,10 @@ export class PlaybackIngress implements RtcIngressGuard {
     reason: "capped" | "transport_mismatch" | "invalid_media",
     unknown = false,
     diagnostic: PtcsRejectionReason = "metadata",
+    packet?: { link: number; frame: Buffer },
   ): false {
     const rejection = this.inspection.reason ?? diagnostic;
+    this.poison(rejection, packet?.link, packet?.frame);
     this.evidence.rejectedByReason[rejection] = add(this.evidence.rejectedByReason[rejection] ?? 0, 1);
     const counters = this.assembler.getDiagnostics();
     this.evidence.assemblerDecompression = counters.decompression;
@@ -288,6 +359,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     this.expire();
     for (const [key, at] of this.controlPartials) {
       if (now - at >= 15000) {
+        this.poison("expiry");
         this.plausible(true);
         this.controlPartials.delete(key);
       }
@@ -346,7 +418,9 @@ export class PlaybackIngress implements RtcIngressGuard {
       return true;
     }
     const h = parsePtcsHeader(binary);
+    if (h?.channel === 4) this.mediaTrafficObserved = true;
     if (this.opts.observeOnly && h?.channel === 4) {
+      this.poison("playback_link", PortalLinkType.PLAYBACK, h.index === 0 && h.last ? binary.subarray(28) : undefined);
       this.nonControlTraffic = true;
       this.plausible();
       return true;
@@ -356,7 +430,9 @@ export class PlaybackIngress implements RtcIngressGuard {
       if (inner) {
         this.packetClass = "bare";
         if (this.opts.observeOnly) {
+          if (inner.paramLength + 16 !== binary.length) return this.reject("invalid_media", true, "extent");
           if (inner.commandId === 1300 || inner.commandId === 1301 || inner.commandId === 1303) {
+            this.poison("bare", null, binary);
             this.nonControlTraffic = true;
             this.plausible();
           }
@@ -539,7 +615,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     else if (playbackRoute && this.selectors.has(h.isResponse)) this.lateUnknown("invalid_media");
   }
 
-  /** Admitted live traffic is exempt only on the single-camera play slot consumed by RtcLiveConsumer. */
+  /** Well-formed LIVE media uses a distinct link from playback, independent of live target attribution. */
   decoded(frame: Buffer, link: number): boolean {
     if (link !== PortalLinkType.PLAYBACK && this.currentControlKey) this.controlPartials.delete(this.currentControlKey);
     if (this.tombstone && link === PortalLinkType.PLAYBACK) {
@@ -547,17 +623,24 @@ export class PlaybackIngress implements RtcIngressGuard {
       return false;
     }
     const h = parsePortalHeader(frame);
-    if (!h) return this.reject("invalid_media", true);
+    if (!h) return this.reject("invalid_media", true, "portal-header", { link, frame });
     this.countIngress(h.commandId);
     if (this.opts.observeOnly) {
-      if (h.commandId === 1300 || h.commandId === 1301 || h.commandId === 1303) {
+      if (h.paramLength + 16 !== frame.length) {
+        return this.reject("invalid_media", true, "extent", { link, frame });
+      }
+      if (link === PortalLinkType.PLAYBACK) {
+        this.poison("playback_link", link, frame);
+        this.nonControlTraffic = true;
+        this.plausible();
+      } else if (h.commandId === 1300 || h.commandId === 1301 || h.commandId === 1303) {
         if (!(
-          (this.opts.liveAllowed?.() || this.now() < this.liveGraceUntil) &&
           link === PortalLinkType.LIVE &&
           h.channel === T9000Live.MEDIA_CHANNEL_BASE + T9000Live.PLAY_ID &&
           h.isResponse === 1 &&
           h.paramLength + 16 === frame.length
         )) {
+          this.poison(link !== PortalLinkType.LIVE ? "link" : h.channel !== 101 ? "channel" : "selector", link, frame);
           this.nonControlTraffic = true;
           this.plausible();
         }
@@ -585,6 +668,7 @@ export class PlaybackIngress implements RtcIngressGuard {
 
   /** Count complete media headers before route, selector and content admission. */
   private countIngress(command: number): void {
+    if (command === 1300 || command === 1301 || command === 1303) this.mediaTrafficObserved = true;
     if (command === 1300) this.evidence.ingressVideoFrames = add(this.evidence.ingressVideoFrames, 1);
     if (command === 1301) this.evidence.ingressAudioFrames = add(this.evidence.ingressAudioFrames, 1);
   }

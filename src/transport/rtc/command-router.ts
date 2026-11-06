@@ -1625,10 +1625,9 @@ export class RtcCommandRouter {
   private observePlaybackOwner(st: StationSession): void {
     const guard = new PlaybackIngress({
       observeOnly: true,
+      liveTargetAmbiguous: () => st.liveTargetAmbiguous === true,
       end: () => {},
       media: () => {},
-      liveAllowed: () =>
-        [...this.sessions].some(([sn, owner]) => owner === st && !!this.lives.get(sn)?.live && !st.liveTargetAmbiguous),
     });
     st.playbackObservation = guard;
     st.session.attachIngressGuard(guard);
@@ -1731,6 +1730,7 @@ export class RtcCommandRouter {
         !st!.liveTargetAmbiguous,
     });
     const observation = st?.playbackObservation;
+    candidate.receipt.playbackObservation = observation?.observationEvidence();
     if (recordingAdmission && ["disabled", "scope_invalid", "store_unavailable"].includes(recordingAdmission)) {
       const gate = recordingAdmission as PlaybackAdmissionGate;
       candidate.receipt.admissionGateName = gate;
@@ -3433,6 +3433,7 @@ export class RtcCommandRouter {
             throw new Error("rtc live: closed while opening the station play slot");
           }
           const unambiguous = lease.qualifyLiveTarget?.(sn) === true;
+          this.sessions.get(stationSn)?.playbackObservation?.liveStarted();
           return (created.live = new RtcLive({
             session: lease.session,
             seg: lease.seg,
@@ -3450,8 +3451,7 @@ export class RtcCommandRouter {
             },
             onIdle: () => {
               const owner = this.sessions.get(stationSn);
-              if (owner?.session === lease.session && !owner.liveTargetAmbiguous)
-                owner.playbackObservation?.liveEnded();
+              if (owner?.session === lease.session) owner.playbackObservation?.liveEnded();
               if (this.lives.get(stationSn) === created) this.lives.delete(stationSn);
               lease.release();
             },

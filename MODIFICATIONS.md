@@ -611,7 +611,6 @@ This replaces the earlier review.7 candidate with review.9 input `681efd9` (impl
 
 Automatic floodlight correction is OFF-only and cannot re-send ON. A shared command-health gate pauses automatic writes for ten minutes after two fast correlated refusals, while explicit commands remain eligible. Includes review.14 upstream beta.73/beta.80 adaptations, RTC renewal cooldowns and passive diagnostics. Source input: `6deea127459f368edb24d7d3df59dcaf60d5b508`.
 
-
 ## Historical input documentation and modification notices
 
 # Source modification index
@@ -1077,9 +1076,15 @@ uncertainty still fails closed. Synthetic regression coverage includes clips
 larger than 4 MiB, duration budgets and direct live attachment after storage
 failure. No device or cloud qualification was performed.
 
-
 ## Playback 3p4 local fix (2026-11-06)
 
 EOF captures require a keyframe start, at least two retained video frames, a retained span of at least max(1000 ms, 40% of catalog duration), and no internal gap over 1000 ms. EOF bypasses the catalog-end and density requirements; duration completion retains both. Full-clip receipts report mediaDurationMs as the monotonic retained span plus its mean frame interval, rounded to milliseconds. Observation permits well-formed LIVE-link channel-101 media with selector 1 for 10 seconds after a live stop on the same unambiguous session. Admission waits through this drain. Unexpected channels, PLAYBACK-link traffic, unknown data and LIVE frames outside this window retain their existing safety behavior.
 
 Offline synthetic validation only; installation acceptance remains false.
+
+### Offline playback safety update, 2026-11-06
+
+- Distinguish well-formed current-session LIVE media from PLAYBACK traffic in passive admission observation, independently of live target attribution. Remove the admission drain timer; retain consumer ambiguity handling.
+- Return bounded count-only observer poison classes and station status classes. Segment-matched terminal absence before acknowledgement or media can clear after stop dispatch and quiet observation; uncertain or late starts retain cleanup protection.
+- Require EOF retained density of at least five frame intervals per second and comparable request-segment agreement, in addition to retained span and maximum-gap checks.
+- Validated locally with synthetic fixtures; no installation or device acceptance is claimed.

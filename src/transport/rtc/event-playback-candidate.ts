@@ -64,6 +64,10 @@ export type PlaybackAdmissionGate = (typeof PLAYBACK_ADMISSION_GATES)[number];
 export interface PlaybackReceipt extends PlaybackIngressEvidence {
   reconnectOutcome?: "not_needed" | "connected" | "failed" | "timed_out";
   reconnectDurationMs?: number;
+  playbackObservation?: ReturnType<PlaybackIngress["observationEvidence"]>;
+  stationStatusCounts: { state: number; code: number; count: number }[];
+  stationStatusOverflow: number;
+  stationRefusalConfirmed: boolean;
   admissionGate: number;
   admissionGateName: PlaybackAdmissionGate;
   selectionOutcome: PlaybackSelectionOutcome;
@@ -212,6 +216,7 @@ export class EventPlaybackCandidate {
   private eofSeen = false;
   private absentSeen = false;
   private conflict = false;
+  private refusalAt?: number;
   private lateLatched = false;
   private selection?: { record: number; begin: number };
   private startSelector?: number;
@@ -257,6 +262,9 @@ export class EventPlaybackCandidate {
       },
     });
     this.receipt = {
+      stationStatusCounts: [],
+      stationStatusOverflow: 0,
+      stationRefusalConfirmed: false,
       admissionGate: 0,
       admissionGateName: "none",
       selectionOutcome: "no_rows",
@@ -488,13 +496,15 @@ export class EventPlaybackCandidate {
           this.receipt.stopSent &&
           this.receipt.cessationOutcome === "ceased" &&
           !this.conflict &&
-          (this.releaseSeen || (this.absentSeen && this.eofSeen))
+          (this.releaseSeen || (this.absentSeen && this.eofSeen) || this.refusalSafe())
         ) {
           try {
             this.persistLatch(false);
             this.receipt.releaseOutcome = "release_confirmed";
             this.receipt.latchRetained = false;
             this.receipt.latchCleared = true;
+            this.receipt.stationRefusalConfirmed = this.refusalSafe();
+            if (this.receipt.stationRefusalConfirmed) this.receipt.healthOutcome = "clean";
           } catch {
             this.receipt.releaseOutcome = "release_unknown";
           }
@@ -528,7 +538,27 @@ export class EventPlaybackCandidate {
 
   /** Cessation evidence counts only after a stop that was actually sent and confirmed without conflict. */
   private stopConfirmed(): boolean {
-    return this.receipt.stopSent && !this.conflict && (this.releaseSeen || (this.absentSeen && this.eofSeen));
+    return (
+      this.receipt.stopSent &&
+      !this.conflict &&
+      (this.releaseSeen || (this.absentSeen && this.eofSeen) || this.refusalSafe())
+    );
+  }
+
+  /** Only a segment-matched terminal absence before acknowledgement or ingress proves no pending start. */
+  private refusalSafe(): boolean {
+    return (
+      this.refusalAt !== undefined &&
+      !this.conflict &&
+      !this.receipt.startAcknowledged &&
+      !this.receipt.videoFrames &&
+      !this.receipt.audioFrames &&
+      !this.ingress.evidence.ingressVideoFrames &&
+      !this.ingress.evidence.ingressAudioFrames &&
+      !this.ingress.evidence.rejected &&
+      !this.ingress.evidence.unknown &&
+      !this.ingress.mediaTrafficObserved
+    );
   }
 
   /**
@@ -536,7 +566,7 @@ export class EventPlaybackCandidate {
    * no retained video gap above 1000 ms, and at least five frame intervals per second.
    * Arrival timing is the available clock; completion-margin frames are excluded from this proof.
    * EOF instead requires a keyframe start, two frames, the same gap ceiling, and a retained
-   * span of at least 1000 ms and 40% of the requested duration, without a density threshold.
+   * span of at least 1000 ms and 40% of the requested duration, with the same density threshold.
    * Probes without a requested duration keep their bounded observation contract.
    */
   private retainedMediaComplete(): boolean {
@@ -547,7 +577,8 @@ export class EventPlaybackCandidate {
         this.receipt.randomAccess &&
         this.receipt.videoFrames >= 2 &&
         span >= Math.max(1000, this.opts.expectedMs * 0.4) &&
-        this.maxVideoGapMs <= 1000
+        this.maxVideoGapMs <= 1000 &&
+        (this.receipt.videoFrames - 1) * 1000 >= span * 5
       );
     return (
       this.receipt.videoFrames >= 2 &&
@@ -630,22 +661,33 @@ export class EventPlaybackCandidate {
       return true;
     }
     if (value?.cmd !== 6001) return true;
-    if (!this.receipt.startAttempted) {
-      this.conflict = true;
-      this.end("transport_mismatch");
-      return true;
-    }
     const p = value.payload;
     if (!p || Array.isArray(p) || !Number.isSafeInteger(p.state) || !Number.isSafeInteger(p.code)) {
       this.conflict = true;
       return false;
     }
+    const status = this.receipt.stationStatusCounts.find((row) => row.state === p.state && row.code === p.code);
+    if (status) status.count = Math.min(65535, status.count + 1);
+    else if (this.receipt.stationStatusCounts.length < 32)
+      this.receipt.stationStatusCounts.push({ state: p.state as number, code: p.code as number, count: 1 });
+    else this.receipt.stationStatusOverflow = Math.min(65535, this.receipt.stationStatusOverflow + 1);
+    if (!this.receipt.startAttempted) {
+      this.conflict = true;
+      this.end("transport_mismatch");
+      return true;
+    }
     if (p.state === 1 && p.code === 0) {
+      if (this.refusalAt !== undefined) this.conflict = true;
       if (!this.finalized) {
         this.receipt.startAcknowledged = true;
         if (this.receipt.videoFrames) this.receipt.beginTimeAcceptance = "accepted";
       }
     } else if (p.state === 2 && p.code === 14 && this.stoppedAt === undefined) {
+      if (typeof p.segmen === "number" && Number.isFinite(p.segmen) && p.segmen !== this.segments[0]) {
+        this.conflict = true;
+        this.end("transport_mismatch");
+        return false;
+      }
       this.eofSeen = true;
       this.end("eof");
     } else if (p.state === 2 && p.code === 15 && this.stoppedAt !== undefined) {
@@ -664,7 +706,17 @@ export class EventPlaybackCandidate {
       this.releaseAt = performance.now();
       this.receipt.correlationBasis = "exclusive_timing";
     } else {
-      this.conflict = true;
+      if (
+        p.state === 0 &&
+        p.code === 7 &&
+        p.segmen === this.segments[0] &&
+        !this.receipt.startAcknowledged &&
+        !this.ingress.evidence.ingressVideoFrames &&
+        !this.ingress.evidence.ingressAudioFrames
+      ) {
+        this.refusalAt = performance.now();
+        this.receipt.correlationBasis = "segment_match_and_exclusive";
+      } else this.conflict = true;
       this.end("start_refused");
     }
     return false;

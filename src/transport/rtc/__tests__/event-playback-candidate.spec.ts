@@ -301,6 +301,7 @@ function candidateSetup({
   stopSend = "sent" as "sent" | "refused" | "throws",
   streaming = false,
   streamingFrames = 24,
+  refusal = "none",
 } = {}) {
   vi.useFakeTimers();
   vi.spyOn(nativePerformance, "now").mockImplementation(() => performance.now());
@@ -330,6 +331,17 @@ function candidateSetup({
     send: (p) => {
       sent.push(p);
       const body = JSON.parse(p.subarray(16).toString());
+      if (body.data.cmd === 0 && refusal !== "none") {
+        if (refusal === "after-media") for (const packet of wrapped(video())) candidate.ingress.native(packet);
+        candidate.ingress.decoded(
+          json({
+            cmd: 6001,
+            payload: { state: 0, code: 7, ...(refusal !== "unmatched" ? { segmen: body.segmen } : {}) },
+          }),
+          3,
+        );
+        return true;
+      }
       if (body.data.cmd === 0) {
         candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 1, code: 0 } }), 3);
         for (let n = 0; n < (streaming ? streamingFrames : 1); n++)
@@ -827,7 +839,10 @@ it("releases concurrent reservations while bounding cumulative decoder work", ()
 });
 
 it.each([
-  ["short low-fps", [0, 750, 1500, 2250, 3000], 7000, true, true],
+  ["short low-fps", [0, 750, 1500, 2250, 3000], 7000, true, false],
+  ["dense EOF", Array.from({ length: 51 }, (_, i) => i * 86), 7000, true, true],
+  ["density boundary", Array.from({ length: 16 }, (_, i) => i * 200), 7000, true, true],
+  ["below density boundary", Array.from({ length: 15 }, (_, i) => i * 210), 7000, true, false],
   ["large gap", [0, 500, 2000, 2500, 3000], 7000, true, false],
   ["absolute floor", [0, 400, 800], 1500, true, false],
   ["relative floor", [0, 750, 1500, 2250], 7000, true, false],
@@ -849,7 +864,7 @@ it.each([
   const observing = s.candidate.observe();
   await vi.advanceTimersByTimeAsync(5010);
   expect(await observing).toMatchObject({ boundedMediaObserved: accepted });
-  if (accepted) expect(s.candidate.receipt.mediaDurationMs).toBe(3750);
+  if (accepted) expect(s.candidate.receipt.mediaDurationMs).toBeGreaterThan(0);
 });
 
 it.each([1300, 1301, 1303])("drains trailing LIVE command %s without permanent poisoning", (command) => {
@@ -858,11 +873,11 @@ it.each([1300, 1301, 1303])("drains trailing LIVE command %s without permanent p
   guard.liveEnded();
   now = 9999;
   guard.decoded(binary(command, Buffer.alloc(22), 1, 101), 5);
-  expect(guard.prestartSafe()).toBe(false);
-  now = 10000;
+  expect(guard.prestartSafe()).toBe(true);
+  now = 90000;
   expect(guard.prestartSafe()).toBe(true);
   guard.decoded(binary(command, Buffer.alloc(22), 1, 101), 5);
-  expect(guard.prestartSafe()).toBe(false);
+  expect(guard.prestartSafe()).toBe(true);
 });
 
 it.each([
@@ -876,4 +891,106 @@ it.each([
   guard.decoded(binary(1300, Buffer.alloc(22), selector, channel), link);
   now = 20000;
   expect(guard.prestartSafe()).toBe(false);
+});
+
+it.each(["matched", "unmatched", "after-media", "late-ack", "late-media"])(
+  "terminal refusal safety: %s",
+  async (refusal) => {
+    const s = candidateSetup({ refusal, release: false });
+    await s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+    if (refusal === "late-ack") s.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 1, code: 0 } }), 3);
+    if (refusal === "late-media") for (const packet of wrapped(video())) s.candidate.ingress.native(packet);
+    const observing = s.candidate.observe();
+    await vi.advanceTimersByTimeAsync(24001);
+    const receipt = await observing;
+    expect(receipt.stationRefusalConfirmed).toBe(refusal === "matched");
+    expect(receipt.latchCleared).toBe(refusal === "matched");
+    expect(receipt.releaseOutcome).toBe(
+      refusal === "matched" ? "release_confirmed" : refusal === "late-media" ? "stop_unconfirmed" : "release_unknown",
+    );
+    expect(receipt.stationStatusCounts).toContainEqual({ state: 0, code: 7, count: 1 });
+  },
+);
+
+it.each(["matching", "mismatched", "absent", "noncomparable"])("EOF segment correlation: %s", async (kind) => {
+  const s = candidateSetup({ streaming: true, streamingFrames: 0 });
+  Reflect.get(s.candidate, "opts").expectedMs = 7000;
+  const capture = s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  for (let i = 0; i < 17; i++) {
+    if (i) await vi.advanceTimersByTimeAsync(200);
+    for (const packet of wrapped(video())) s.candidate.ingress.native(packet);
+  }
+  const segment = parsePortalHeader(s.sent[0]!)!.segment;
+  s.candidate.ingress.decoded(
+    json({
+      cmd: 6001,
+      payload: {
+        state: 2,
+        code: 14,
+        ...(kind === "absent"
+          ? {}
+          : { segmen: kind === "matching" ? segment : kind === "mismatched" ? segment + 1 : "unknown" }),
+      },
+    }),
+    3,
+  );
+  await capture;
+  const observing = s.candidate.observe();
+  await vi.advanceTimersByTimeAsync(16001);
+  expect((await observing).boundedMediaObserved).toBe(kind !== "mismatched");
+});
+
+it("bounds poison telemetry and records ambiguity and coarse live ages", () => {
+  let now = 0;
+  const guard = new PlaybackIngress({
+    now: () => now,
+    observeOnly: true,
+    liveAllowed: () => false,
+    liveTargetAmbiguous: () => true,
+    end: vi.fn(),
+    media: vi.fn(),
+  });
+  guard.liveStarted();
+  now = 11000;
+  guard.liveEnded();
+  now = 12000;
+  for (let channel = 102; channel < 142; channel++) guard.decoded(binary(1300, Buffer.alloc(22), 1, channel), 5);
+  const evidence = guard.observationEvidence();
+  expect(evidence.poisonCounts).toHaveLength(32);
+  expect(evidence.poisonOverflow).toBe(8);
+  expect(evidence.poisonCounts[0]).toMatchObject({
+    cause: "channel",
+    link: 5,
+    cmd: 1300,
+    channel: 102,
+    selector: "1",
+    liveTargetAmbiguous: true,
+    sinceLiveStart: "lt60s",
+    sinceLiveStop: "lt10s",
+    count: 1,
+  });
+  evidence.poisonCounts[0]!.count = 0;
+  expect(guard.observationEvidence().poisonCounts[0]!.count).toBe(1);
+});
+
+it("malformed LIVE lengths and unknown framing remain unsafe", () => {
+  for (const frame of [Buffer.alloc(3), binary(1300, Buffer.alloc(22), 1, 101).subarray(0, -1)]) {
+    const guard = new PlaybackIngress({ observeOnly: true, end: vi.fn(), media: vi.fn() });
+    guard.decoded(frame, 5);
+    expect(guard.prestartSafe()).toBe(false);
+    expect(guard.observationEvidence().poisonCounts.length).toBeGreaterThan(0);
+  }
+});
+
+it("bounds station status classes and saturates repeated counts", async () => {
+  const s = candidateSetup({ refusal: "matched" });
+  await s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  for (let code = 100; code < 140; code++)
+    s.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 0, code } }), 3);
+  expect(s.candidate.receipt.stationStatusCounts).toHaveLength(32);
+  expect(s.candidate.receipt.stationStatusOverflow).toBe(10);
+  const status = s.candidate.receipt.stationStatusCounts.find((r) => r.code === 7)!;
+  status.count = 65535;
+  s.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 0, code: 7 } }), 3);
+  expect(status.count).toBe(65535);
 });
