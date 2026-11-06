@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "version": "0.2.1-s1.experimental.12",
   "status": "local-build-unpublished",
-  "exactInputCommit": "853fa26ea9d6da017ba7668bb550bb3685795878",
+  "exactInputCommit": "c7913bfba9bd03a73fda011241e8803ccbe2be66",
   "files": {
     ".editorconfig": {
       "bytes": 505,
@@ -49,8 +49,8 @@
       "sha256": "95b791c3b452823fe2b67de33893e4d0edc96ef6e2ce548ae78129c0f1a6ced5"
     },
     "MODIFICATIONS.md": {
-      "bytes": 69523,
-      "sha256": "945c3acd8e4b4e0dfc4e4e96cc5e7eb3d031ca618065e40603000053859d0599"
+      "bytes": 69788,
+      "sha256": "9e223bedeb7ffbce4fc9c5786e751aa55cd038eb9c22d06a94b88bd50b6ecffc"
     },
     "PUBLICATION.json": {
       "bytes": 378,
@@ -1993,8 +1993,8 @@
       "sha256": "55666a784f3b972391367dc043da3ed8e1e76ff41cc2f06d0878df8f7e535796"
     },
     "src/transport/rtc/__tests__/event-playback-candidate.spec.ts": {
-      "bytes": 41250,
-      "sha256": "2f77219c345b786f148436b009dfd09a96fd31b7624c21c51a97e484f842bf31"
+      "bytes": 41924,
+      "sha256": "7ae81901f25c409d1195d039c045300c098963a75ee79a6d3ef31eae9e09744e"
     },
     "src/transport/rtc/__tests__/event-playback-router.spec.ts": {
       "bytes": 36879,
@@ -2185,8 +2185,8 @@
       "sha256": "2f349552d205a0887b9868fef31af3d416b8153836def44427e7d6008ccaee51"
     },
     "src/transport/rtc/event-playback-candidate.ts": {
-      "bytes": 27048,
-      "sha256": "68b24956fab4aaf798f8da941f9fee7b6eb9c5d7633f306af47a3d7fc0cccb0d"
+      "bytes": 27090,
+      "sha256": "0cf5c33d8abdb058c8d23c9f14cb3a21955ea8b49b924962bcab00d79b74d582"
     },
     "src/transport/rtc/event-table-candidate.ts": {
       "bytes": 7898,
