@@ -11,6 +11,7 @@ export type CaptureOutcome =
   | "storage_failed"
   | "begin_time_refused"
   | "eof"
+  | "complete"
   | "capped"
   | "capped_wrong_route"
   | "no_media"
@@ -20,10 +21,49 @@ export type CaptureOutcome =
   | "owner_changed"
   | "timeout";
 export type PlaybackSelectionOutcome = "selected" | "no_rows" | "no_camera_rows" | "time_invalid" | "end_not_past";
+/** Stable admission vocabulary; numeric positions retain their existing diagnostic meaning. */
+export const PLAYBACK_ADMISSION_GATES = [
+  "none",
+  "disabled",
+  "no_marker",
+  "no_cameras",
+  "no_exclusions",
+  "unresolved",
+  "no_owner",
+  "owner_changed",
+  "aborted",
+  "no_observation",
+  "observation_window",
+  "no_ordinary_frames",
+  "no_keepalives",
+  "unsafe_observation",
+  "no_information",
+  "owner_not_connected",
+  "information_tainted",
+  "leases",
+  "pending_exchanges",
+  "scheduler_busy",
+  "replacement",
+  "refresh_pending",
+  "live_entry",
+  "playback_busy",
+  "table_busy",
+  "renewal_soon",
+  "start_not_allowed",
+  "scope_invalid",
+  "store_unavailable",
+  "reconnect_hold",
+  "recording_busy",
+  "reply_capacity",
+  "recordings_unavailable",
+  "model",
+] as const;
+export type PlaybackAdmissionGate = (typeof PLAYBACK_ADMISSION_GATES)[number];
 export interface PlaybackReceipt extends PlaybackIngressEvidence {
   reconnectOutcome?: "not_needed" | "connected" | "failed" | "timed_out";
   reconnectDurationMs?: number;
   admissionGate: number;
+  admissionGateName: PlaybackAdmissionGate;
   selectionOutcome: PlaybackSelectionOutcome;
   captureOutcome: CaptureOutcome;
   cessationOutcome: "not_started" | "ceased" | "media_continues" | "cessation_unknown";
@@ -171,11 +211,14 @@ export class EventPlaybackCandidate {
   private lateLatched = false;
   private selection?: { record: number; begin: number };
   private startSelector?: number;
+  /** Framed ingress exposes no validated media timestamp; coverage uses monotonic video arrival time. */
+  private firstVideoAt?: number;
 
   constructor(
     private readonly opts: {
       deadlineMs: number;
       captureMs?: number;
+      expectedMs?: number;
       transient?: boolean;
       video?: (data: Buffer) => void;
       continuous: () => boolean;
@@ -209,6 +252,7 @@ export class EventPlaybackCandidate {
     });
     this.receipt = {
       admissionGate: 0,
+      admissionGateName: "none",
       selectionOutcome: "no_rows",
       ...this.ingress.evidence,
       captureOutcome: "not_admitted",
@@ -455,11 +499,11 @@ export class EventPlaybackCandidate {
       Object.assign(this.receipt, this.ingress.evidence);
       this.receipt.elapsedMs = Math.max(0, Math.round(performance.now() - this.started));
       this.receipt.boundedMediaObserved =
-        ["eof", "capped"].includes(this.receipt.captureOutcome) &&
+        ["eof", "complete", "capped"].includes(this.receipt.captureOutcome) &&
         this.receipt.startAcknowledged &&
         this.receipt.randomAccess &&
         this.receipt.ownerContinuous &&
-        this.receipt.cessationOutcome === "ceased" &&
+        (this.fullClip || this.receipt.cessationOutcome === "ceased") &&
         this.receipt.pauseAttempted &&
         this.receipt.stopAttempted &&
         !this.receipt.unknown &&
@@ -499,6 +543,14 @@ export class EventPlaybackCandidate {
     }
     if (this.opts.video && !this.receipt.videoFrames && !isHevcKeyframe(data)) {
       this.ingress.invalidMedia("metadata");
+      return;
+    }
+    const now = performance.now();
+    this.firstVideoAt ??= now;
+    const coverageMs = now - this.firstVideoAt;
+    if (this.opts.expectedMs !== undefined && coverageMs > this.opts.expectedMs) {
+      if (coverageMs >= this.opts.expectedMs + 750 && this.receipt.videoFrames >= 2 && this.receipt.randomAccess)
+        this.end("complete");
       return;
     }
     try {

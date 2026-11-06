@@ -1116,14 +1116,20 @@ export class EufyMega extends EventEmitter {
   async pullRecordingClip(
     scope: RecordingReadScope,
     selector: InternalPlaybackSelector,
-    opts: { signal?: AbortSignal; video: (data: Buffer) => void },
+    opts: { signal?: AbortSignal; video: (data: Buffer) => void; beforeDispatch?: () => void },
   ) {
-    if (!this.recordingsAllowed(scope))
-      throw Object.assign(new Error("Playback unavailable"), { reason: "owner_unavailable" });
+    const admissionGateName = this.recordingsAdmission(scope);
+    if (admissionGateName)
+      throw Object.assign(new Error("Playback unavailable"), {
+        reason: "owner_unavailable",
+        admissionGateName,
+        captureOutcome: "not_admitted",
+      });
     const generation = this.realtimeGeneration!;
     const signal = opts.signal ? AbortSignal.any([opts.signal, generation.abort.signal]) : generation.abort.signal;
     return this.rtc.readEventPlaybackCandidate(scope.stationSn, {
       enabled: true,
+      beforeDispatch: opts.beforeDispatch,
       signal,
       cameras: scope.cameraSns,
       excluded: new Set(),
@@ -1134,19 +1140,27 @@ export class EufyMega extends EventEmitter {
 
   /** Lifecycle, correction and exact enrolled topology gate, evaluated without network activity. */
   private recordingsAllowed(scope: RecordingReadScope, pulling = false): boolean {
+    return this.recordingsAdmission(scope, pulling) === undefined;
+  }
+
+  /** Stable refusal reason without transport activity or selector disclosure. */
+  private recordingsAdmission(
+    scope: RecordingReadScope,
+    pulling = false,
+  ): "disabled" | "scope_invalid" | "recordings_unavailable" | undefined {
     const policy = this.opts.rtc?.recordings;
+    if (!policy?.enabled) return "disabled";
+    if (this.getRecordingAccountNamespace(scope.identityKey) !== scope.accountNamespace) return "scope_invalid";
     if (
-      !policy?.enabled ||
       !this.automaticInformationAllowed() ||
       (!pulling && (this.stateRefreshSweep || this.reportRefreshes.has(scope.stationSn))) ||
       this.lateEffects.has(scope.stationSn) ||
       this.commandRefreshes.size ||
       this.stateTransitions.size ||
       this.propertyPreparations.size ||
-      this.registry.conflicts().length ||
-      this.getRecordingAccountNamespace(scope.identityKey) !== scope.accountNamespace
+      this.registry.conflicts().length
     )
-      return false;
+      return "recordings_unavailable";
     const allowed = new Set(policy.allowedCameras);
     if (
       scope.stationSn !== policy.stationBinding ||
@@ -1154,7 +1168,7 @@ export class EufyMega extends EventEmitter {
       scope.cameraSns.size !== allowed.size ||
       [...scope.cameraSns].some((sn) => !allowed.has(sn))
     )
-      return false;
+      return "scope_invalid";
     for (const sn of allowed) {
       const device = this.registry.list().find((entry) => entry.sn === sn);
       const channel = (device?.raw as { device_channel?: unknown } | undefined)?.device_channel;
@@ -1171,9 +1185,9 @@ export class EufyMega extends EventEmitter {
         typeof channel !== "number" ||
         this.registry.serialForFrame(scope.stationSn, channel) !== sn
       )
-        return false;
+        return "scope_invalid";
     }
-    return true;
+    return undefined;
   }
 
   /** Background reads share the current realtime generation's authentication and failure holds. */

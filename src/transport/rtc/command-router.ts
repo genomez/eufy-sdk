@@ -92,9 +92,11 @@ import {
 import { collectEventTableCandidate, type EventTableReceipt } from "./event-table-candidate.js";
 import {
   EventPlaybackCandidate,
+  PLAYBACK_ADMISSION_GATES,
   reservePlaybackSelectors,
   selectPlayback,
   type PlaybackReceipt,
+  type PlaybackAdmissionGate,
 } from "./event-playback-candidate.js";
 import { PlaybackIngress } from "./playback-ingress.js";
 import {
@@ -1621,7 +1623,13 @@ export class RtcCommandRouter {
   }
 
   private observePlaybackOwner(st: StationSession): void {
-    const guard = new PlaybackIngress({ observeOnly: true, end: () => {}, media: () => {} });
+    const guard = new PlaybackIngress({
+      observeOnly: true,
+      end: () => {},
+      media: () => {},
+      liveAllowed: () =>
+        [...this.sessions].some(([sn, owner]) => owner === st && !!this.lives.get(sn)?.live && !st.liveTargetAmbiguous),
+    });
     st.playbackObservation = guard;
     st.session.attachIngressGuard(guard);
   }
@@ -1647,22 +1655,13 @@ export class RtcCommandRouter {
       nativeMessage?: (direction: "in" | "out", message: unknown) => void;
     } = {},
   ): Promise<PlaybackReceipt> {
-    if (opts.clip) {
-      if (this.playbackHolds.has(stationSn)) await this.waitForPlaybackReconnect(stationSn, opts.signal);
-      this.preemptRecordingReads(stationSn);
-      const until = performance.now() + 8000;
-      while (this.recordingReads.has(stationSn) && performance.now() < until && !opts.signal?.aborted)
-        await new Promise((resolve) => setTimeout(resolve, 10));
-    }
     const started = performance.now();
+    let recordingAdmission: RecordingReadReason | undefined;
     if (opts.clip) {
       if (!verifyPlaybackSelector(opts.clip.scope, opts.clip.selector) || opts.clip.scope.stationSn !== stationSn)
         throw Object.assign(new Error("Playback selection unavailable"), { reason: "not_found" });
-      const gate = this.recordingGate(opts.clip.scope, false, false, true);
-      if (gate)
-        throw Object.assign(new Error("Playback owner unavailable"), {
-          reason: this.playbackUnresolved ? "cleanup_uncertain" : gate === "busy" ? "busy" : "owner_unavailable",
-        });
+      this.preemptRecordingReads(stationSn);
+      recordingAdmission = this.recordingGate(opts.clip.scope, false, false, true);
     }
     this.preemptRecordingReads(stationSn);
     const captureMs = opts.clip ? opts.clip.selector.expectedMs + 15000 : 8000;
@@ -1699,6 +1698,7 @@ export class RtcCommandRouter {
       nativeMessage: opts.nativeMessage,
       transient: !!opts.clip,
       captureMs,
+      expectedMs: opts.clip?.selector.expectedMs,
       video: opts.clip?.video,
       deadlineMs,
       continuous,
@@ -1731,6 +1731,12 @@ export class RtcCommandRouter {
         !st!.liveTargetAmbiguous,
     });
     const observation = st?.playbackObservation;
+    if (recordingAdmission && ["disabled", "scope_invalid", "store_unavailable"].includes(recordingAdmission)) {
+      const gate = recordingAdmission as PlaybackAdmissionGate;
+      candidate.receipt.admissionGateName = gate;
+      candidate.receipt.admissionGate = PLAYBACK_ADMISSION_GATES.indexOf(gate);
+      return candidate.observe();
+    }
     const admission = [
       () => !opts.enabled,
       () => !this.playbackMarker,
@@ -1761,6 +1767,23 @@ export class RtcCommandRouter {
     ].findIndex((blocked) => !!blocked());
     if (admission !== -1) {
       candidate.receipt.admissionGate = admission + 1;
+      candidate.receipt.admissionGateName = PLAYBACK_ADMISSION_GATES[admission + 1]!;
+      return candidate.observe();
+    }
+    if (recordingAdmission) {
+      const gates: Partial<Record<RecordingReadReason, PlaybackAdmissionGate>> = {
+        busy: "recording_busy",
+        observing: "observation_window",
+        renewal_due: "renewal_soon",
+        owner_unhealthy: "no_information",
+        owner_unavailable: "no_owner",
+        reply_capacity: "reply_capacity",
+      };
+      const gate: PlaybackAdmissionGate = this.playbackHolds.has(stationSn)
+        ? "reconnect_hold"
+        : (gates[recordingAdmission] ?? "scope_invalid");
+      candidate.receipt.admissionGateName = gate;
+      candidate.receipt.admissionGate = PLAYBACK_ADMISSION_GATES.indexOf(gate);
       return candidate.observe();
     }
     if (!st) return candidate.observe();
@@ -2484,9 +2507,9 @@ export class RtcCommandRouter {
             this.playbackFailedOwner = st;
           }
         }
-        if (error === undefined && purpose === "current") {
+        if (error === undefined) {
           st.lastInformationRead = { startedAtMs, finishedAtMs };
-          if (this.playbackMarker) this.playbackHealth.ordinaryReads++;
+          if (this.playbackMarker && purpose === "current") this.playbackHealth.ordinaryReads++;
         }
         clearTimeout(timer);
         st.session.off("commandData", onData);

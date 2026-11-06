@@ -300,6 +300,7 @@ function candidateSetup({
   eof = false,
   stopSend = "sent" as "sent" | "refused" | "throws",
   streaming = false,
+  streamingFrames = 24,
 } = {}) {
   vi.useFakeTimers();
   vi.spyOn(nativePerformance, "now").mockImplementation(() => performance.now());
@@ -331,7 +332,7 @@ function candidateSetup({
       const body = JSON.parse(p.subarray(16).toString());
       if (body.data.cmd === 0) {
         candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 1, code: 0 } }), 3);
-        for (let n = 0; n < (streaming ? 24 : 1); n++)
+        for (let n = 0; n < (streaming ? streamingFrames : 1); n++)
           for (const packet of wrapped(video(streaming ? 256 * 1024 : 7))) candidate.ingress.native(packet);
         if (eof) candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 2, code: 14 } }), 3);
         if (ownerChanged) continuous = false;
@@ -452,6 +453,89 @@ it("streams a complete clip beyond the probe byte cutoff through EOF and qualifi
     latchCleared: true,
   });
   expect(s.candidate.receipt.nativeBytes).toBeGreaterThan(4 * 1024 ** 2);
+});
+
+it("completes by received video duration, trims the margin and retains complete media through unconfirmed cleanup", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(nativePerformance, "now").mockImplementation(() => performance.now());
+  const output = vi.fn(),
+    sent: number[] = [];
+  const candidate = new EventPlaybackCandidate({
+    deadlineMs: performance.now() + 34000,
+    captureMs: 18000,
+    expectedMs: 3000,
+    video: output,
+    continuous: () => true,
+    startAllowed: () => true,
+    signal: new AbortController().signal,
+    account: "synthetic",
+    segment: () => 1,
+    marker: () => {},
+    latch: () => {},
+    send: (packet) => {
+      sent.push(JSON.parse(packet.subarray(16).toString()).data.cmd);
+      return true;
+    },
+  });
+  const capture = candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 1, code: 0 } }), 3);
+  const inject = () => {
+    for (const packet of wrapped(video())) candidate.ingress.native(packet);
+  };
+  inject();
+  await vi.advanceTimersByTimeAsync(1000);
+  inject();
+  await vi.advanceTimersByTimeAsync(2000);
+  inject();
+  await vi.advanceTimersByTimeAsync(500);
+  inject();
+  expect(output).toHaveBeenCalledTimes(3);
+  expect(candidate.receipt.captureOutcome).not.toBe("complete");
+  await vi.advanceTimersByTimeAsync(250);
+  inject();
+  await capture;
+  expect(sent).toEqual([0, 1, 3]);
+  const observing = candidate.observe();
+  for (let i = 0; i < 16; i++) {
+    await vi.advanceTimersByTimeAsync(1000);
+    inject();
+  }
+  expect(await observing).toMatchObject({
+    captureOutcome: "complete",
+    videoFrames: 3,
+    randomAccess: true,
+    boundedMediaObserved: true,
+    releaseOutcome: "stop_unconfirmed",
+    latchRetained: true,
+  });
+  expect(output).toHaveBeenCalledTimes(3);
+});
+
+it.each([1, 24])(
+  "does not complete duration capture on wall time alone with %s retained frames",
+  async (streamingFrames) => {
+    const s = candidateSetup({ streaming: true, streamingFrames });
+    Reflect.get(s.candidate, "opts").expectedMs = 3000;
+    const capture = s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+    await vi.advanceTimersByTimeAsync(4000);
+    if (streamingFrames === 1) for (const packet of wrapped(video())) s.candidate.ingress.native(packet);
+    await vi.advanceTimersByTimeAsync(56001);
+    await capture;
+    expect(s.candidate.receipt.captureOutcome).toBe("capped");
+    s.candidate.ingress.stopExpiry();
+  },
+);
+
+it("refuses a duration capture without a keyframe start", async () => {
+  const s = candidateSetup({ streaming: true, streamingFrames: 0 });
+  Reflect.get(s.candidate, "opts").expectedMs = 3000;
+  const capture = s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  const delta = video();
+  delta[42] = 0x02;
+  for (const packet of wrapped(delta)) s.candidate.ingress.native(packet);
+  await capture;
+  expect(s.candidate.receipt).toMatchObject({ captureOutcome: "invalid_media", videoFrames: 0, randomAccess: false });
+  s.candidate.ingress.stopExpiry();
 });
 
 it.each([0, 1, 2, 3, 5, 9])(

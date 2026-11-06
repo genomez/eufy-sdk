@@ -539,6 +539,56 @@ function sealedClip(router: RtcCommandRouter, session: Session) {
   return { scope, selector: result.rows[0]!.playbackSelector!, video: () => {} };
 }
 
+it("duration-complete capture reconnects and re-admits the replacement after observation and a live view", async () => {
+  const { router, session, sessions } = await fixture();
+  session.eof = false;
+  session.releaseStatus = false;
+  const clip = sealedClip(router, session),
+    video = vi.fn();
+  const pending = router.readEventPlaybackCandidate(station, { ...options(), clip: { ...clip, video } });
+  await vi.advanceTimersByTimeAsync(1);
+  const body = Buffer.alloc(29);
+  body.writeUInt32LE(7);
+  body[5] = 1;
+  Buffer.from([0, 0, 0, 1, 0x26, 1, 0x80]).copy(body, 22);
+  const input = () => session.input(1300, body, 4, 101, 6);
+  await vi.advanceTimersByTimeAsync(500);
+  input();
+  await vi.advanceTimersByTimeAsync(500);
+  input();
+  await vi.advanceTimersByTimeAsync(750);
+  input();
+  await vi.advanceTimersByTimeAsync(1);
+  for (let i = 0; i < 16; i++) {
+    input();
+    await vi.advanceTimersByTimeAsync(1000);
+  }
+  expect(await pending).toMatchObject({
+    captureOutcome: "complete",
+    boundedMediaObserved: true,
+    releaseOutcome: "stop_unconfirmed",
+    reconnectOutcome: "connected",
+  });
+  expect(video).toHaveBeenCalledTimes(2);
+  const replacement = Reflect.get(router, "sessions").get(station);
+  expect(replacement.lastInformationRead).toBeDefined();
+  expect(replacement.playbackObservation.ordinaryFrames).toBeGreaterThan(0);
+  expect(Reflect.get(router, "playbackHolds").size).toBe(0);
+  const refused = await router.readEventPlaybackCandidate(station, { ...options(), clip });
+  expect(refused).toMatchObject({ captureOutcome: "not_admitted", admissionGateName: "observation_window" });
+  const livePending = router.mediaProviderFor(camera).live!();
+  await vi.advanceTimersByTimeAsync(1);
+  const consumer = await livePending;
+  sessions[1]!.input(1300, body, 5, 101, 1);
+  consumer.stop();
+  sessions[1]!.inject(PORTAL_KEEPALIVE);
+  await vi.advanceTimersByTimeAsync(60001);
+  expect(replacement.playbackObservation.prestartSafe()).toBe(true);
+  const next = router.readEventPlaybackCandidate(station, { ...options(), clip });
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await next).toMatchObject({ admissionGateName: "none", captureOutcome: "eof" });
+});
+
 it("no-media unconfirmed clip replaces the session, holds reads and live, then releases without a marker", async () => {
   const { router, session, sessions, marker } = await fixture();
   session.mediaEnabled = false;

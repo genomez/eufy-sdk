@@ -538,8 +538,15 @@ export class PlaybackIngress implements RtcIngressGuard {
     this.countIngress(h.commandId);
     if (this.opts.observeOnly) {
       if (h.commandId === 1300 || h.commandId === 1301 || h.commandId === 1303) {
-        this.nonControlTraffic = true;
-        this.plausible();
+        if (!(
+          this.opts.liveAllowed?.() &&
+          link === PortalLinkType.LIVE &&
+          h.isResponse === 1 &&
+          h.paramLength + 16 === frame.length
+        )) {
+          this.nonControlTraffic = true;
+          this.plausible();
+        }
       } else this.ordinaryFrames = add(this.ordinaryFrames, 1);
       return true;
     }
