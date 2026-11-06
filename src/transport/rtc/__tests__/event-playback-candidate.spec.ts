@@ -20,9 +20,9 @@ afterEach(() => {
 const binary = (command: number, body: Buffer, selector = 6, channel = 101, segment = 9) =>
   Buffer.concat([buildPortalHeader(command, body.length, channel, segment, selector), body]);
 const json = (value: unknown, segment = 9) => binary(1351, Buffer.from(JSON.stringify(value)), 0, 0, segment);
-const video = () => {
-  const body = Buffer.alloc(29);
-  body.writeUInt32LE(7);
+const video = (size = 7) => {
+  const body = Buffer.alloc(22 + size);
+  body.writeUInt32LE(size);
   body[5] = 1;
   Buffer.from([0, 0, 0, 1, 0x26, 1, 0x80]).copy(body, 22);
   return binary(1300, body);
@@ -299,6 +299,7 @@ function candidateSetup({
   absent = false,
   eof = false,
   stopSend = "sent" as "sent" | "refused" | "throws",
+  streaming = false,
 } = {}) {
   vi.useFakeTimers();
   vi.spyOn(nativePerformance, "now").mockImplementation(() => performance.now());
@@ -310,7 +311,9 @@ function candidateSetup({
     markerFails = false,
     latched = false;
   const candidate = new EventPlaybackCandidate({
-    deadlineMs: performance.now() + 24000,
+    deadlineMs: performance.now() + (streaming ? 91000 : 24000),
+    captureMs: streaming ? 60000 : undefined,
+    video: streaming ? () => {} : undefined,
     continuous: () => continuous,
     startAllowed: () => true,
     signal: controller.signal,
@@ -328,7 +331,8 @@ function candidateSetup({
       const body = JSON.parse(p.subarray(16).toString());
       if (body.data.cmd === 0) {
         candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 1, code: 0 } }), 3);
-        for (const packet of wrapped(video())) candidate.ingress.native(packet);
+        for (let n = 0; n < (streaming ? 24 : 1); n++)
+          for (const packet of wrapped(video(streaming ? 256 * 1024 : 7))) candidate.ingress.native(packet);
         if (eof) candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 2, code: 14 } }), 3);
         if (ownerChanged) continuous = false;
       }
@@ -415,6 +419,39 @@ it("clears a persisted prestart latch when admission changes before sending", as
   expect(markers).toEqual([true, false]);
   expect(latched).toBe(false);
   expect(send).not.toHaveBeenCalled();
+});
+
+it("reports a pre-dispatch storage failure without sending or retaining the live-view latch", async () => {
+  const s = candidateSetup();
+  s.failMarker();
+  await s.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+  expect(await s.candidate.observe()).toMatchObject({
+    captureOutcome: "storage_failed",
+    startAttempted: false,
+    latchPersistenceFailed: true,
+    latchRetained: false,
+    releaseOutcome: "not_started",
+    cessationOutcome: "not_started",
+  });
+  expect(s.sent).toHaveLength(0);
+  expect(s.latch()).toBe(false);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("streams a complete clip beyond the probe byte cutoff through EOF and qualified release", async () => {
+  const s = candidateSetup({ streaming: true, eof: true });
+  await s.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+  const pending = s.candidate.observe();
+  await vi.advanceTimersByTimeAsync(5010);
+  expect(await pending).toMatchObject({
+    captureOutcome: "eof",
+    videoFrames: 24,
+    boundedMediaObserved: true,
+    cutoff: false,
+    releaseOutcome: "release_confirmed",
+    latchCleared: true,
+  });
+  expect(s.candidate.receipt.nativeBytes).toBeGreaterThan(4 * 1024 ** 2);
 });
 
 it.each([0, 1, 2, 3, 5, 9])(

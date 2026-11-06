@@ -151,7 +151,7 @@ export class PlaybackIngress implements RtcIngressGuard {
   constructor(
     private readonly opts: {
       now?: () => number;
-      streaming?: { frameLimit: number };
+      streaming?: { durationMs: number; frameLimit: number };
       nativeMessage?: (direction: "in" | "out", message: unknown) => void;
       end: (reason: "capped" | "capped_wrong_route" | "transport_mismatch" | "invalid_media") => void;
       media: (frame: Buffer) => void;
@@ -312,7 +312,12 @@ export class PlaybackIngress implements RtcIngressGuard {
       this.packetClass = "nonbinary";
       return this.reject("invalid_media", true, "native");
     }
-    if (!this.tombstone && (this.evidence.nativeBytes >= 4 * 1024 * 1024 || this.evidence.nativeMessages >= 16384)) {
+    const seconds = this.opts.streaming ? Math.ceil(this.opts.streaming.durationMs / 1000) : 0;
+    const byteLimit = this.opts.streaming
+      ? Math.min(2 * 1024 ** 3, Math.max(16 * 1024 ** 2, seconds * 8 * 1024 ** 2))
+      : 4 * 1024 * 1024;
+    const messageLimit = this.opts.streaming ? Math.max(32768, seconds * 8192) : 16384;
+    if (!this.tombstone && (this.evidence.nativeBytes >= byteLimit || this.evidence.nativeMessages >= messageLimit)) {
       this.evidence.cutoff = true;
       this.opts.end("capped");
     }

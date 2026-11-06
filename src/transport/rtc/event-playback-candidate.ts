@@ -8,6 +8,7 @@ export type CaptureOutcome =
   | "not_admitted"
   | "time_refused"
   | "start_refused"
+  | "storage_failed"
   | "begin_time_refused"
   | "eof"
   | "capped"
@@ -187,7 +188,9 @@ export class EventPlaybackCandidate {
     },
   ) {
     this.ingress = new PlaybackIngress({
-      streaming: opts.video ? { frameLimit: Math.ceil(((opts.captureMs ?? 8000) * 256) / 1000) } : undefined,
+      streaming: opts.video
+        ? { durationMs: opts.captureMs ?? 8000, frameLimit: Math.ceil(((opts.captureMs ?? 8000) * 256) / 1000) }
+        : undefined,
       nativeMessage: opts.nativeMessage,
       end: (reason) => this.end(reason),
       media: (frame) => this.media(frame),
@@ -195,9 +198,9 @@ export class EventPlaybackCandidate {
       liveAllowed: opts.liveAllowed,
       late: () => {
         if (this.lateLatched) return;
+        this.lateLatched = true;
         try {
           this.persistLatch(true);
-          this.lateLatched = true;
         } catch {}
       },
     });
@@ -243,18 +246,25 @@ export class EventPlaybackCandidate {
     };
   }
 
-  /** Memory remains latched after every uncertain write, including a failed clear or late re-latch. */
+  /** Persistence failures retain memory safety only after dispatch or late media makes station state uncertain. */
   private persistLatch(unresolved: boolean): void {
-    this.opts.latch(true);
-    this.receipt.latchRetained = true;
+    const uncertain = this.receipt.startAttempted || this.lateLatched;
+    this.opts.latch(uncertain);
+    this.receipt.latchRetained = uncertain;
     this.receipt.latchCleared = false;
     try {
       this.opts.marker(unresolved);
       this.opts.latch(unresolved);
+      this.receipt.latchRetained = unresolved;
     } catch (error) {
       this.receipt.latchPersistenceFailed = true;
       this.receipt.latchPersisted = false;
-      this.receipt.releaseOutcome = "release_unknown";
+      if (uncertain) this.receipt.releaseOutcome = "release_unknown";
+      else {
+        try {
+          this.opts.marker(false);
+        } catch {}
+      }
       throw error;
     }
   }
@@ -332,7 +342,9 @@ export class EventPlaybackCandidate {
           )
             this.end("start_refused");
         } catch {
-          this.end("start_refused");
+          this.end(
+            !this.receipt.startAttempted && this.receipt.latchPersistenceFailed ? "storage_failed" : "start_refused",
+          );
         }
       });
     } finally {

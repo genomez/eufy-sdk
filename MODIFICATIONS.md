@@ -1065,3 +1065,14 @@ retained signed station rejection evidence. Local synthetic verification only.
 ## Experimental.6 package refresh, 2026-10-17
 
 This replaces the earlier review.7 candidate with review.9 input `681efd9` (implementation `d4335b9`, on review.8 `f6a59d9`). Runtime source is unchanged. Includes bounded pending acceptance for eligible correlated floodlight late replies with authoritative correction, supported S1 camera sirens, standard doorbell ring events and faster demand-only live-view admission, alongside the battery stream fix and native relay. The add-on relay option defaults to false; command keepalive remains 29000 independently. Package versions are SDK `0.2.1-s1.experimental.6` and bridge `0.3.1-s1.experimental.6`. Earlier candidate status statements above are historical. Original licenses and attribution remain. This is local packaging; publication and final device/soak qualification are pending.
+
+## Save-first playback review fixes, 2026-11-06
+
+Streaming clip ingress uses duration-sized native byte/message budgets while
+retaining bounded concurrent reassembly and the short diagnostic probe limits.
+Video frames continue to be delivered immediately to the caller's sink. Marker
+persistence failure before dispatch reports storage_failed without a retained
+in-memory safety latch or a live-view block. Dispatched or late-media cleanup
+uncertainty still fails closed. Synthetic regression coverage includes clips
+larger than 4 MiB, duration budgets and direct live attachment after storage
+failure. No device or cloud qualification was performed.

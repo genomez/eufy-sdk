@@ -321,6 +321,31 @@ it.each(["time_refused", "table_failed", "table_timeout", "selectors_exhausted",
     expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: false, active: false });
   },
 );
+it("a pre-dispatch marker failure leaves direct live attachment available", async () => {
+  const { router, session } = await fixture();
+  router.configurePlaybackSafety(false, () => {
+    throw Error("synthetic_storage_failure");
+  });
+  const pending = router.readEventPlaybackCandidate(station, options());
+  await vi.advanceTimersByTimeAsync(100);
+  expect(await pending).toMatchObject({
+    captureOutcome: "storage_failed",
+    startAttempted: false,
+    latchRetained: false,
+  });
+  expect(session.sent.filter((packet) => parsePortalHeader(packet)!.commandId === 1700)).toHaveLength(0);
+  expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: false, active: false });
+  const consumer = {},
+    attach = vi.fn(() => consumer);
+  Reflect.get(router, "lives").set(station, {
+    sn: camera,
+    pending: 0,
+    controller: new AbortController(),
+    ready: Promise.resolve({ attach }),
+  });
+  expect(await Reflect.get(router, "attachLive").call(router, camera)).toBe(consumer);
+  expect(attach).toHaveBeenCalledOnce();
+});
 it("full current-table/start/pause/next-selector stop path uses one original owner and releases its scheduler", async () => {
   const { router, session, sessions, marker } = await fixture();
   const enqueue = vi.spyOn(Reflect.get(router, "sessions").get(station).scheduler, "enqueue");

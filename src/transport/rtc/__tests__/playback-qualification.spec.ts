@@ -4,6 +4,7 @@ import { EventPlaybackCandidate } from "../event-playback-candidate.js";
 import { PlaybackIngress } from "../playback-ingress.js";
 import { buildPortalHeader } from "../portal-packet.js";
 import { packetize } from "../ptcs-framer.js";
+import { PORTAL_KEEPALIVE } from "../portal-keepalive.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -32,6 +33,30 @@ function ingress() {
 }
 
 describe("offline retained-state and budget matrix", () => {
+  it.each([60000, 120000])("streaming native budgets scale with capture duration %s", (durationMs) => {
+    const end = vi.fn();
+    const guard = new PlaybackIngress({
+      streaming: { durationMs, frameLimit: (256 * durationMs) / 1000 },
+      media: () => {},
+      end,
+    });
+    guard.evidence.nativeBytes = 4 * 1024 ** 2;
+    guard.evidence.nativeMessages = 16384;
+    guard.native(PORTAL_KEEPALIVE);
+    expect(end).not.toHaveBeenCalled();
+    guard.evidence.nativeBytes = (durationMs / 1000) * 8 * 1024 ** 2;
+    guard.native(PORTAL_KEEPALIVE);
+    expect(end).toHaveBeenCalledWith("capped");
+    expect(guard.evidence.cutoff).toBe(true);
+    const messages = new PlaybackIngress({
+      streaming: { durationMs, frameLimit: (256 * durationMs) / 1000 },
+      media: () => {},
+      end,
+    });
+    messages.evidence.nativeMessages = (durationMs / 1000) * 8192 - 1;
+    messages.native(PORTAL_KEEPALIVE);
+    expect(messages.evidence.cutoff).toBe(true);
+  });
   it.each([false, true])("assembles reordered and duplicate fragments reversed=%s", (reversed) => {
     const s = ingress(),
       parts = packets(media(4000));
