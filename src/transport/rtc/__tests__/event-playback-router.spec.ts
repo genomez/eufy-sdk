@@ -559,17 +559,16 @@ it("no-media unconfirmed clip replaces the session, holds reads and live, then r
   await vi.advanceTimersByTimeAsync(21100);
   expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: true, reconnect: { attempts: 1 } });
   expect(await router.readRecordingCatalog(clip.scope)).toMatchObject({ reason: "busy" });
-  const consumer = {},
-    attach = vi.fn(() => consumer);
-  Reflect.get(router, "lives").set(station, {
-    sn: camera,
-    pending: 0,
-    controller: new AbortController(),
-    ready: Promise.resolve({ attach }),
+  const retired = Reflect.get(router, "sessions").get(station);
+  let liveSettled = false;
+  const live = router.mediaProviderFor(camera).live!().finally(() => {
+    liveSettled = true;
   });
-  const live = Reflect.get(router, "attachLive").call(router, camera);
   await vi.advanceTimersByTimeAsync(100);
-  expect(attach).not.toHaveBeenCalled();
+  expect(liveSettled).toBe(false);
+  expect(Reflect.get(router, "lives").has(station)).toBe(false);
+  expect(retired.leases).toBe(0);
+  expect(session.sent.filter((p) => parsePortalHeader(p)!.commandId === 1350)).toHaveLength(0);
   connected.resolve();
   await vi.advanceTimersByTimeAsync(1);
   expect(await pulling).toMatchObject({
@@ -580,12 +579,76 @@ it("no-media unconfirmed clip replaces the session, holds reads and live, then r
     ingressVideoFrames: 0,
     ingressAudioFrames: 0,
   });
-  expect(await live).toBe(consumer);
+  const consumer = await live;
+  const replacement = Reflect.get(router, "sessions").get(station);
+  const entry = Reflect.get(router, "lives").get(station);
+  expect(replacement).not.toBe(retired);
+  expect(replacement.session).toBe(sessions[1]);
+  expect(Reflect.get(entry.live, "opts").session).toBe(replacement.session);
+  expect(retired.leases).toBe(0);
+  expect(replacement.leases).toBe(1);
+  expect(session.sent.filter((p) => parsePortalHeader(p)!.commandId === 1350)).toHaveLength(0);
+  const starts = sessions[1]!.sent.filter((p) => parsePortalHeader(p)!.commandId === 1350);
+  expect(starts).toHaveLength(1);
+  expect(JSON.parse(starts[0]!.subarray(16).toString())).toMatchObject({ cmd: 1003 });
   expect(session.isConnected).toBe(false);
   expect(sessions).toHaveLength(2);
   expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: false, reconnect: { connected: 1 } });
   expect(marker).toEqual([]);
+  consumer.stop();
+  expect(replacement.leases).toBe(0);
 });
+
+it.each(["failed", "timed_out"] as const)(
+  "real live acquisition resumes on a fresh owner after %s playback recovery",
+  async (outcome) => {
+    const { router, session, sessions } = await fixture();
+    const retired = Reflect.get(router, "sessions").get(station);
+    const connected = Promise.withResolvers<void>();
+    if (outcome === "failed") {
+      const create = Reflect.get(router, "deps").createSession;
+      Reflect.get(router, "deps").createSession = () => {
+        const next = create() as Session;
+        if (sessions.length === 2) next.connect = () => connected.promise;
+        return next;
+      };
+    } else {
+      vi.spyOn(router as unknown as { replaceSession: () => Promise<void> }, "replaceSession").mockImplementation(
+        () => new Promise(() => {}),
+      );
+    }
+    const recovering = Reflect.get(router, "reconnectPlayback").call(router, station, retired);
+    let liveSettled = false;
+    const live = router.mediaProviderFor(camera).live!().finally(() => {
+      liveSettled = true;
+    });
+    await vi.advanceTimersByTimeAsync(outcome === "timed_out" ? 59999 : 100);
+    expect(liveSettled).toBe(false);
+    expect(Reflect.get(router, "lives").has(station)).toBe(false);
+    expect(retired.leases).toBe(0);
+    if (outcome === "failed") connected.reject(new Error("synthetic connection failure"));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await recovering).toMatchObject({ reconnectOutcome: outcome });
+    expect(liveSettled).toBe(true);
+    const consumer = await live;
+    const current = Reflect.get(router, "sessions").get(station);
+    const entry = Reflect.get(router, "lives").get(station);
+    expect(current).not.toBe(retired);
+    expect(current.session).toBe(sessions.at(-1));
+    expect(current.session.isConnected).toBe(true);
+    expect(Reflect.get(entry.live, "opts").session).toBe(current.session);
+    expect(retired.leases).toBe(0);
+    expect(current.leases).toBe(1);
+    expect(session.isConnected).toBe(false);
+    expect(session.sent.filter((p) => parsePortalHeader(p)!.commandId === 1350)).toHaveLength(0);
+    const starts = (current.session as Session).sent.filter((p) => parsePortalHeader(p)!.commandId === 1350);
+    expect(starts).toHaveLength(1);
+    expect(JSON.parse(starts[0]!.subarray(16).toString())).toMatchObject({ cmd: 1003 });
+    expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(false);
+    consumer.stop();
+    expect(current.leases).toBe(0);
+  },
+);
 
 it("uncertain clip bypasses exhausted proactive renewal eligibility and retires on replacement failure", async () => {
   const { router, session } = await fixture();
