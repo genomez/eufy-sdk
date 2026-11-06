@@ -1094,3 +1094,9 @@ Offline synthetic validation only; installation acceptance remains false.
 - Retain reconnect protection for no-stream refusals, including when a stop status follows the refusal. Refusal evidence remains separate from release confirmation.
 - Quarantined PLAYBACK-link fragments trigger the late latch without reassembly or retained payload. Compressed and out-of-order fragments follow the same recovery path.
 - Synthetic regressions verify refusal session replacement, isolation from delayed acknowledgements, and recovery after finished clips.
+
+### Playback 3p6 no-video refusal, 2026-11-06
+
+- Treat state 2/code 18 before acknowledgement or ingress as a no-stream refusal only when its numeric segmen exactly matches the start request. Missing, non-comparable and mismatched segments remain uncertain.
+- Require continuous ownership, a sent stop and quiet cessation before confirming refusal. Retain the latch and reconnect protection; acknowledgement or media invalidates clean refusal evidence.
+- Validated locally with synthetic fixtures; no installation or device acceptance is claimed.

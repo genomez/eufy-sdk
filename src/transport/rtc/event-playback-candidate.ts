@@ -549,7 +549,11 @@ export class EventPlaybackCandidate {
     );
   }
 
-  /** Segment-matched terminal absence before acknowledgement or ingress identifies a no-stream refusal. */
+  /**
+   * Terminal absence (0/7) or no stored video (2/18) before acknowledgement or ingress
+   * identifies a no-stream refusal only with an exact numeric start-segment match.
+   * Missing or non-comparable segments cannot establish refusal correlation.
+   */
   private refusalSafe(): boolean {
     return (
       this.refusalAt !== undefined &&
@@ -711,8 +715,8 @@ export class EventPlaybackCandidate {
       this.receipt.correlationBasis = "exclusive_timing";
     } else {
       if (
-        p.state === 0 &&
-        p.code === 7 &&
+        ((p.state === 0 && p.code === 7) || (p.state === 2 && p.code === 18)) &&
+        typeof p.segmen === "number" &&
         p.segmen === this.segments[0] &&
         !this.receipt.startAcknowledged &&
         !this.ingress.evidence.ingressVideoFrames &&

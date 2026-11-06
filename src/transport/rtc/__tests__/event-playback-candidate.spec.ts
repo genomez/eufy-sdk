@@ -302,6 +302,8 @@ function candidateSetup({
   streaming = false,
   streamingFrames = 24,
   refusal = "none",
+  refusalState = 0,
+  refusalCode = 7,
 } = {}) {
   vi.useFakeTimers();
   vi.spyOn(nativePerformance, "now").mockImplementation(() => performance.now());
@@ -332,11 +334,25 @@ function candidateSetup({
       sent.push(p);
       const body = JSON.parse(p.subarray(16).toString());
       if (body.data.cmd === 0 && refusal !== "none") {
+        if (refusal === "after-ack") candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 1, code: 0 } }), 3);
         if (refusal === "after-media") for (const packet of wrapped(video())) candidate.ingress.native(packet);
         candidate.ingress.decoded(
           json({
             cmd: 6001,
-            payload: { state: 0, code: 7, ...(refusal !== "unmatched" ? { segmen: body.segmen } : {}) },
+            payload: {
+              state: refusalState,
+              code: refusalCode,
+              ...(refusal === "unmatched"
+                ? {}
+                : {
+                    segmen:
+                      refusal === "mismatched"
+                        ? body.segmen + 1
+                        : refusal === "noncomparable"
+                          ? String(body.segmen)
+                          : body.segmen,
+                  }),
+            },
           }),
           3,
         );
@@ -912,6 +928,50 @@ it.each(["matched", "unmatched", "after-media", "late-ack", "late-media"])(
     expect(receipt.stationStatusCounts).toContainEqual({ state: 0, code: 7, count: 1 });
   },
 );
+
+it.each(["matched", "unmatched", "mismatched", "noncomparable", "after-ack", "after-media", "late-ack", "late-media"])(
+  "no stored video refusal safety: %s",
+  async (refusal) => {
+    const s = candidateSetup({ refusal, refusalState: 2, refusalCode: 18, release: false });
+    await s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+    if (refusal === "late-ack") s.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 1, code: 0 } }), 3);
+    if (refusal === "late-media") for (const packet of wrapped(video())) s.candidate.ingress.native(packet);
+    const observing = s.candidate.observe();
+    await vi.advanceTimersByTimeAsync(24001);
+    const receipt = await observing;
+    expect(receipt).toMatchObject({
+      captureOutcome: "start_refused",
+      stationRefusalConfirmed: refusal === "matched",
+      ownerContinuous: true,
+      stopSent: true,
+      cessationOutcome: refusal === "matched" ? "ceased" : "cessation_unknown",
+      latchCleared: false,
+      latchRetained: true,
+    });
+    expect(receipt.releaseOutcome).not.toBe("release_confirmed");
+    expect(receipt.stationStatusCounts).toContainEqual({ state: 2, code: 18, count: 1 });
+  },
+);
+
+it.each(["stop-refused", "owner-changed"])("no stored video refusal requires cleanup authority: %s", async (kind) => {
+  const s = candidateSetup({
+    refusal: "matched",
+    refusalState: 2,
+    refusalCode: 18,
+    release: false,
+    stopSend: kind === "stop-refused" ? "refused" : "sent",
+  });
+  await s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  if (kind === "owner-changed") Reflect.get(s.candidate, "opts").continuous = () => false;
+  const observing = s.candidate.observe();
+  await vi.advanceTimersByTimeAsync(24001);
+  expect(await observing).toMatchObject({
+    stationRefusalConfirmed: false,
+    cessationOutcome: "cessation_unknown",
+    latchRetained: true,
+    latchCleared: false,
+  });
+});
 
 it.each(["matching", "mismatched", "absent", "noncomparable"])("EOF segment correlation: %s", async (kind) => {
   const s = candidateSetup({ streaming: true, streamingFrames: 0 });

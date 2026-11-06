@@ -27,6 +27,8 @@ class Session extends EventEmitter {
   counter = 0;
   releaseStatus = true;
   refusal = "none";
+  refusalState = 0;
+  refusalCode = 7;
   eof = true;
   corruptMedia = false;
   mediaEnabled = true;
@@ -81,7 +83,11 @@ class Session extends EventEmitter {
         if (p.data.cmd === 0 && this.refusal !== "none") {
           this.input(1351, {
             cmd: 6001,
-            payload: { state: 0, code: 7, ...(this.refusal === "matched" ? { segmen: h.segment } : {}) },
+            payload: {
+              state: this.refusalState,
+              code: this.refusalCode,
+              ...(this.refusal === "matched" ? { segmen: h.segment } : {}),
+            },
           });
           return;
         }
@@ -811,23 +817,36 @@ it.each([
   ["matched", false],
   ["matched", true],
   ["unmatched", false],
-])("clip refusal reconnect safety: %s release=%s", async (refusal, releaseStatus) => {
-  const { router, session, sessions } = await fixture();
-  session.refusal = refusal;
-  session.releaseStatus = releaseStatus as boolean;
-  const pending = router.readEventPlaybackCandidate(station, { ...options(), clip: sealedClip(router, session) });
-  await vi.advanceTimersByTimeAsync(25000);
-  const receipt = await pending;
-  expect(receipt).toMatchObject({
-    captureOutcome: "start_refused",
-    startAcknowledged: false,
-    stationRefusalConfirmed: refusal === "matched",
-    reconnectOutcome: "connected",
-  });
-  expect(sessions).toHaveLength(2);
-  expect(session.isConnected).toBe(false);
-  expect(Reflect.get(router, "sessions").get(station).session).toBe(sessions[1]);
-  session.input(1351, { cmd: 6001, payload: { state: 1, code: 0 } });
-  expect(Reflect.get(router, "sessions").get(station).session).toBe(sessions[1]);
-  expect(router.getPlaybackSafetyDiagnostics().reconnect.attempts).toBe(1);
-});
+  ["matched", false, 2, 18],
+  ["matched", true, 2, 18],
+  ["unmatched", false, 2, 18],
+])(
+  "clip refusal reconnect safety: %s release=%s state=%s code=%s",
+  async (refusal, releaseStatus, state = 0, code = 7) => {
+    const { router, session, sessions } = await fixture();
+    session.refusal = refusal;
+    session.refusalState = state as number;
+    session.refusalCode = code as number;
+    session.releaseStatus = releaseStatus as boolean;
+    const pending = router.readEventPlaybackCandidate(station, { ...options(), clip: sealedClip(router, session) });
+    await vi.advanceTimersByTimeAsync(25000);
+    const receipt = await pending;
+    expect(receipt).toMatchObject({
+      captureOutcome: "start_refused",
+      startAcknowledged: false,
+      stationRefusalConfirmed: refusal === "matched",
+      reconnectOutcome: "connected",
+      latchRetained: true,
+      latchCleared: false,
+      ownerContinuous: true,
+      stopSent: true,
+      cessationOutcome: refusal === "matched" ? "ceased" : "cessation_unknown",
+    });
+    expect(sessions).toHaveLength(2);
+    expect(session.isConnected).toBe(false);
+    expect(Reflect.get(router, "sessions").get(station).session).toBe(sessions[1]);
+    session.input(1351, { cmd: 6001, payload: { state: 1, code: 0 } });
+    expect(Reflect.get(router, "sessions").get(station).session).toBe(sessions[1]);
+    expect(router.getPlaybackSafetyDiagnostics().reconnect.attempts).toBe(1);
+  },
+);
