@@ -240,6 +240,48 @@ it("a clip that cannot fit before renewal refuses without start or latch", async
   expect(receipt).toMatchObject({ admissionGate: 26, startAttempted: false, latchRetained: false });
   expect(marker).toEqual([]);
 });
+
+it("direct live callers wait for full-clip cleanup before attaching a consumer", async () => {
+  const { router, session, marker } = await fixture();
+  session.eof = false;
+  const key = new Uint8Array(32).fill(7),
+    scope = {
+      stationSn: station,
+      cameraSns: new Set([camera]),
+      identityKey: key,
+      accountNamespace: recordingAccountNamespace(key, "synthetic"),
+    };
+  Reflect.get(router, "deps").recordings = { enabled: true, stationBinding: station, allowedCameras: scope.cameraSns };
+  const result = normalizeRecordingRows(session.tableRows, scope);
+  if (result.status !== "ok") throw Error("fixture");
+  const pulling = router.readEventPlaybackCandidate(station, {
+    ...options(),
+    excluded: new Set(),
+    clip: { scope, selector: result.rows[0]!.playbackSelector!, video: () => {} },
+  });
+  await vi.advanceTimersByTimeAsync(1);
+  expect(marker).toEqual([true]);
+  const consumer = {},
+    attach = vi.fn(() => consumer);
+  Reflect.get(router, "lives").set(station, {
+    sn: camera,
+    pending: 0,
+    controller: new AbortController(),
+    ready: Promise.resolve({ attach }),
+  });
+  const live = Reflect.get(router, "attachLive").call(router, camera);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(attach).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await pulling).toMatchObject({
+    captureOutcome: "preempted",
+    releaseOutcome: "release_confirmed",
+    latchCleared: true,
+  });
+  expect(await live).toBe(consumer);
+  expect(attach).toHaveBeenCalledOnce();
+  expect(marker).toEqual([true, false]);
+});
 it.each(["time_refused", "table_failed", "table_timeout", "selectors_exhausted", "admission_after_dispatch"])(
   "no-start %s leaves the playback slot clear and health clean",
   async (refusal) => {

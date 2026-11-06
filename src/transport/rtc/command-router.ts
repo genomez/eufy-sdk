@@ -382,7 +382,7 @@ export class RtcCommandRouter {
   private readonly eventTableProbes = new Map<string, AbortController>();
   private readonly playbackProbes = new Map<
     string,
-    { controller: AbortController; candidate: EventPlaybackCandidate }
+    { controller: AbortController; candidate: EventPlaybackCandidate; finished?: Promise<void> }
   >();
   private playbackUnresolved = false;
   private playbackMarker?: (unresolved: boolean) => void;
@@ -1747,7 +1747,11 @@ export class RtcCommandRouter {
     if (!st) return candidate.observe();
     opts.beforeDispatch?.();
     st.session.attachIngressGuard(candidate.ingress);
-    this.playbackProbes.set(stationSn, { controller, candidate });
+    let finishPlayback!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      finishPlayback = resolve;
+    });
+    this.playbackProbes.set(stationSn, { controller, candidate, finished });
     st.leases++;
     st.pendingExchanges++;
     if (st.idle) clearTimeout(st.idle);
@@ -1841,7 +1845,11 @@ export class RtcCommandRouter {
       if (issued) issued.expiresAtMs = performance.now() + 60000;
       this.playbackProbes.delete(stationSn);
       candidate.ingress.stopExpiry();
-      this.release(stationSn, st);
+      try {
+        this.release(stationSn, st);
+      } finally {
+        finishPlayback();
+      }
     }
   }
 
@@ -3301,7 +3309,10 @@ export class RtcCommandRouter {
     const stationSn = dev.stationSn;
     this.preemptRecordingReads(stationSn);
     this.eventTableProbes.get(stationSn)?.abort();
-    this.playbackProbes.get(stationSn)?.controller.abort();
+    const playback = this.playbackProbes.get(stationSn);
+    playback?.controller.abort();
+    if (playback?.candidate.fullClip) await playback.finished;
+    signal?.throwIfAborted();
     if (this.playbackUnresolved) throw new Error("playback_slot_uncertain");
     let entry = this.lives.get(stationSn);
     if (entry && entry.sn !== sn) throw new Error("rtc live: station play slot already in use by another camera");

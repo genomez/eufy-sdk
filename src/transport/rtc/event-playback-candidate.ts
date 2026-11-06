@@ -379,7 +379,9 @@ export class EventPlaybackCandidate {
   async observe(): Promise<PlaybackReceipt> {
     try {
       this.finalize();
-      const deadline = this.opts.deadlineMs;
+      const deadline = this.opts.video
+        ? Math.min(this.opts.deadlineMs, performance.now() + 16000)
+        : this.opts.deadlineMs;
       if (this.stoppedAt !== undefined) {
         while (performance.now() < deadline && this.opts.continuous()) {
           const complete = this.ingress.observationComplete();

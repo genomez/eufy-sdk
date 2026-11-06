@@ -31,7 +31,7 @@ it("seals exact playback independently of the cover and never projects its priva
   expect(projectRecordingRow(record)).not.toHaveProperty("playbackSelector");
 });
 
-it.each(["eof", "sink_failure", "cancel"])(
+it.each(["eof", "sink_failure", "cancel", "unconfirmed"])(
   "full clip %s exceeds probe limits and retains mandatory cleanup",
   async (outcome) => {
     vi.useFakeTimers();
@@ -62,7 +62,7 @@ it.each(["eof", "sink_failure", "cancel"])(
       send(packet) {
         const value = JSON.parse(packet.subarray(16).toString());
         if (value.data.cmd === 0) notify({ state: 1, code: 0 });
-        if (value.data.cmd === 3) notify({ state: 2, code: 15, segmen: value.segmen });
+        if (value.data.cmd === 3 && outcome !== "unconfirmed") notify({ state: 2, code: 15, segmen: value.segmen });
         return true;
       },
     });
@@ -87,7 +87,12 @@ it.each(["eof", "sink_failure", "cancel"])(
     }
     await capturing;
     const observing = candidate.observe();
-    await vi.advanceTimersByTimeAsync(5100);
+    await vi.advanceTimersByTimeAsync(outcome === "unconfirmed" ? 16001 : 5100);
+    if (outcome === "unconfirmed") {
+      expect(await observing).toMatchObject({ releaseOutcome: "stop_unconfirmed", latchRetained: true });
+      expect(markers).toEqual([true]);
+      return;
+    }
     expect(await observing).toMatchObject({
       captureOutcome: outcome === "sink_failure" ? "invalid_media" : outcome === "cancel" ? "preempted" : "eof",
       pauseSent: true,
