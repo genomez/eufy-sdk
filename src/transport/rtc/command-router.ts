@@ -384,6 +384,14 @@ export class RtcCommandRouter {
     string,
     { controller: AbortController; candidate: EventPlaybackCandidate; finished?: Promise<void> }
   >();
+  private readonly playbackHolds = new Map<
+    string,
+    {
+      settled: Promise<{ reconnectOutcome: "connected" | "failed" | "timed_out"; reconnectDurationMs: number }>;
+      finish: (outcome: "connected" | "failed" | "timed_out") => void;
+    }
+  >();
+  private readonly playbackReconnect = { attempts: 0, connected: 0, failed: 0, timedOut: 0 };
   private playbackUnresolved = false;
   private playbackMarker?: (unresolved: boolean) => void;
   private playbackHealth = {
@@ -1275,6 +1283,7 @@ export class RtcCommandRouter {
       [...scope.cameraSns].some((sn) => !allowed.has(sn))
     )
       return "scope_invalid";
+    if (this.playbackHolds.has(scope.stationSn)) return "busy";
     const station = this.deps.findDevice(scope.stationSn);
     if (!station || !RtcCommandRouter.claimsDevice(station)) return "scope_invalid";
     for (const sn of allowed) {
@@ -1601,7 +1610,8 @@ export class RtcCommandRouter {
   getPlaybackSafetyDiagnostics() {
     return {
       ...this.playbackHealth,
-      unresolved: this.playbackUnresolved,
+      unresolved: this.playbackUnresolved || this.playbackHolds.size > 0,
+      reconnect: { ...this.playbackReconnect },
       active: this.playbackProbes.size > 0,
       reestablishedAgeMs:
         this.playbackReestablishedAt === undefined
@@ -1638,6 +1648,7 @@ export class RtcCommandRouter {
     } = {},
   ): Promise<PlaybackReceipt> {
     if (opts.clip) {
+      if (this.playbackHolds.has(stationSn)) await this.waitForPlaybackReconnect(stationSn, opts.signal);
       this.preemptRecordingReads(stationSn);
       const until = performance.now() + 8000;
       while (this.recordingReads.has(stationSn) && performance.now() < until && !opts.signal?.aborted)
@@ -1682,8 +1693,11 @@ export class RtcCommandRouter {
       (!this.playbackProbes.has(stationSn) || (st!.leases === 1 && st!.pendingExchanges === 1)) &&
       st!.scheduler.snapshot().queued === 0 &&
       renewalAt() - Date.now() > deadlineMs - performance.now() + 5000;
+    let clipUnresolved = false;
+    let clipFinished = false;
     const candidate = new EventPlaybackCandidate({
       nativeMessage: opts.nativeMessage,
+      transient: !!opts.clip,
       captureMs,
       video: opts.clip?.video,
       deadlineMs,
@@ -1694,6 +1708,7 @@ export class RtcCommandRouter {
       segment: () => st!.seg.next(),
       account: st?.storageCandidateOwner.accountId ?? "",
       marker: (value) => {
+        if (opts.clip) return;
         if (!this.playbackMarker) throw new Error("Playback marker unavailable");
         try {
           this.playbackMarker(value);
@@ -1703,7 +1718,11 @@ export class RtcCommandRouter {
         }
       },
       latch: (value) => {
-        this.playbackUnresolved = value;
+        if (opts.clip) {
+          clipUnresolved = value;
+          if (value && clipFinished && st && this.sessions.get(stationSn) === st)
+            void this.reconnectPlayback(stationSn, st);
+        } else this.playbackUnresolved = value;
       },
       liveAllowed: () =>
         !this.playbackUnresolved &&
@@ -1837,8 +1856,9 @@ export class RtcCommandRouter {
       candidate.finalize();
       st.pendingExchanges--;
     }
+    let receipt: PlaybackReceipt;
     try {
-      return await candidate.observe();
+      receipt = await candidate.observe();
     } finally {
       clearTimeout(timer);
       const issued = this.eventTableReplies.get(transaction);
@@ -1848,9 +1868,61 @@ export class RtcCommandRouter {
       try {
         this.release(stationSn, st);
       } finally {
+        clipFinished = true;
+        if (opts.clip && clipUnresolved) void this.reconnectPlayback(stationSn, st);
         finishPlayback();
       }
     }
+    if (opts.clip) {
+      const reconnect = this.playbackHolds.get(stationSn);
+      Object.assign(
+        receipt,
+        reconnect ? await reconnect.settled : { reconnectOutcome: "not_needed", reconnectDurationMs: 0 },
+      );
+    }
+    return receipt;
+  }
+
+  /** Retire uncertain playback ownership with one bounded replacement and no persistent state. */
+  private reconnectPlayback(sn: string, original: StationSession) {
+    const existing = this.playbackHolds.get(sn);
+    if (existing) return existing.settled;
+    const started = performance.now();
+    const deferred = Promise.withResolvers<{
+      reconnectOutcome: "connected" | "failed" | "timed_out";
+      reconnectDurationMs: number;
+    }>();
+    let done = false;
+    const finish = (outcome: "connected" | "failed" | "timed_out") => {
+      if (done) return;
+      done = true;
+      clearTimeout(cap);
+      if (outcome !== "connected" && this.sessions.get(sn) === original) this.drop(sn, original);
+      this.playbackHolds.delete(sn);
+      this.playbackReconnect[outcome === "timed_out" ? "timedOut" : outcome]++;
+      this.deps.logger?.info?.(`[rtc] playback reconnect ${outcome}`);
+      deferred.resolve({
+        reconnectOutcome: outcome,
+        reconnectDurationMs: Math.max(0, Math.round(performance.now() - started)),
+      });
+    };
+    const cap = setTimeout(() => finish("timed_out"), 60_000);
+    this.playbackHolds.set(sn, { settled: deferred.promise, finish });
+    this.playbackReconnect.attempts++;
+    void this.replaceSession(sn, original, true).then(
+      () =>
+        finish(
+          this.sessions.get(sn) !== original && this.sessions.get(sn)?.session.isConnected ? "connected" : "failed",
+        ),
+      () => finish("failed"),
+    );
+    return deferred.promise;
+  }
+
+  /** Live starts and foreground playback wait only for the current station's bounded recovery. */
+  private async waitForPlaybackReconnect(sn: string, signal?: AbortSignal): Promise<void> {
+    const hold = this.playbackHolds.get(sn);
+    if (hold) await untilAborted(hold.settled, signal);
   }
 
   /** Full-duration capture holds optional refreshes until same-owner cleanup has finished. */
@@ -2509,6 +2581,7 @@ export class RtcCommandRouter {
   /** Tear down every station session (logout / shutdown). */
   close(): void {
     this.epoch++;
+    for (const hold of this.playbackHolds.values()) hold.finish("failed");
     for (const controller of this.recordingReads.values()) controller.abort();
     this.recordingReads.clear();
     this.recordingAttempts.clear();
@@ -3004,9 +3077,10 @@ export class RtcCommandRouter {
    * Verify a replacement within fifteen seconds and adopt it only between operations.
    * A verified candidate blocked by leases may use the single proof-gated retry after its cooldown.
    */
-  private async replaceSession(sn: string, original: StationSession): Promise<void> {
+  private async replaceSession(sn: string, original: StationSession, playback = false): Promise<void> {
     this.preemptRecordingReads(sn);
-    if (this.sessions.get(sn) !== original || original.replacement || !this.canRefresh(sn, original)) return;
+    if (this.sessions.get(sn) !== original || original.replacement || (!playback && !this.canRefresh(sn, original)))
+      return;
     const cycleAttempts = (original.refreshAttempts ?? 0) - (original.refreshCycleStart ?? 0);
     const retryProof = cycleAttempts > 0 ? original.lastInformationRead : undefined;
     if (cycleAttempts === 2) {
@@ -3313,6 +3387,7 @@ export class RtcCommandRouter {
     playback?.controller.abort();
     if (playback?.candidate.fullClip) await playback.finished;
     signal?.throwIfAborted();
+    if (this.playbackHolds.has(stationSn)) await this.waitForPlaybackReconnect(stationSn, signal);
     if (this.playbackUnresolved) throw new Error("playback_slot_uncertain");
     let entry = this.lives.get(stationSn);
     if (entry && entry.sn !== sn) throw new Error("rtc live: station play slot already in use by another camera");

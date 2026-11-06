@@ -28,6 +28,7 @@ class Session extends EventEmitter {
   releaseStatus = true;
   eof = true;
   corruptMedia = false;
+  mediaEnabled = true;
   tableReply = true;
   tableResultCode = 0;
   tableRows: unknown[] = [
@@ -76,7 +77,7 @@ class Session extends EventEmitter {
     queueMicrotask(() => {
       if (h.commandId === 1700) {
         this.input(1700, Buffer.alloc(132), 0, 255, 1, h.segment);
-        if (p.data.cmd === 0) {
+        if (p.data.cmd === 0 && this.mediaEnabled) {
           this.input(1351, { cmd: 6001, payload: { state: 1, code: 0 } });
           const media = Buffer.alloc(29);
           media.writeUInt32LE(7);
@@ -211,9 +212,13 @@ it("exact sealed clip bypasses newest selection and returns typed video after cl
     captureOutcome: "eof",
     releaseOutcome: "release_confirmed",
     latchCleared: true,
+    reconnectOutcome: "not_needed",
+    ingressVideoFrames: 1,
+    ingressAudioFrames: 0,
   });
   expect(video).toHaveBeenCalledOnce();
-  expect(marker).toEqual([true, false]);
+  expect(marker).toEqual([]);
+  expect(router.getPlaybackSafetyDiagnostics().reconnect.attempts).toBe(0);
   expect(session.sent.filter((p) => parsePortalHeader(p)!.commandId === 1350)).toHaveLength(before);
 });
 
@@ -260,7 +265,7 @@ it("direct live callers wait for full-clip cleanup before attaching a consumer",
     clip: { scope, selector: result.rows[0]!.playbackSelector!, video: () => {} },
   });
   await vi.advanceTimersByTimeAsync(1);
-  expect(marker).toEqual([true]);
+  expect(marker).toEqual([]);
   const consumer = {},
     attach = vi.fn(() => consumer);
   Reflect.get(router, "lives").set(station, {
@@ -280,7 +285,7 @@ it("direct live callers wait for full-clip cleanup before attaching a consumer",
   });
   expect(await live).toBe(consumer);
   expect(attach).toHaveBeenCalledOnce();
-  expect(marker).toEqual([true, false]);
+  expect(marker).toEqual([]);
 });
 it.each(["time_refused", "table_failed", "table_timeout", "selectors_exhausted", "admission_after_dispatch"])(
   "no-start %s leaves the playback slot clear and health clean",
@@ -518,4 +523,103 @@ it("a failed capture drains cleanly and permits another attempt on the same owne
   expect(await next).toMatchObject({ captureOutcome: "eof", releaseOutcome: "release_confirmed", latchCleared: true });
   expect(sessions).toHaveLength(1);
   expect(marker).toEqual([true, false, true, false]);
+});
+
+function sealedClip(router: RtcCommandRouter, session: Session) {
+  const key = new Uint8Array(32).fill(7);
+  const scope = {
+    stationSn: station,
+    cameraSns: new Set([camera]),
+    identityKey: key,
+    accountNamespace: recordingAccountNamespace(key, "synthetic"),
+  };
+  Reflect.get(router, "deps").recordings = { enabled: true, stationBinding: station, allowedCameras: scope.cameraSns };
+  const result = normalizeRecordingRows(session.tableRows, scope);
+  if (result.status !== "ok") throw Error("fixture");
+  return { scope, selector: result.rows[0]!.playbackSelector!, video: () => {} };
+}
+
+it("no-media unconfirmed clip replaces the session, holds reads and live, then releases without a marker", async () => {
+  const { router, session, sessions, marker } = await fixture();
+  session.mediaEnabled = false;
+  session.releaseStatus = false;
+  const clip = sealedClip(router, session);
+  const connected = Promise.withResolvers<void>();
+  const create = Reflect.get(router, "deps").createSession;
+  Reflect.get(router, "deps").createSession = () => {
+    const next = create() as Session;
+    const connect = next.connect.bind(next);
+    next.connect = async () => {
+      await connected.promise;
+      await connect();
+    };
+    return next;
+  };
+  const pulling = router.readEventPlaybackCandidate(station, { ...options(), clip });
+  await vi.advanceTimersByTimeAsync(21100);
+  expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: true, reconnect: { attempts: 1 } });
+  expect(await router.readRecordingCatalog(clip.scope)).toMatchObject({ reason: "busy" });
+  const consumer = {},
+    attach = vi.fn(() => consumer);
+  Reflect.get(router, "lives").set(station, {
+    sn: camera,
+    pending: 0,
+    controller: new AbortController(),
+    ready: Promise.resolve({ attach }),
+  });
+  const live = Reflect.get(router, "attachLive").call(router, camera);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(attach).not.toHaveBeenCalled();
+  connected.resolve();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await pulling).toMatchObject({
+    captureOutcome: "no_media",
+    startAcknowledged: false,
+    releaseOutcome: "stop_unconfirmed",
+    reconnectOutcome: "connected",
+    ingressVideoFrames: 0,
+    ingressAudioFrames: 0,
+  });
+  expect(await live).toBe(consumer);
+  expect(session.isConnected).toBe(false);
+  expect(sessions).toHaveLength(2);
+  expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: false, reconnect: { connected: 1 } });
+  expect(marker).toEqual([]);
+});
+
+it("uncertain clip bypasses exhausted proactive renewal eligibility and retires on replacement failure", async () => {
+  const { router, session } = await fixture();
+  session.releaseStatus = false;
+  const owner = Reflect.get(router, "sessions").get(station);
+  owner.refreshAttempts = 2;
+  Reflect.get(router, "deps").createSession = () => {
+    throw Error("synthetic connection failure");
+  };
+  const pending = router.readEventPlaybackCandidate(station, { ...options(), clip: sealedClip(router, session) });
+  await vi.advanceTimersByTimeAsync(16100);
+  expect(await pending).toMatchObject({ reconnectOutcome: "failed" });
+  expect(session.isConnected).toBe(false);
+  expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(false);
+});
+
+it("reconnect hard cap releases waiters and retires uncertain ownership even if renewal never settles", async () => {
+  const { router, session } = await fixture();
+  const owner = Reflect.get(router, "sessions").get(station);
+  vi.spyOn(router as unknown as { replaceSession: () => Promise<void> }, "replaceSession").mockImplementation(
+    () => new Promise(() => {}),
+  );
+  const recovering = Reflect.get(router, "reconnectPlayback").call(router, station, owner);
+  let finished = false;
+  const waiter = Reflect.get(router, "waitForPlaybackReconnect")
+    .call(router, station)
+    .then(() => {
+      finished = true;
+    });
+  await vi.advanceTimersByTimeAsync(59999);
+  expect(finished).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await recovering).toEqual({ reconnectOutcome: "timed_out", reconnectDurationMs: 60000 });
+  await waiter;
+  expect(session.isConnected).toBe(false);
+  expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: false, reconnect: { timedOut: 1 } });
 });

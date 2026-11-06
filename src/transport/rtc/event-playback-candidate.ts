@@ -21,6 +21,8 @@ export type CaptureOutcome =
   | "timeout";
 export type PlaybackSelectionOutcome = "selected" | "no_rows" | "no_camera_rows" | "time_invalid" | "end_not_past";
 export interface PlaybackReceipt extends PlaybackIngressEvidence {
+  reconnectOutcome?: "not_needed" | "connected" | "failed" | "timed_out";
+  reconnectDurationMs?: number;
   admissionGate: number;
   selectionOutcome: PlaybackSelectionOutcome;
   captureOutcome: CaptureOutcome;
@@ -174,6 +176,7 @@ export class EventPlaybackCandidate {
     private readonly opts: {
       deadlineMs: number;
       captureMs?: number;
+      transient?: boolean;
       video?: (data: Buffer) => void;
       continuous: () => boolean;
       startAllowed: () => boolean;
@@ -253,7 +256,7 @@ export class EventPlaybackCandidate {
     this.receipt.latchRetained = uncertain;
     this.receipt.latchCleared = false;
     try {
-      this.opts.marker(unresolved);
+      if (!this.opts.transient) this.opts.marker(unresolved);
       this.opts.latch(unresolved);
       this.receipt.latchRetained = unresolved;
     } catch (error) {
@@ -315,7 +318,7 @@ export class EventPlaybackCandidate {
         }, 5000);
         try {
           this.persistLatch(true);
-          this.receipt.latchPersisted = true;
+          this.receipt.latchPersisted = !this.opts.transient;
           this.receipt.latchRetained = true;
           if (
             !this.opts.startAllowed() ||

@@ -53,6 +53,9 @@ export interface PlaybackIngressEvidence {
   assembledSizeBucket: PlaybackSizeBucket;
   outputSizeBucket: PlaybackSizeBucket;
   zstdWindowBucket: PlaybackSizeBucket;
+  ingressVideoFrames: number;
+  ingressAudioFrames: number;
+  rejectedByReason: Partial<Record<PtcsRejectionReason | "wrong_route", number>>;
   rejectionCount: number;
   assemblerDecompression: number;
   assemblerInvalidMetadata: number;
@@ -85,6 +88,9 @@ export class PlaybackIngress implements RtcIngressGuard {
     assembledSizeBucket: "unknown",
     outputSizeBucket: "unknown",
     zstdWindowBucket: "unknown",
+    ingressVideoFrames: 0,
+    ingressAudioFrames: 0,
+    rejectedByReason: {},
     rejectionCount: 0,
     assemblerDecompression: 0,
     assemblerInvalidMetadata: 0,
@@ -226,6 +232,8 @@ export class PlaybackIngress implements RtcIngressGuard {
     unknown = false,
     diagnostic: PtcsRejectionReason = "metadata",
   ): false {
+    const rejection = this.inspection.reason ?? diagnostic;
+    this.evidence.rejectedByReason[rejection] = add(this.evidence.rejectedByReason[rejection] ?? 0, 1);
     const counters = this.assembler.getDiagnostics();
     this.evidence.assemblerDecompression = counters.decompression;
     this.evidence.assemblerInvalidMetadata = counters.invalidMetadata;
@@ -496,6 +504,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     this.nonControlTraffic = true;
     this.plausible();
     this.lateFrame(frame);
+    this.evidence.rejectedByReason.wrong_route = add(this.evidence.rejectedByReason.wrong_route ?? 0, 1);
     this.evidence.wrongRouteFrames = add(this.evidence.wrongRouteFrames, 1);
     this.evidence.wrongRouteBytes = add(this.evidence.wrongRouteBytes, frame.length);
     this.evidence.mediaBytes = add(this.evidence.mediaBytes, frame.length);
@@ -526,6 +535,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     }
     const h = parsePortalHeader(frame);
     if (!h) return this.reject("invalid_media", true);
+    this.countIngress(h.commandId);
     if (this.opts.observeOnly) {
       if (h.commandId === 1300 || h.commandId === 1301 || h.commandId === 1303) {
         this.nonControlTraffic = true;
@@ -551,6 +561,12 @@ export class PlaybackIngress implements RtcIngressGuard {
     return this.opts.control?.(frame, link) ?? true;
   }
 
+  /** Count complete media headers before route, selector and content admission. */
+  private countIngress(command: number): void {
+    if (command === 1300) this.evidence.ingressVideoFrames = add(this.evidence.ingressVideoFrames, 1);
+    if (command === 1301) this.evidence.ingressAudioFrames = add(this.evidence.ingressAudioFrames, 1);
+  }
+
   private complete(frame: Buffer): void {
     this.plausible();
     if (this.tombstone && !this.capturing) {
@@ -560,6 +576,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     }
     if (!this.capturing || this.evidence.cutoff) return;
     const h = parsePortalHeader(frame);
+    if (h) this.countIngress(h.commandId);
     if (
       !h ||
       h.paramLength + 16 !== frame.length ||

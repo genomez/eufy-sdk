@@ -245,3 +245,17 @@ describe("offline absolute deadline and cessation matrix", () => {
     expect(s.c.receipt.latchRetained).toBe(true);
   });
 });
+
+it("counts ingress media before selector rejection and classifies rejected frames", () => {
+  const good = ingress();
+  for (const packet of packets(media(50, 1300))) good.guard.native(packet);
+  for (const packet of packets(media(50, 1301))) good.guard.native(packet);
+  expect(good.guard.evidence).toMatchObject({ ingressVideoFrames: 1, ingressAudioFrames: 1, rejectedByReason: {} });
+  const bad = ingress();
+  for (const packet of packets(media(50, 1300, 7))) bad.guard.native(packet);
+  bad.guard.invalidMedia("selector");
+  expect(bad.guard.evidence).toMatchObject({ ingressVideoFrames: 1, rejectedByReason: { selector: 1 } });
+  const wrong = ingress();
+  wrong.guard.decoded(media(50, 1301), 1);
+  expect(wrong.guard.evidence).toMatchObject({ ingressAudioFrames: 1, rejectedByReason: { wrong_route: 1 } });
+});
