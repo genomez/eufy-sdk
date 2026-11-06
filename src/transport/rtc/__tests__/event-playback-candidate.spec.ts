@@ -904,9 +904,10 @@ it.each(["matched", "unmatched", "after-media", "late-ack", "late-media"])(
     await vi.advanceTimersByTimeAsync(24001);
     const receipt = await observing;
     expect(receipt.stationRefusalConfirmed).toBe(refusal === "matched");
-    expect(receipt.latchCleared).toBe(refusal === "matched");
+    expect(receipt.latchCleared).toBe(false);
+    expect(receipt.latchRetained).toBe(true);
     expect(receipt.releaseOutcome).toBe(
-      refusal === "matched" ? "release_confirmed" : refusal === "late-media" ? "stop_unconfirmed" : "release_unknown",
+      refusal === "matched" || refusal === "late-media" ? "stop_unconfirmed" : "release_unknown",
     );
     expect(receipt.stationStatusCounts).toContainEqual({ state: 0, code: 7, count: 1 });
   },

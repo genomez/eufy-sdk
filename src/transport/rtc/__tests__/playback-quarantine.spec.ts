@@ -217,19 +217,28 @@ describe("selector-specific quarantine", () => {
       }
     });
   }
-  it("playback-route quarantine observes fragments without assembling or re-latching", async () => {
-    const s = await setup();
-    try {
-      s.setNow(100);
-      for (const p of packets(frame(1300, 6), 4)) s.receive(p);
-      expect(s.guard.lastPlausibleMs).toBe(100);
-      expect(s.late).not.toHaveBeenCalled();
-      expect(s.guard.evidence.wrongRouteFrames).toBe(0);
-      expect(s.delivered).not.toHaveBeenCalled();
-    } finally {
-      s.close();
-    }
-  });
+  it.each([false, true])(
+    "playback-route quarantine re-latches fragments without assembling compressed=%s",
+    async (compressed) => {
+      const s = await setup();
+      try {
+        s.setNow(100);
+        const fragments = packets(frame(1300, 6), 4, compressed);
+        expect(fragments.length).toBeGreaterThan(1);
+        s.receive(fragments.at(-1)!);
+        expect(s.late).toHaveBeenCalledOnce();
+        for (const p of fragments) s.receive(p);
+        expect(s.guard.lastPlausibleMs).toBe(100);
+        expect(s.late).toHaveBeenCalledTimes(fragments.length + 1);
+        expect(s.guard.evidence.collectorAttempts).toBe(0);
+        expect(s.guard.evidence.decodedWorkBytes).toBe(0);
+        expect(s.guard.evidence.wrongRouteFrames).toBe(0);
+        expect(s.delivered).not.toHaveBeenCalled();
+      } finally {
+        s.close();
+      }
+    },
+  );
   for (const selector of [6, 7])
     for (const command of [1300, 1301])
       for (const compressed of [false, true]) {

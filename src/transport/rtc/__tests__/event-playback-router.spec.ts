@@ -786,10 +786,35 @@ it("admits playback after sequential live stops and trailing LIVE media on the s
   expect(await next).toMatchObject({ admissionGateName: "none", captureOutcome: "eof" });
 });
 
-it.each(["matched", "unmatched"])("clip refusal reconnect safety: %s", async (refusal) => {
+it.each([false, true])("late playback fragments recover a finished clip compressed=%s", async (compressed) => {
+  const { router, session, sessions } = await fixture();
+  const pending = router.readEventPlaybackCandidate(station, { ...options(), clip: sealedClip(router, session) });
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await pending).toMatchObject({ releaseOutcome: "release_confirmed", reconnectOutcome: "not_needed" });
+  const frame = Buffer.concat([buildPortalHeader(1300, 5000, 101, 9, 6), Buffer.alloc(5000)]);
+  const fragments = packetize(compressed ? zstdCompressSync(frame) : frame, {
+    channel: 4,
+    frameId: ++session.counter,
+    payloadBytes: 8,
+  });
+  expect(fragments.length).toBeGreaterThan(1);
+  if (compressed) for (const p of fragments) p.writeUInt16LE(p.readUInt16LE(18) | 0x0800, 18);
+  session.inject(fragments.at(-1)!);
+  await vi.advanceTimersByTimeAsync(10);
+  expect(sessions).toHaveLength(2);
+  expect(session.isConnected).toBe(false);
+  expect(Reflect.get(router, "sessions").get(station).session).toBe(sessions[1]);
+  expect(router.getPlaybackSafetyDiagnostics().reconnect).toMatchObject({ attempts: 1, connected: 1 });
+});
+
+it.each([
+  ["matched", false],
+  ["matched", true],
+  ["unmatched", false],
+])("clip refusal reconnect safety: %s release=%s", async (refusal, releaseStatus) => {
   const { router, session, sessions } = await fixture();
   session.refusal = refusal;
-  session.releaseStatus = false;
+  session.releaseStatus = releaseStatus as boolean;
   const pending = router.readEventPlaybackCandidate(station, { ...options(), clip: sealedClip(router, session) });
   await vi.advanceTimersByTimeAsync(25000);
   const receipt = await pending;
@@ -797,7 +822,12 @@ it.each(["matched", "unmatched"])("clip refusal reconnect safety: %s", async (re
     captureOutcome: "start_refused",
     startAcknowledged: false,
     stationRefusalConfirmed: refusal === "matched",
-    reconnectOutcome: refusal === "matched" ? "not_needed" : "connected",
+    reconnectOutcome: "connected",
   });
-  expect(sessions).toHaveLength(refusal === "matched" ? 1 : 2);
+  expect(sessions).toHaveLength(2);
+  expect(session.isConnected).toBe(false);
+  expect(Reflect.get(router, "sessions").get(station).session).toBe(sessions[1]);
+  session.input(1351, { cmd: 6001, payload: { state: 1, code: 0 } });
+  expect(Reflect.get(router, "sessions").get(station).session).toBe(sessions[1]);
+  expect(router.getPlaybackSafetyDiagnostics().reconnect.attempts).toBe(1);
 });

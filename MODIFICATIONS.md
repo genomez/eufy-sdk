@@ -1085,6 +1085,12 @@ Offline synthetic validation only; installation acceptance remains false.
 ### Offline playback safety update, 2026-11-06
 
 - Distinguish well-formed current-session LIVE media from PLAYBACK traffic in passive admission observation, independently of live target attribution. Remove the admission drain timer; retain consumer ambiguity handling.
-- Return bounded count-only observer poison classes and station status classes. Segment-matched terminal absence before acknowledgement or media can clear after stop dispatch and quiet observation; uncertain or late starts retain cleanup protection.
+- Return bounded count-only observer poison classes and station status classes. Segment-matched terminal absence before acknowledgement or media identifies a no-stream refusal after stop dispatch and quiet observation; cleanup remains unconfirmed and retains reconnect protection.
 - Require EOF retained density of at least five frame intervals per second and comparable request-segment agreement, in addition to retained span and maximum-gap checks.
 - Validated locally with synthetic fixtures; no installation or device acceptance is claimed.
+
+### Offline playback cleanup simplification, 2026-11-06
+
+- Retain reconnect protection for no-stream refusals, including when a stop status follows the refusal. Refusal evidence remains separate from release confirmation.
+- Quarantined PLAYBACK-link fragments trigger the late latch without reassembly or retained payload. Compressed and out-of-order fragments follow the same recovery path.
+- Synthetic regressions verify refusal session replacement, isolation from delayed acknowledgements, and recovery after finished clips.

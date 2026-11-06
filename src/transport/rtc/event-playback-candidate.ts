@@ -491,20 +491,24 @@ export class EventPlaybackCandidate {
         } catch {}
       }
       if (this.receipt.startAttempted) {
+        this.receipt.stationRefusalConfirmed =
+          this.receipt.ownerContinuous &&
+          this.receipt.stopSent &&
+          this.receipt.cessationOutcome === "ceased" &&
+          this.refusalSafe();
         if (
+          !this.receipt.stationRefusalConfirmed &&
           this.receipt.ownerContinuous &&
           this.receipt.stopSent &&
           this.receipt.cessationOutcome === "ceased" &&
           !this.conflict &&
-          (this.releaseSeen || (this.absentSeen && this.eofSeen) || this.refusalSafe())
+          (this.releaseSeen || (this.absentSeen && this.eofSeen))
         ) {
           try {
             this.persistLatch(false);
             this.receipt.releaseOutcome = "release_confirmed";
             this.receipt.latchRetained = false;
             this.receipt.latchCleared = true;
-            this.receipt.stationRefusalConfirmed = this.refusalSafe();
-            if (this.receipt.stationRefusalConfirmed) this.receipt.healthOutcome = "clean";
           } catch {
             this.receipt.releaseOutcome = "release_unknown";
           }
@@ -545,7 +549,7 @@ export class EventPlaybackCandidate {
     );
   }
 
-  /** Only a segment-matched terminal absence before acknowledgement or ingress proves no pending start. */
+  /** Segment-matched terminal absence before acknowledgement or ingress identifies a no-stream refusal. */
   private refusalSafe(): boolean {
     return (
       this.refusalAt !== undefined &&

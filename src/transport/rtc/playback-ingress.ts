@@ -475,7 +475,8 @@ export class PlaybackIngress implements RtcIngressGuard {
     this.plausible();
     this.nonControlTraffic = true;
     if (!this.capturing) {
-      if (!this.tombstone || h.index !== 0 || !h.last) return false;
+      if (!this.tombstone) return false;
+      if (h.index !== 0 || !h.last) return this.lateUnknown("invalid_media");
       if (
         binary[4] !== 3 ||
         (binary.readUInt16LE(18) & PLAYBACK_FORBIDDEN_FLAGS) !== 0 ||
@@ -569,8 +570,8 @@ export class PlaybackIngress implements RtcIngressGuard {
   }
 
   /**
-   * A complete uninspectable tombstone packet is uncertainty, requiring the durable late latch.
-   * Fragment-only traffic never reaches this path and never retains payload or re-latches.
+   * Uninspectable tombstone traffic, including fragments, requires the durable late latch.
+   * Fragment payloads are never retained after quarantine.
    */
   private lateUnknown(reason: "capped" | "invalid_media"): false {
     this.opts.late?.();
