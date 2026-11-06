@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "version": "0.2.1-s1.experimental.12",
   "status": "local-build-unpublished",
-  "exactInputCommit": "5cedc8bbf9e4903eec6c3016025cdf7722820496",
+  "exactInputCommit": "c118379defdc08cab6698e0f5d413bbc8b8b0fe7",
   "files": {
     ".editorconfig": {
       "bytes": 505,
@@ -1997,8 +1997,8 @@
       "sha256": "b1b3d135baebaee86333a62364010a6c7d09cca3c01cfb589737f328a6b07f31"
     },
     "src/transport/rtc/__tests__/event-playback-router.spec.ts": {
-      "bytes": 19393,
-      "sha256": "96f0629cd4135fdb20a23f39a4101343a0dfd593708b9fe09b9203f891b252af"
+      "bytes": 20981,
+      "sha256": "e91782cf95a3b60dcb887a8ee60a2f0773858f5a01470e639cbd71b1adf7b3ef"
     },
     "src/transport/rtc/__tests__/event-table-candidate.spec.ts": {
       "bytes": 27170,
@@ -2097,8 +2097,8 @@
       "sha256": "b3969545c7c842c622a4cfa6bc918af4ec68121e6314e8976152d5dbee734a6d"
     },
     "src/transport/rtc/__tests__/recording-clip.spec.ts": {
-      "bytes": 4711,
-      "sha256": "d8528a859bb31999971f74733234dda4fead0896a4aa0d52097eaa94cd698481"
+      "bytes": 4993,
+      "sha256": "5b1eca33e5a235e169e88ac49d8f240cbee6ceb637c375f83ff784ff0f1302a5"
     },
     "src/transport/rtc/__tests__/recordings-arbitration.spec.ts": {
       "bytes": 15216,
@@ -2165,8 +2165,8 @@
       "sha256": "c52c4c0076830f3f671dd1fb2d383933bf254751b8cba6c5a8a0bee48fd71e73"
     },
     "src/transport/rtc/command-router.ts": {
-      "bytes": 146502,
-      "sha256": "64851c7071262d0223870977b724a909fd3c6c348c6f6f91c3b7b2bd45033da3"
+      "bytes": 146859,
+      "sha256": "4a8a65dd91f3bf5cfa1aa9f9b4a5029dac6aa470cdb545454f8e9e8b8b1d8158"
     },
     "src/transport/rtc/command-transport-evidence.ts": {
       "bytes": 4845,
@@ -2185,8 +2185,8 @@
       "sha256": "2f349552d205a0887b9868fef31af3d416b8153836def44427e7d6008ccaee51"
     },
     "src/transport/rtc/event-playback-candidate.ts": {
-      "bytes": 20349,
-      "sha256": "7535d80feba3154c634f75feaf7ebc4f0892f92c9765ca3ce3d8ea5029001e49"
+      "bytes": 20443,
+      "sha256": "89e3ed60bdfc37b433c4475544557d9c485251859d3ab0d4fe1ccff99eb6d6f1"
     },
     "src/transport/rtc/event-table-candidate.ts": {
       "bytes": 7898,
