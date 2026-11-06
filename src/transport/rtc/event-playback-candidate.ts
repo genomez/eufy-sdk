@@ -57,6 +57,8 @@ export const PLAYBACK_ADMISSION_GATES = [
   "reply_capacity",
   "recordings_unavailable",
   "model",
+  "realtime_disabled",
+  "inventory_conflict",
 ] as const;
 export type PlaybackAdmissionGate = (typeof PLAYBACK_ADMISSION_GATES)[number];
 export interface PlaybackReceipt extends PlaybackIngressEvidence {
@@ -213,6 +215,8 @@ export class EventPlaybackCandidate {
   private startSelector?: number;
   /** Framed ingress exposes no validated media timestamp; coverage uses monotonic video arrival time. */
   private firstVideoAt?: number;
+  private lastVideoAt?: number;
+  private maxVideoGapMs = 0;
 
   constructor(
     private readonly opts: {
@@ -500,6 +504,7 @@ export class EventPlaybackCandidate {
       this.receipt.elapsedMs = Math.max(0, Math.round(performance.now() - this.started));
       this.receipt.boundedMediaObserved =
         ["eof", "complete", "capped"].includes(this.receipt.captureOutcome) &&
+        this.retainedMediaComplete() &&
         this.receipt.startAcknowledged &&
         this.receipt.randomAccess &&
         this.receipt.ownerContinuous &&
@@ -519,6 +524,24 @@ export class EventPlaybackCandidate {
   /** Cessation evidence counts only after a stop that was actually sent and confirmed without conflict. */
   private stopConfirmed(): boolean {
     return this.receipt.stopSent && !this.conflict && (this.releaseSeen || (this.absentSeen && this.eofSeen));
+  }
+
+  /**
+   * Duration captures require retained arrival coverage within 250 ms of the requested end,
+   * no retained video gap above 1000 ms, and at least five frame intervals per second.
+   * Arrival timing is the available clock; completion-margin frames are excluded from this proof.
+   * Probes without a requested duration keep their bounded observation contract.
+   */
+  private retainedMediaComplete(): boolean {
+    if (this.opts.expectedMs === undefined) return true;
+    const span = (this.lastVideoAt ?? 0) - (this.firstVideoAt ?? 0);
+    return (
+      this.receipt.videoFrames >= 2 &&
+      span > 0 &&
+      span >= this.opts.expectedMs - 250 &&
+      this.maxVideoGapMs <= 1000 &&
+      (this.receipt.videoFrames - 1) * 1000 >= span * 5
+    );
   }
 
   private media(frame: Buffer): void {
@@ -549,7 +572,7 @@ export class EventPlaybackCandidate {
     this.firstVideoAt ??= now;
     const coverageMs = now - this.firstVideoAt;
     if (this.opts.expectedMs !== undefined && coverageMs > this.opts.expectedMs) {
-      if (coverageMs >= this.opts.expectedMs + 750 && this.receipt.videoFrames >= 2 && this.receipt.randomAccess)
+      if (coverageMs >= this.opts.expectedMs + 750 && this.retainedMediaComplete() && this.receipt.randomAccess)
         this.end("complete");
       return;
     }
@@ -559,6 +582,8 @@ export class EventPlaybackCandidate {
       this.end("invalid_media");
       return;
     }
+    if (this.lastVideoAt !== undefined) this.maxVideoGapMs = Math.max(this.maxVideoGapMs, now - this.lastVideoAt);
+    this.lastVideoAt = now;
     this.receipt.videoFrames++;
     this.receipt.codec = "h265";
     this.receipt.randomAccess ||= isHevcKeyframe(data);

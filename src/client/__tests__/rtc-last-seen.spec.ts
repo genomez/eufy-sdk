@@ -146,6 +146,24 @@ describe("successful scoped information receipt", () => {
 });
 
 describe("facade cache-only refusals", () => {
+  it.each(["realtime_disabled", "inventory_conflict", "recordings_unavailable"])(
+    "classifies playback admission as %s without transport activity",
+    async (gate) => {
+      const f = fixture();
+      const opts = Reflect.get(f.client, "opts");
+      opts.rtc = { ...opts.rtc, recordings: { enabled: true, stationBinding: station, allowedCameras: cameras } };
+      opts.autoRealtime = gate === "realtime_disabled" ? false : true;
+      vi.spyOn(f.client, "getRecordingAccountNamespace").mockReturnValue(scope.accountNamespace);
+      if (gate === "inventory_conflict")
+        (f.internals.registry as unknown as { inventoryConflicts: Set<string> }).inventoryConflicts.add(station);
+      const read = vi.spyOn(f.internals.rtc, "readEventPlaybackCandidate");
+      await expect(f.client.pullRecordingClip(scope, {} as never, { video: vi.fn() })).rejects.toMatchObject({
+        admissionGateName: gate,
+        captureOutcome: "not_admitted",
+      });
+      expect(read).not.toHaveBeenCalled();
+    },
+  );
   it("sets pacing through the facade without discovery or session acquisition", () => {
     const f = fixture();
     const discovery = vi.spyOn(f.client, "getDevices");

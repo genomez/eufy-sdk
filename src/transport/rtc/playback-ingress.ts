@@ -1,6 +1,7 @@
 import { isPortalPacket, parsePortalHeader, PortalLinkType } from "./portal-packet.js";
 import { parsePtcsHeader, PtcsReassembler, type PtcsInspection, type PtcsRejectionReason } from "./ptcs-framer.js";
 import { PORTAL_KEEPALIVE } from "./portal-keepalive.js";
+import { T9000Live } from "./live.js";
 import { performance } from "node:perf_hooks";
 
 export const PLAYBACK_BYTES = 2 * 1024 * 1024;
@@ -527,6 +528,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     else if (playbackRoute && this.selectors.has(h.isResponse)) this.lateUnknown("invalid_media");
   }
 
+  /** Admitted live traffic is exempt only on the single-camera play slot consumed by RtcLiveConsumer. */
   decoded(frame: Buffer, link: number): boolean {
     if (link !== PortalLinkType.PLAYBACK && this.currentControlKey) this.controlPartials.delete(this.currentControlKey);
     if (this.tombstone && link === PortalLinkType.PLAYBACK) {
@@ -541,6 +543,7 @@ export class PlaybackIngress implements RtcIngressGuard {
         if (!(
           this.opts.liveAllowed?.() &&
           link === PortalLinkType.LIVE &&
+          h.channel === T9000Live.MEDIA_CHANNEL_BASE + T9000Live.PLAY_ID &&
           h.isResponse === 1 &&
           h.paramLength + 16 === frame.length
         )) {
@@ -558,6 +561,7 @@ export class PlaybackIngress implements RtcIngressGuard {
         this.tombstone &&
         this.opts.liveAllowed?.() &&
         link === PortalLinkType.LIVE &&
+        h.channel === T9000Live.MEDIA_CHANNEL_BASE + T9000Live.PLAY_ID &&
         h.paramLength + 16 === frame.length &&
         h.isResponse === 1 &&
         !this.selectors.has(1)

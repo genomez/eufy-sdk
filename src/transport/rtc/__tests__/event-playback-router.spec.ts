@@ -573,11 +573,11 @@ it("duration-complete capture reconnects and re-admits the replacement after obs
   body[5] = 1;
   Buffer.from([0, 0, 0, 1, 0x26, 1, 0x80]).copy(body, 22);
   const input = () => session.input(1300, body, 4, 101, 6);
-  await vi.advanceTimersByTimeAsync(500);
-  input();
-  await vi.advanceTimersByTimeAsync(500);
-  input();
-  await vi.advanceTimersByTimeAsync(750);
+  for (let i = 0; i < 15; i++) {
+    await vi.advanceTimersByTimeAsync(60);
+    input();
+  }
+  await vi.advanceTimersByTimeAsync(850);
   input();
   await vi.advanceTimersByTimeAsync(1);
   for (let i = 0; i < 16; i++) {
@@ -590,7 +590,7 @@ it("duration-complete capture reconnects and re-admits the replacement after obs
     releaseOutcome: "stop_unconfirmed",
     reconnectOutcome: "connected",
   });
-  expect(video).toHaveBeenCalledTimes(2);
+  expect(video).toHaveBeenCalledTimes(16);
   const replacement = Reflect.get(router, "sessions").get(station);
   expect(replacement.lastInformationRead).toBeDefined();
   expect(replacement.playbackObservation.ordinaryFrames).toBeGreaterThan(0);

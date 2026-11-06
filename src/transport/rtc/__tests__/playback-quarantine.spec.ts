@@ -64,6 +64,18 @@ async function setup(released = true) {
   };
 }
 
+it.each([1300, 1301, 1303])("does not exempt quarantined live command %s on a rejected channel", async (command) => {
+  const s = await setup();
+  try {
+    const bytes = Buffer.concat([buildPortalHeader(command, 22, 102, 9, 1), Buffer.alloc(22)]);
+    expect(s.guard.decoded(bytes, 5)).toBe(false);
+    expect(s.guard.prestartSafe()).toBe(false);
+    expect(s.guard.evidence.wrongRouteFrames).toBe(1);
+  } finally {
+    s.close();
+  }
+});
+
 describe("selector-specific quarantine", () => {
   for (const command of [1300, 1301])
     for (const compressed of [false, true])

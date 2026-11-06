@@ -1147,18 +1147,19 @@ export class EufyMega extends EventEmitter {
   private recordingsAdmission(
     scope: RecordingReadScope,
     pulling = false,
-  ): "disabled" | "scope_invalid" | "recordings_unavailable" | undefined {
+  ): "disabled" | "scope_invalid" | "recordings_unavailable" | "realtime_disabled" | "inventory_conflict" | undefined {
     const policy = this.opts.rtc?.recordings;
     if (!policy?.enabled) return "disabled";
     if (this.getRecordingAccountNamespace(scope.identityKey) !== scope.accountNamespace) return "scope_invalid";
+    if (this.opts.autoRealtime === false) return "realtime_disabled";
+    if (this.registry.conflicts().length) return "inventory_conflict";
     if (
       !this.automaticInformationAllowed() ||
       (!pulling && (this.stateRefreshSweep || this.reportRefreshes.has(scope.stationSn))) ||
       this.lateEffects.has(scope.stationSn) ||
       this.commandRefreshes.size ||
       this.stateTransitions.size ||
-      this.propertyPreparations.size ||
-      this.registry.conflicts().length
+      this.propertyPreparations.size
     )
       return "recordings_unavailable";
     const allowed = new Set(policy.allowedCameras);

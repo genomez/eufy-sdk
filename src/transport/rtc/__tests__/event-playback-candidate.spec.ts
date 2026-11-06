@@ -482,14 +482,13 @@ it("completes by received video duration, trims the margin and retains complete 
   const inject = () => {
     for (const packet of wrapped(video())) candidate.ingress.native(packet);
   };
-  inject();
-  await vi.advanceTimersByTimeAsync(1000);
-  inject();
-  await vi.advanceTimersByTimeAsync(2000);
-  inject();
+  for (let i = 0; i <= 45; i++) {
+    if (i) await vi.advanceTimersByTimeAsync(Math.round((i * 3000) / 45) - Math.round(((i - 1) * 3000) / 45));
+    inject();
+  }
   await vi.advanceTimersByTimeAsync(500);
   inject();
-  expect(output).toHaveBeenCalledTimes(3);
+  expect(output).toHaveBeenCalledTimes(46);
   expect(candidate.receipt.captureOutcome).not.toBe("complete");
   await vi.advanceTimersByTimeAsync(250);
   inject();
@@ -502,13 +501,65 @@ it("completes by received video duration, trims the margin and retains complete 
   }
   expect(await observing).toMatchObject({
     captureOutcome: "complete",
-    videoFrames: 3,
+    videoFrames: 46,
     randomAccess: true,
     boundedMediaObserved: true,
     releaseOutcome: "stop_unconfirmed",
     latchRetained: true,
   });
-  expect(output).toHaveBeenCalledTimes(3);
+  expect(output).toHaveBeenCalledTimes(46);
+});
+
+it.each([
+  ["burst", [0, 20]],
+  [
+    "stall-gap",
+    [...Array.from({ length: 15 }, (_, i) => i * 60), ...Array.from({ length: 16 }, (_, i) => 2100 + i * 60)],
+  ],
+  ["sparse", [0, 500, 1000, 1500, 2000, 2500, 3000]],
+  ["delayed-tail", Array.from({ length: 37 }, (_, i) => Math.round(i * (2400 / 36)))],
+])("refuses incomplete retained coverage for %s despite a completion-margin frame", async (_, arrivals) => {
+  const s = candidateSetup({ streaming: true, streamingFrames: 0 });
+  Reflect.get(s.candidate, "opts").expectedMs = 3000;
+  const capture = s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  let previous = 0;
+  for (const arrival of [...arrivals, 3750]) {
+    await vi.advanceTimersByTimeAsync(arrival - previous);
+    for (const packet of wrapped(video())) s.candidate.ingress.native(packet);
+    previous = arrival;
+  }
+  expect(s.candidate.receipt.captureOutcome).not.toBe("complete");
+  expect(s.candidate.receipt.videoFrames).toBe(arrivals.length);
+  await vi.advanceTimersByTimeAsync(60001);
+  await capture;
+  const observing = s.candidate.observe();
+  await vi.advanceTimersByTimeAsync(16001);
+  expect(await observing).toMatchObject({ captureOutcome: "capped", boundedMediaObserved: false });
+});
+
+it("does not certify incomplete retained media on EOF even with confirmed release", async () => {
+  const s = candidateSetup({ streaming: true, streamingFrames: 2, eof: true });
+  Reflect.get(s.candidate, "opts").expectedMs = 3000;
+  await s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  const observing = s.candidate.observe();
+  await vi.advanceTimersByTimeAsync(5010);
+  expect(await observing).toMatchObject({
+    captureOutcome: "eof",
+    releaseOutcome: "release_confirmed",
+    boundedMediaObserved: false,
+  });
+});
+
+it.each([1300, 1301, 1303])("poisons observation for live media command %s on an unconsumed channel", (command) => {
+  const guard = new PlaybackIngress({ observeOnly: true, liveAllowed: () => true, media: vi.fn(), end: vi.fn() });
+  guard.decoded(binary(command, Buffer.alloc(22), 1, 102), 5);
+  expect(guard.prestartSafe()).toBe(false);
+});
+
+it.each([1300, 1301, 1303])("permits observation for live media command %s on the accepted channel", (command) => {
+  const guard = new PlaybackIngress({ observeOnly: true, liveAllowed: () => true, media: vi.fn(), end: vi.fn() });
+  guard.decoded(binary(command, Buffer.alloc(22), 1, 101), 5);
+  expect(guard.prestartSafe()).toBe(true);
 });
 
 it.each([1, 24])(
