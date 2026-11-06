@@ -1897,6 +1897,10 @@ export class RtcCommandRouter {
       }
     }
     if (opts.clip) {
+      if (!receipt.startAttempted && receipt.captureOutcome === "not_admitted") {
+        receipt.admissionGate = PLAYBACK_ADMISSION_GATES.indexOf("start_not_allowed");
+        receipt.admissionGateName = "start_not_allowed";
+      }
       const reconnect = this.playbackHolds.get(stationSn);
       Object.assign(
         receipt,

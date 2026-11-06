@@ -539,6 +539,27 @@ function sealedClip(router: RtcCommandRouter, session: Session) {
   return { scope, selector: result.rows[0]!.playbackSelector!, video: () => {} };
 }
 
+it("names a transient admission refusal when freshness changes before the scheduler recheck", async () => {
+  const { router, session } = await fixture();
+  let fresh = true;
+  const pending = router.readEventPlaybackCandidate(station, {
+    ...options(),
+    clip: sealedClip(router, session),
+    fresh: () => fresh,
+    beforeDispatch: () => {
+      fresh = false;
+    },
+  });
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await pending).toMatchObject({
+    captureOutcome: "not_admitted",
+    startAttempted: false,
+    admissionGate: 26,
+    admissionGateName: "start_not_allowed",
+  });
+  expect(session.sent.filter((packet) => parsePortalHeader(packet)!.commandId === 1700)).toHaveLength(0);
+});
+
 it("duration-complete capture reconnects and re-admits the replacement after observation and a live view", async () => {
   const { router, session, sessions } = await fixture();
   session.eof = false;
