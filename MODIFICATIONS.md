@@ -1076,3 +1076,10 @@ in-memory safety latch or a live-view block. Dispatched or late-media cleanup
 uncertainty still fails closed. Synthetic regression coverage includes clips
 larger than 4 MiB, duration budgets and direct live attachment after storage
 failure. No device or cloud qualification was performed.
+
+
+## Playback 3p4 local fix (2026-11-06)
+
+EOF captures require a keyframe start, at least two retained video frames, a retained span of at least max(1000 ms, 40% of catalog duration), and no internal gap over 1000 ms. EOF bypasses the catalog-end and density requirements; duration completion retains both. Full-clip receipts report mediaDurationMs as the monotonic retained span plus its mean frame interval, rounded to milliseconds. Observation permits well-formed LIVE-link channel-101 media with selector 1 for 10 seconds after a live stop on the same unambiguous session. Admission waits through this drain. Unexpected channels, PLAYBACK-link traffic, unknown data and LIVE frames outside this window retain their existing safety behavior.
+
+Offline synthetic validation only; installation acceptance remains false.

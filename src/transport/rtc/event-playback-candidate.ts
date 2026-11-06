@@ -102,6 +102,8 @@ export interface PlaybackReceipt extends PlaybackIngressEvidence {
   codec: "unknown" | "h265";
   elapsedMs: number;
   silenceMs: number;
+  /** Retained monotonic video span plus its mean frame interval; absent without two timed frames. */
+  mediaDurationMs?: number;
 }
 
 export { chicagoInstant } from "./event-time.js";
@@ -502,6 +504,9 @@ export class EventPlaybackCandidate {
       }
       Object.assign(this.receipt, this.ingress.evidence);
       this.receipt.elapsedMs = Math.max(0, Math.round(performance.now() - this.started));
+      const span = (this.lastVideoAt ?? 0) - (this.firstVideoAt ?? 0);
+      if (this.fullClip && this.receipt.videoFrames >= 2 && span > 0)
+        this.receipt.mediaDurationMs = Math.round(span + span / (this.receipt.videoFrames - 1));
       this.receipt.boundedMediaObserved =
         ["eof", "complete", "capped"].includes(this.receipt.captureOutcome) &&
         this.retainedMediaComplete() &&
@@ -530,11 +535,20 @@ export class EventPlaybackCandidate {
    * Duration captures require retained arrival coverage within 250 ms of the requested end,
    * no retained video gap above 1000 ms, and at least five frame intervals per second.
    * Arrival timing is the available clock; completion-margin frames are excluded from this proof.
+   * EOF instead requires a keyframe start, two frames, the same gap ceiling, and a retained
+   * span of at least 1000 ms and 40% of the requested duration, without a density threshold.
    * Probes without a requested duration keep their bounded observation contract.
    */
   private retainedMediaComplete(): boolean {
     if (this.opts.expectedMs === undefined) return true;
     const span = (this.lastVideoAt ?? 0) - (this.firstVideoAt ?? 0);
+    if (this.eofSeen && this.receipt.captureOutcome === "eof")
+      return (
+        this.receipt.randomAccess &&
+        this.receipt.videoFrames >= 2 &&
+        span >= Math.max(1000, this.opts.expectedMs * 0.4) &&
+        this.maxVideoGapMs <= 1000
+      );
     return (
       this.receipt.videoFrames >= 2 &&
       span > 0 &&

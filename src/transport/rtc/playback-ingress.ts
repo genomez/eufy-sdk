@@ -134,10 +134,21 @@ export class PlaybackIngress implements RtcIngressGuard {
   ordinaryFrames = 0;
   keepalives = 0;
   private nonControlTraffic = false;
+  private liveGraceUntil = Number.NEGATIVE_INFINITY;
+
+  /** Ten seconds of drain on this owner exempt only well-formed LIVE media on its fixed play slot. */
+  liveEnded(): void {
+    if (this.opts.observeOnly) this.liveGraceUntil = this.now() + 10000;
+  }
 
   /** Resolved ordinary fragments are safe before start; media, unknowns and outstanding work are not. */
   prestartSafe(): boolean {
-    return !this.nonControlTraffic && this.evidence.wrongRouteFrames === 0 && this.observationComplete();
+    return (
+      this.now() >= this.liveGraceUntil &&
+      !this.nonControlTraffic &&
+      this.evidence.wrongRouteFrames === 0 &&
+      this.observationComplete()
+    );
   }
 
   stale(): void {
@@ -541,7 +552,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     if (this.opts.observeOnly) {
       if (h.commandId === 1300 || h.commandId === 1301 || h.commandId === 1303) {
         if (!(
-          this.opts.liveAllowed?.() &&
+          (this.opts.liveAllowed?.() || this.now() < this.liveGraceUntil) &&
           link === PortalLinkType.LIVE &&
           h.channel === T9000Live.MEDIA_CHANNEL_BASE + T9000Live.PLAY_ID &&
           h.isResponse === 1 &&

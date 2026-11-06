@@ -3449,6 +3449,9 @@ export class RtcCommandRouter {
                 observeMedia?.();
             },
             onIdle: () => {
+              const owner = this.sessions.get(stationSn);
+              if (owner?.session === lease.session && !owner.liveTargetAmbiguous)
+                owner.playbackObservation?.liveEnded();
               if (this.lives.get(stationSn) === created) this.lives.delete(stationSn);
               lease.release();
             },

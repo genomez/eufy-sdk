@@ -757,3 +757,23 @@ it("reconnect hard cap releases waiters and retires uncertain ownership even if 
   expect(session.isConnected).toBe(false);
   expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: false, reconnect: { timedOut: 1 } });
 });
+
+it("admits playback after sequential live stops and trailing LIVE media on the same owner", async () => {
+  const { router, session } = await fixture();
+  for (const target of [camera, "second-camera-synthetic"]) {
+    const pending = router.mediaProviderFor(target).live!();
+    await vi.advanceTimersByTimeAsync(1);
+    const consumer = await pending;
+    session.input(1300, Buffer.alloc(22), 5, 101, 1);
+    consumer.stop();
+    for (const command of [1300, 1301, 1303]) session.input(command, Buffer.alloc(22), 5, 101, 1);
+  }
+  expect(await router.readEventPlaybackCandidate(station, options())).toMatchObject({
+    startAttempted: false,
+    admissionGateName: "unsafe_observation",
+  });
+  await vi.advanceTimersByTimeAsync(10000);
+  const next = router.readEventPlaybackCandidate(station, options());
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await next).toMatchObject({ admissionGateName: "none", captureOutcome: "eof" });
+});

@@ -825,3 +825,55 @@ it("releases concurrent reservations while bounding cumulative decoder work", ()
   expect(guard.evidence.firstRejectionReason).toBe("limits");
   expect(end).toHaveBeenLastCalledWith("invalid_media");
 });
+
+it.each([
+  ["short low-fps", [0, 750, 1500, 2250, 3000], 7000, true, true],
+  ["large gap", [0, 500, 2000, 2500, 3000], 7000, true, false],
+  ["absolute floor", [0, 400, 800], 1500, true, false],
+  ["relative floor", [0, 750, 1500, 2250], 7000, true, false],
+  ["non-EOF short", [0, 750, 1500, 2250, 3000], 7000, false, false],
+  ["non-EOF low-fps", [0, 750, 1500, 2250, 3000], 3000, false, false],
+] as const)("EOF coverage: %s", async (_, arrivals, expectedMs, eof, accepted) => {
+  const s = candidateSetup({ streaming: true, streamingFrames: 0 });
+  Reflect.get(s.candidate, "opts").expectedMs = expectedMs;
+  const capture = s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  let previous = 0;
+  for (const at of arrivals) {
+    await vi.advanceTimersByTimeAsync(at - previous);
+    for (const packet of wrapped(video())) s.candidate.ingress.native(packet);
+    previous = at;
+  }
+  if (eof) s.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 2, code: 14 } }), 3);
+  else s.candidate.end("complete");
+  await capture;
+  const observing = s.candidate.observe();
+  await vi.advanceTimersByTimeAsync(5010);
+  expect(await observing).toMatchObject({ boundedMediaObserved: accepted });
+  if (accepted) expect(s.candidate.receipt.mediaDurationMs).toBe(3750);
+});
+
+it.each([1300, 1301, 1303])("drains trailing LIVE command %s without permanent poisoning", (command) => {
+  let now = 0;
+  const guard = new PlaybackIngress({ now: () => now, observeOnly: true, media: vi.fn(), end: vi.fn() });
+  guard.liveEnded();
+  now = 9999;
+  guard.decoded(binary(command, Buffer.alloc(22), 1, 101), 5);
+  expect(guard.prestartSafe()).toBe(false);
+  now = 10000;
+  expect(guard.prestartSafe()).toBe(true);
+  guard.decoded(binary(command, Buffer.alloc(22), 1, 101), 5);
+  expect(guard.prestartSafe()).toBe(false);
+});
+
+it.each([
+  [5, 102],
+  [4, 101],
+  [5, 101, 2],
+])("preserves poisoning during live drain for link/channel %s/%s", (link, channel, selector = 1) => {
+  let now = 0;
+  const guard = new PlaybackIngress({ now: () => now, observeOnly: true, media: vi.fn(), end: vi.fn() });
+  guard.liveEnded();
+  guard.decoded(binary(1300, Buffer.alloc(22), selector, channel), link);
+  now = 20000;
+  expect(guard.prestartSafe()).toBe(false);
+});
