@@ -498,6 +498,7 @@ export class EventPlaybackCandidate {
           this.refusalSafe();
         if (
           !this.receipt.stationRefusalConfirmed &&
+          this.refusalAt === undefined &&
           this.receipt.ownerContinuous &&
           this.receipt.stopSent &&
           this.receipt.cessationOutcome === "ceased" &&

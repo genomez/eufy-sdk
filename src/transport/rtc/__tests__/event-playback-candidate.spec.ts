@@ -953,6 +953,20 @@ it.each(["matched", "unmatched", "mismatched", "noncomparable", "after-ack", "af
   },
 );
 
+it.each([
+  [0, 7],
+  [2, 18],
+])("invalidated refusal %s/%s with stop release keeps the latch", async (refusalState, refusalCode) => {
+  const s = candidateSetup({ refusal: "late-media", refusalState, refusalCode, release: true });
+  await s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  for (const packet of wrapped(video())) s.candidate.ingress.native(packet);
+  const observing = s.candidate.observe();
+  await vi.advanceTimersByTimeAsync(24001);
+  const receipt = await observing;
+  expect(receipt).toMatchObject({ stationRefusalConfirmed: false, latchCleared: false, latchRetained: true });
+  expect(receipt.releaseOutcome).not.toBe("release_confirmed");
+});
+
 it.each(["stop-refused", "owner-changed"])("no stored video refusal requires cleanup authority: %s", async (kind) => {
   const s = candidateSetup({
     refusal: "matched",

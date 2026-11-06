@@ -1100,3 +1100,7 @@ Offline synthetic validation only; installation acceptance remains false.
 - Treat state 2/code 18 before acknowledgement or ingress as a no-stream refusal only when its numeric segmen exactly matches the start request. Missing, non-comparable and mismatched segments remain uncertain.
 - Require continuous ownership, a sent stop and quiet cessation before confirming refusal. Retain the latch and reconnect protection; acknowledgement or media invalidates clean refusal evidence.
 - Validated locally with synthetic fixtures; no installation or device acceptance is claimed.
+
+### Offline playback refusal latch retention, 2026-11-06
+
+- Refusal evidence that later becomes invalid (for example, media after a refusal) never permits release confirmation; the late latch and reconnect protection remain. Applies to both 0/7 and 2/18 refusals.
