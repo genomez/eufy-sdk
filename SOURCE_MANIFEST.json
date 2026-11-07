@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "version": "0.2.1-s1.experimental.12",
   "status": "local-build-unpublished",
-  "exactInputCommit": "ec5d7c205ce9509cf8d10861252853581662d5fc",
+  "exactInputCommit": "f3e00df41aa3a172b56461d55996526f6157ad92",
   "files": {
     ".editorconfig": {
       "bytes": 505,
@@ -109,8 +109,8 @@
       "sha256": "36871afa8b444f827836d1523340d80e25c7c5db7d0b9bbe2e138b63ef0662ac"
     },
     "docs/recordings-sdk.md": {
-      "bytes": 10371,
-      "sha256": "3a18afd4c79f9eafe1c20a8d31c945bd8c565b6a3a257cf9bd387b90189e1e4d"
+      "bytes": 10530,
+      "sha256": "ff60217e5fc22dd866fd2856be1b777d44985167f31228b2396a86f6b3fcf2e0"
     },
     "docs/recordings-validation.md": {
       "bytes": 7181,
@@ -2073,8 +2073,8 @@
       "sha256": "8408efc5f601808bb6f456eb2846c4e938351989c389c2a76c13564c2193e400"
     },
     "src/transport/rtc/__tests__/playback-telemetry.spec.ts": {
-      "bytes": 5506,
-      "sha256": "4b300355b4dd1de7eb1a1b810b1785a82aa43af4367d08897c25f35a567b4bf2"
+      "bytes": 5932,
+      "sha256": "4de144fbb1302ac4a3b160b714a50907ef2b0a59f4afa1db496418f3f51d05c9"
     },
     "src/transport/rtc/__tests__/playback-transfer-speed.spec.ts": {
       "bytes": 7257,
@@ -2113,16 +2113,16 @@
       "sha256": "c34ea4097f61d0b3f200ec06dafc60a2d218b1ab2ebad93483fae147d0e3c355"
     },
     "src/transport/rtc/__tests__/recordings-arbitration.spec.ts": {
-      "bytes": 15216,
-      "sha256": "cbced90a59c612183c7f581d19be7dc6dde56168e33dedeba097f0471513ae3b"
+      "bytes": 17342,
+      "sha256": "97cfa3905865e11a16933d6bcd8faeaab53ddb09ce4ceb7534a410873008b159"
     },
     "src/transport/rtc/__tests__/recordings-fixture.ts": {
       "bytes": 5203,
       "sha256": "7949ba73517e30acd41e15f361bafa24d6bc3665ec0ba80ca981fc21597b7f74"
     },
     "src/transport/rtc/__tests__/recordings.spec.ts": {
-      "bytes": 19358,
-      "sha256": "c54a34bc14672b8eecc723850c38cba9c8d0ebf187ab51b73a9191c7ae3a9de7"
+      "bytes": 19581,
+      "sha256": "6d22cc47d6274c57cf53718643d57267746530c7aa937d7e22a7d22607434462"
     },
     "src/transport/rtc/__tests__/renewal-diagnostics.spec.ts": {
       "bytes": 1362,
@@ -2177,8 +2177,8 @@
       "sha256": "c52c4c0076830f3f671dd1fb2d383933bf254751b8cba6c5a8a0bee48fd71e73"
     },
     "src/transport/rtc/command-router.ts": {
-      "bytes": 157178,
-      "sha256": "54625a532c3d5c9b24d8929c31f3d05103f73173c0d0ac6fff996bf37995b38c"
+      "bytes": 157173,
+      "sha256": "d2d14b21dfc72a3a1d856cfb9c51ae17bfbc628c78748ee88bf32e9332a25b22"
     },
     "src/transport/rtc/command-transport-evidence.ts": {
       "bytes": 4845,
@@ -2237,8 +2237,8 @@
       "sha256": "0a332c2a5c839e60436020360e0650fa85f64cff12ff17fc8f09151947594f76"
     },
     "src/transport/rtc/playback-telemetry.ts": {
-      "bytes": 9381,
-      "sha256": "d22a4fa91865bd5bc02a7d3cad9939f133b5f917ad88d54c6f47c6fa3d2daa53"
+      "bytes": 9345,
+      "sha256": "a9f56d384d1c75ed4f77dd2324d0009a6a4312083cb7b07a44e26540ccd58ffd"
     },
     "src/transport/rtc/portal-keepalive.ts": {
       "bytes": 334,
@@ -2261,8 +2261,8 @@
       "sha256": "5615eac801b325e4d068ceeaac814930000d386a9abb2a25ea1e625cab917c8d"
     },
     "src/transport/rtc/recordings.ts": {
-      "bytes": 19505,
-      "sha256": "f889cb9674c024338b0f717e8bf548a33174bf50046e50265d95001c3d7f7e37"
+      "bytes": 19504,
+      "sha256": "ae2fcb4c3edd7077a3b7e4146340f5390beaa0c8500212a3f5469d53a5e0b16b"
     },
     "src/transport/rtc/renewal-diagnostics.ts": {
       "bytes": 5579,
