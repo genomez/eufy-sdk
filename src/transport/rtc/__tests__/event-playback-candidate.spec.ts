@@ -858,7 +858,7 @@ it.each([
   ["night bursts", 2500, 12000, true, "none"],
   ["night smaller bursts", 1200, 12000, true, "none"],
   ["truncated EOF", 2500, 60000, false, "span"],
-  ["excessive EOF gap", 3100, 12000, false, "gap"],
+  ["excessive EOF gap with dropped tail", 3100, 12000, false, "truncated"],
 ] as const)("retained EOF diagnostics: %s", async (_, gap, expectedMs, accepted, completenessFailure) => {
   const s = candidateSetup({ streaming: true, streamingFrames: 0, release: false });
   Reflect.get(s.candidate, "opts").expectedMs = expectedMs;
@@ -930,6 +930,44 @@ it.each([
     boundedMediaObserved: accepted,
     completenessFailure: accepted ? "none" : "truncated",
   });
+});
+
+it.each([
+  ["full coverage, long pause", 11544, 3525, 0, "none", 129],
+  ["full coverage boundary", 11000, 8000, 0, "none", 129],
+  ["partial coverage, long pause", 10900, 3525, 0, "gap", 129],
+  ["full coverage, truncated", 11544, 3525, 40, "truncated", 129],
+  ["full coverage, sparse", 11544, 3525, 0, "density", 40],
+] as const)("EOF pause tolerance: %s", (_, span, gap, dropped, failure, frames) => {
+  const s = candidateSetup({});
+  const c = s.candidate as unknown as Record<string, unknown>;
+  Reflect.get(s.candidate, "opts").expectedMs = 12000;
+  Object.assign(c, {
+    eofSeen: true,
+    firstVideoAt: 0,
+    lastVideoAt: span,
+    maxVideoGapMs: gap,
+    droppedAfterCutoff: dropped,
+  });
+  Object.assign(Reflect.get(s.candidate, "receipt"), {
+    captureOutcome: "eof",
+    randomAccess: true,
+    videoFrames: frames,
+  });
+  expect(Reflect.apply(Reflect.get(s.candidate, "retainedMediaFailure"), s.candidate, [])).toBe(failure);
+});
+
+it("non-EOF keeps the strict pause limit at full coverage", () => {
+  const s = candidateSetup({});
+  const c = s.candidate as unknown as Record<string, unknown>;
+  Reflect.get(s.candidate, "opts").expectedMs = 12000;
+  Object.assign(c, { eofSeen: false, firstVideoAt: 0, lastVideoAt: 11800, maxVideoGapMs: 1500 });
+  Object.assign(Reflect.get(s.candidate, "receipt"), {
+    captureOutcome: "complete",
+    randomAccess: true,
+    videoFrames: 180,
+  });
+  expect(Reflect.apply(Reflect.get(s.candidate, "retainedMediaFailure"), s.candidate, [])).toBe("gap");
 });
 
 it.each([

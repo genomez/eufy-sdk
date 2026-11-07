@@ -1119,3 +1119,7 @@ Offline synthetic validation only; installation acceptance remains false.
 ### Offline playback truncation count, 2026-11-06
 
 - The truncation check uses an unsaturated internal count of discarded post-cutoff video frames; only the diagnostic receipt value is bounded.
+
+### Offline playback EOF pause tolerance, 2026-11-06
+
+- A correlated EOF capture whose untruncated arrival coverage reaches within 1000 ms of the expected duration is complete regardless of arrival pauses; the five-interval density floor still applies. Partial EOF coverage keeps the 3000 ms pause limit, and the truncation check runs before the pause check.

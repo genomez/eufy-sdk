@@ -597,9 +597,12 @@ export class EventPlaybackCandidate {
     if (this.receipt.videoFrames < 2) return "frames";
     if (eof ? span < Math.max(1000, this.opts.expectedMs * 0.4) : span <= 0 || span < this.opts.expectedMs - 250)
       return "span";
-    if (this.maxVideoGapMs > (eof ? 3000 : 1000)) return "gap";
-    if ((this.receipt.videoFrames - 1) * 1000 < span * 5) return "density";
     if (eof && this.droppedAfterCutoff > Math.max(15, this.receipt.videoFrames * 0.1)) return "truncated";
+    // A correlated EOF whose untruncated arrival covers the event to within 1000 ms is complete
+    // regardless of arrival pauses; partial EOF coverage keeps the 3000 ms pause limit.
+    const fullEofCoverage = eof && span >= this.opts.expectedMs - 1000;
+    if (!fullEofCoverage && this.maxVideoGapMs > (eof ? 3000 : 1000)) return "gap";
+    if ((this.receipt.videoFrames - 1) * 1000 < span * 5) return "density";
     return "none";
   }
 
