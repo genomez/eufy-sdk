@@ -210,7 +210,7 @@ const options = () => ({
   fresh: () => true,
 });
 
-it.each(["time", "bytes", "abort", "live"] as const)(
+it.each(["time", "bytes", "abort", "live", "eof"] as const)(
   "armed download uses clip authority and always replaces after %s cutoff",
   async (bound) => {
     const { router, session, sessions, marker } = await fixture();
@@ -237,16 +237,17 @@ it.each(["time", "bytes", "abort", "live"] as const)(
     });
     expect(session.sent.slice(before).some((p) => parsePortalHeader(p)!.commandId === 1700)).toBe(false);
     if (bound === "bytes") {
-      for (let i = 0; i < 4; i++)
+      for (let i = 0; i < 64; i++)
         for (const p of packetize(Buffer.alloc(4 * 1024 * 1024), { channel: 3, frameId: ++session.counter }))
           session.inject(p);
     } else if (bound === "abort") controller.abort();
+    else if (bound === "eof") session.input(1351, { cmd: 1024, payload: { cmd: 0, code: 0 } });
     const live = bound === "live" ? router.mediaProviderFor(camera).live!() : undefined;
-    await vi.advanceTimersByTimeAsync(bound === "time" ? 20010 : 10);
+    await vi.advanceTimersByTimeAsync(bound === "time" ? 60010 : 10);
     const receipt = await pending;
     expect(receipt).toMatchObject({
       mode: "download",
-      captureOutcome: bound === "abort" || bound === "live" ? "preempted" : "capped",
+      captureOutcome: bound === "eof" ? "eof" : bound === "abort" || bound === "live" ? "preempted" : "capped",
       boundedMediaObserved: false,
       reconnectOutcome: "connected",
       download: {
@@ -254,7 +255,7 @@ it.each(["time", "bytes", "abort", "live"] as const)(
         ackStatus: 0,
         cancelAttempted: true,
         cancelSent: true,
-        fileBytes: bound === "bytes" ? 16 * 1024 * 1024 : 0,
+        fileBytes: bound === "bytes" ? 256 * 1024 * 1024 : 0,
       },
     });
     const commands = session.sent.slice(before).filter((p) => parsePortalHeader(p)!.commandId === 1350);
@@ -1073,7 +1074,7 @@ it.each([
     expect(mediaReady.mock.calls[0]![0]).toMatchObject({
       captureOutcome: "eof",
       boundedMediaObserved: true,
-      mediaDurationMs: experiment ? 1000 : 500,
+      mediaDurationMs: 1000,
     });
     expect(settled).toBe(false);
     expect(router.getPlaybackSafetyDiagnostics().reconnect.attempts).toBe(1);

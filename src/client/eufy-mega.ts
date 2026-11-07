@@ -1125,6 +1125,7 @@ export class EufyMega extends EventEmitter {
       beforeDispatch?: () => void;
       mediaReady?: (receipt: import("../transport/rtc/event-playback-candidate.js").PlaybackReceipt) => void;
       experiment?: import("../transport/rtc/playback-telemetry.js").PlaybackExperiment;
+      transferSpeed?: 1 | 2;
       /** Process monotonic origin for caller pipeline telemetry, independent of protocol deadlines. */
       timelineOriginMs?: number;
     },
@@ -1152,6 +1153,7 @@ export class EufyMega extends EventEmitter {
         file: opts.file,
         mediaReady: opts.mediaReady,
         experiment: opts.experiment,
+        transferSpeed: opts.transferSpeed,
         timelineOriginMs: opts.timelineOriginMs,
       },
     });

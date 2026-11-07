@@ -1,7 +1,12 @@
 import { buildPortalPacket, parsePortalHeader, PortalLinkType } from "./portal-packet.js";
+import { PlaybackNativeFrameTiming } from "./playback-telemetry.js";
 
-export const DOWNLOAD_EXPERIMENT_MS = 20_000;
-export const DOWNLOAD_EXPERIMENT_BYTES = 16 * 1024 * 1024;
+export const DOWNLOAD_EXPERIMENT_BYTES = 256 * 1024 * 1024;
+
+/** Catalog-bound capture budget with a one-minute minimum and timer-safe ceiling. */
+export function downloadCaptureMs(expectedMs = 0): number {
+  return Math.min(2147452647, Math.max(60000, expectedMs * 3));
+}
 let lastDownloadId = 0;
 
 /** Unique process-local millisecond identifiers, independent of portal segment rollover. */
@@ -52,7 +57,7 @@ export function classifyDownloadPrefix(bytes: Buffer): "mp4_ftyp" | "hevc_annex_
   return "other";
 }
 
-/** Bounded complete logical-frame counts. Terminal candidates are observed, never trusted as EOF. */
+/** Bounded complete logical-frame counts and terminal notifications; these never certify playable media. */
 export class DownloadEvidence {
   readonly value = {
     ackReceived: false,
@@ -75,9 +80,55 @@ export class DownloadEvidence {
     routeOverflow: 0,
     terminalCommandIds: [] as number[],
     fileBytes: 0,
+    firstFileByteMs: null as number | null,
+    lastFileByteMs: null as number | null,
+    terminalStatus: null as {
+      command: number;
+      innerCommand: number;
+      subcommand: number | null;
+      state: number | null;
+      code: number | null;
+    } | null,
+    parsedFrameCount: 0,
+    mediaDurationMs: undefined as number | undefined,
+    codec: "unknown" as "unknown" | "h264" | "hevc",
     firstBytes: "empty" as ReturnType<typeof classifyDownloadPrefix>,
   };
   private prefix = Buffer.alloc(0);
+  private readonly timing = new PlaybackNativeFrameTiming();
+
+  /** Counts complete clear Annex-B video envelopes; timestamp units require catalog agreement. */
+  file(frame: Buffer, elapsed: number): void {
+    this.value.firstFileByteMs ??= elapsed;
+    this.value.lastFileByteMs = elapsed;
+    for (let offset = 0; offset + 38 <= frame.length;) {
+      const bytes = frame.subarray(offset);
+      const h = parsePortalHeader(bytes);
+      if (!h || h.paramLength + 16 > bytes.length) break;
+      const body = bytes.subarray(16, 16 + h.paramLength);
+      if (h.commandId === 1300 && body.length >= 28 && body.readUInt32LE(0) === body.length - 22) {
+        const data = body.subarray(22);
+        const start = data.readUInt32BE(0) === 1 ? 4 : data.readUIntBE(0, 3) === 1 ? 3 : -1;
+        if (start >= 0) {
+          const avc = data[start]! & 31;
+          const hevc = (data[start]! >>> 1) & 63;
+          const codec =
+            avc === 7 || avc === 8 ? "h264" : hevc >= 32 && hevc <= 34 ? "hevc" : body[5] === 1 ? "hevc" : "h264";
+          if (this.value.codec === "unknown") this.value.codec = codec;
+          if (codec === this.value.codec) {
+            this.value.parsedFrameCount++;
+            this.timing.add(body, elapsed);
+          }
+        }
+      }
+      offset += h.paramLength + 16;
+    }
+  }
+
+  /** A duration is reported only for catalog-consistent advancing native header words. */
+  durationMs(expectedMs?: number): number | undefined {
+    return expectedMs === undefined ? undefined : this.timing.durationMs(expectedMs);
+  }
 
   packet(channel: number, bytes: number): void {
     const row = this.value.ptcsChannels.find((r) => r.channel === channel);
@@ -135,8 +186,11 @@ export class DownloadEvidence {
             ((innerCommand === 1024 && status.subcommand === 0) ||
               (innerCommand === 6001 && status.state === 2 && (status.code === 14 || status.code === 15))) &&
             !this.value.terminalCommandIds.includes(innerCommand)
-          )
+          ) {
             this.value.terminalCommandIds.push(innerCommand);
+            const { count: _count, ...terminal } = status;
+            this.value.terminalStatus ??= terminal;
+          }
         }
       } catch {}
     }

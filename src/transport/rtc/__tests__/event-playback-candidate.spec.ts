@@ -320,6 +320,7 @@ function candidateSetup({
     latched = false;
   const candidate = new EventPlaybackCandidate({
     experiment,
+    transferSpeed: 1,
     deadlineMs: performance.now() + (streaming ? 91000 : 24000),
     captureMs: streaming ? 60000 : undefined,
     video: streaming ? () => {} : undefined,

@@ -262,6 +262,7 @@ export class PlaybackIngress implements RtcIngressGuard {
         } else this.complete(frame, timing);
       },
       {
+        plainFileFrames: !!opts.file,
         maxFrameBytes: PLAYBACK_FRAME_BYTES,
         maxPendingFrames: 8,
         maxBufferedBytes: 16 * 1024 * 1024,

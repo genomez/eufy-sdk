@@ -83,6 +83,12 @@ Full clips retain video until station EOF or the existing hard capture limit,
 including frames arriving after the catalog duration. EOF completeness requires
 random access, at least two retained frames and a positive arrival span. Other
 capture outcomes retain the strict duration, gap and density checks.
+Ordinary clip transfers default to speed 2, while probes and live view retain their
+existing speed. `transferSpeed: 1` selects the comparison/fallback speed; an armed
+experiment takes precedence. Coverage span, gap, density and cutoff use arrival
+time scaled by transfer speed. Accelerated clips prefer a catalog-consistent native
+header duration, falling back to catalog duration, so faster delivery preserves
+normal playback timing. The receipt records `transferSpeed` and `durationBasis`.
 
 `pullRecordingClip` optionally calls `mediaReady(receipt)` once for a complete EOF
 capture, after the sink has received its last video bytes. This receipt is a

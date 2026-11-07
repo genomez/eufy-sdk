@@ -240,6 +240,8 @@ interface Partial {
 
 /** Receive resource policy; these limits are not claims about device frame sizes. */
 export interface PtcsReassemblerOptions {
+  /** Download capture admits complete plain XZYH FILE frames carrying the station's compression bit. */
+  plainFileFrames?: boolean;
   /** Maximum assembled or decompressed frame size, in bytes. Defaults to 8 MiB. */
   maxFrameBytes?: number;
   /** Maximum number of incomplete frames. Defaults to 32. */
@@ -265,7 +267,7 @@ export interface PtcsReassemblerOptions {
  */
 export class PtcsReassembler {
   private readonly partials = new Map<string, Partial>();
-  private readonly limits: Required<Omit<PtcsReassemblerOptions, "now" | "inspect">>;
+  private readonly limits: Required<Omit<PtcsReassemblerOptions, "now" | "inspect" | "plainFileFrames">>;
   private readonly now: () => number;
   private retainedBytes = 0;
   private readonly counters = {
@@ -415,7 +417,7 @@ export class PtcsReassembler {
     // audio, 2026-11-04). A frame without the Zstandard magic that is itself a portal packet is not compressed.
     const plainPlayback =
       p.compressed &&
-      p.channel === PtcsChannel.PLAYBACK &&
+      (p.channel === PtcsChannel.PLAYBACK || (p.channel === PtcsChannel.FILE && this.opts.plainFileFrames)) &&
       (frame.length < 4 || frame.readUInt32LE(0) !== 0xfd2fb528) &&
       isPortalPacket(frame);
     if (plainPlayback) this.opts.inspect?.({ compressionState: "uncompressed", outputSize: frame.length });

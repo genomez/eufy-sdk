@@ -14,7 +14,7 @@ import {
   downloadRequest,
   nextDownloadId,
   DOWNLOAD_EXPERIMENT_BYTES,
-  DOWNLOAD_EXPERIMENT_MS,
+  downloadCaptureMs,
 } from "./event-download-experiment.js";
 
 export type CaptureOutcome =
@@ -77,6 +77,7 @@ export type PlaybackAdmissionGate = (typeof PLAYBACK_ADMISSION_GATES)[number];
 export type PlaybackCompletenessFailure =
   "none" | "random_access" | "frames" | "span" | "gap" | "density" | "truncated";
 export interface PlaybackReceipt extends PlaybackIngressEvidence {
+  transferSpeed?: 1 | 2 | 4 | 8;
   mode?: "playback" | "download";
   download?: DownloadEvidence["value"];
   timeline?: Partial<
@@ -97,7 +98,7 @@ export interface PlaybackReceipt extends PlaybackIngressEvidence {
   nativeFrameTiming?: ReturnType<PlaybackNativeFrameTiming["snapshot"]>;
   selectedIceCandidateType?: "relay" | "srflx" | "host" | "prflx";
   selectedRemoteIceCandidateType?: "relay" | "srflx" | "host" | "prflx";
-  durationBasis?: "arrival" | "catalog_experiment" | "native_header_experiment";
+  durationBasis?: "arrival" | "catalog_experiment" | "native_header_experiment" | "catalog" | "native_header";
   reconnectOutcome?: "not_needed" | "connected" | "failed" | "timed_out";
   reconnectDurationMs?: number;
   playbackObservation?: ReturnType<PlaybackIngress["observationEvidence"]>;
@@ -148,7 +149,7 @@ export interface PlaybackReceipt extends PlaybackIngressEvidence {
   codec: "unknown" | "h265";
   elapsedMs: number;
   silenceMs: number;
-  /** Arrival duration normally; active EOF experiments prefer a catalog-consistent native clock, then catalog duration. */
+  /** Media duration; accelerated captures prefer a catalog-consistent native clock, then catalog duration. */
   mediaDurationMs?: number;
 }
 
@@ -214,6 +215,7 @@ export function playbackRequest(
   segment: number,
   begin: number,
   experiment?: PlaybackExperiment,
+  transferSpeed: 1 | 2 | 4 | 8 = 1,
 ): Buffer {
   const active = playbackExperiment(experiment);
   const selector = sub === 3 ? start + 1 : start;
@@ -232,7 +234,7 @@ export function playbackRequest(
       data: {
         cmd: sub,
         play_type: active?.playType ?? 1,
-        play_speed: active?.playSpeed ?? 1,
+        play_speed: active?.playSpeed ?? transferSpeed,
         client_type: active?.clientType ?? "WEB",
         device_sn: "",
         record_id: record,
@@ -283,7 +285,7 @@ export class EventPlaybackCandidate {
   private lateLatched = false;
   private selection?: { record: number; begin: number };
   private startSelector?: number;
-  /** No validated presentation clock; normal coverage uses monotonic video arrival time. */
+  /** Coverage uses monotonic video arrival time scaled by the requested transfer speed. */
   private firstVideoAt?: number;
   private lastVideoAt?: number;
   private maxVideoGapMs = 0;
@@ -294,6 +296,7 @@ export class EventPlaybackCandidate {
     private readonly opts: {
       timelineOriginMs?: number;
       experiment?: PlaybackExperiment;
+      transferSpeed?: 1 | 2;
       deadlineMs: number;
       timeZone?: string;
       captureMs?: number;
@@ -315,6 +318,8 @@ export class EventPlaybackCandidate {
     },
   ) {
     const experiment = playbackExperiment(opts.experiment);
+    if (opts.transferSpeed !== undefined && opts.transferSpeed !== 1 && opts.transferSpeed !== 2)
+      throw new RangeError("Playback transfer speed invalid");
     if (experiment?.mode === "download" && (!opts.transient || !opts.file || !opts.camera))
       throw new RangeError("Download experiment requires a clip evidence sink");
     this.ingress = new PlaybackIngress({
@@ -342,6 +347,7 @@ export class EventPlaybackCandidate {
     });
     this.receipt = {
       mode: experiment?.mode ?? "playback",
+      transferSpeed: experiment?.playSpeed ?? opts.transferSpeed ?? (opts.video ? 2 : 1),
       ...(experiment?.mode === "download" && { download: this.download.value }),
       ...(experiment && { experiment }),
       timeline: {},
@@ -461,7 +467,7 @@ export class EventPlaybackCandidate {
           Math.max(
             0,
             Math.min(
-              this.downloadMode ? DOWNLOAD_EXPERIMENT_MS : (this.opts.captureMs ?? 8000),
+              this.downloadMode ? downloadCaptureMs(this.opts.expectedMs) : (this.opts.captureMs ?? 8000),
               this.opts.deadlineMs - performance.now() - 7000,
             ),
           ),
@@ -489,7 +495,7 @@ export class EventPlaybackCandidate {
           this.segments[0] = segment;
           if (this.downloadMode) {
             this.downloadId = nextDownloadId();
-            this.downloadDeadline = performance.now() + DOWNLOAD_EXPERIMENT_MS;
+            this.downloadDeadline = performance.now() + downloadCaptureMs(this.opts.expectedMs);
           }
           this.ingress.capturing = true;
           this.receipt.startAttempted = true;
@@ -515,6 +521,7 @@ export class EventPlaybackCandidate {
                     segment,
                     selection.begin,
                     this.receipt.experiment,
+                    this.receipt.transferSpeed,
                   ),
             )
           ) {
@@ -585,6 +592,7 @@ export class EventPlaybackCandidate {
             segment,
             this.selection.begin,
             this.receipt.experiment,
+            this.receipt.transferSpeed,
           ),
         );
         if (sub === 1) this.receipt.pauseSent = sent;
@@ -597,6 +605,7 @@ export class EventPlaybackCandidate {
     try {
       this.finalize();
       if (this.downloadMode) {
+        this.download.value.mediaDurationMs = this.download.durationMs(this.opts.expectedMs);
         Object.assign(this.receipt, this.ingress.evidence);
         this.receipt.ownerContinuous = this.opts.continuous();
         this.receipt.elapsedMs = Math.max(0, Math.round(performance.now() - this.started));
@@ -678,20 +687,29 @@ export class EventPlaybackCandidate {
       this.receipt.elapsedMs = Math.max(0, Math.round(performance.now() - this.started));
       const span = (this.lastVideoAt ?? 0) - (this.firstVideoAt ?? 0);
       if (this.fullClip && this.receipt.videoFrames >= 2 && span > 0)
-        this.receipt.mediaDurationMs = Math.max(1, Math.round(span + span / (this.receipt.videoFrames - 1)));
+        this.receipt.mediaDurationMs = Math.max(
+          1,
+          Math.round((span + span / (this.receipt.videoFrames - 1)) * (this.receipt.transferSpeed ?? 1)),
+        );
       Object.assign(this.receipt, this.frameTiming.snapshot());
       this.receipt.nativeFrameTiming = this.nativeFrameTiming.snapshot();
       this.receipt.durationBasis = "arrival";
       if (
-        this.receipt.experiment &&
+        (this.receipt.experiment || this.receipt.transferSpeed !== 1) &&
         this.fullClip &&
-        this.eofSeen &&
+        (this.eofSeen || this.retainedMediaComplete()) &&
         this.opts.expectedMs &&
         this.receipt.videoFrames >= 2
       ) {
         const nativeDuration = this.nativeFrameTiming.durationMs(this.opts.expectedMs);
         this.receipt.mediaDurationMs = nativeDuration ?? this.opts.expectedMs;
-        this.receipt.durationBasis = nativeDuration === undefined ? "catalog_experiment" : "native_header_experiment";
+        this.receipt.durationBasis = this.receipt.experiment
+          ? nativeDuration === undefined
+            ? "catalog_experiment"
+            : "native_header_experiment"
+          : nativeDuration === undefined
+            ? "catalog"
+            : "native_header";
       }
       this.receipt.retainedVideoSpanMs = Math.max(0, Math.round(span));
       this.receipt.maxVideoGapMs = Math.max(0, Math.round(this.maxVideoGapMs));
@@ -748,13 +766,14 @@ export class EventPlaybackCandidate {
   /** The first failed retained-media check; framed ingress has no validated media timestamp. */
   private retainedMediaFailure(): PlaybackCompletenessFailure {
     if (this.opts.expectedMs === undefined) return "none";
-    const span = (this.lastVideoAt ?? 0) - (this.firstVideoAt ?? 0);
+    const speed = this.receipt.transferSpeed ?? 1;
+    const span = ((this.lastVideoAt ?? 0) - (this.firstVideoAt ?? 0)) * speed;
     const eof = this.eofSeen && this.receipt.captureOutcome === "eof";
     if (eof && !this.receipt.randomAccess) return "random_access";
     if (this.receipt.videoFrames < 2) return "frames";
     if (eof) return span > 0 || !!this.receipt.experiment ? "none" : "span";
     if (span <= 0 || span < this.opts.expectedMs - 250) return "span";
-    if (this.maxVideoGapMs > 1000) return "gap";
+    if (this.maxVideoGapMs * speed > 1000) return "gap";
     if ((this.receipt.videoFrames - 1) * 1000 < span * 5) return "density";
     return "none";
   }
@@ -776,6 +795,7 @@ export class EventPlaybackCandidate {
     try {
       if (bytes.length) this.opts.file!(bytes);
       this.download.value.fileBytes += bytes.length;
+      if (bytes.length) this.download.file(bytes, Math.max(0, Math.round(performance.now() - this.started)));
       if (this.download.value.fileBytes >= DOWNLOAD_EXPERIMENT_BYTES) this.end("capped");
     } catch {
       this.end("storage_failed");
@@ -812,7 +832,7 @@ export class EventPlaybackCandidate {
     }
     const now = performance.now();
     this.firstVideoAt ??= now;
-    const coverageMs = now - this.firstVideoAt;
+    const coverageMs = (now - this.firstVideoAt) * (this.receipt.transferSpeed ?? 1);
     if (!this.fullClip && this.opts.expectedMs !== undefined && coverageMs > this.opts.expectedMs) {
       this.droppedAfterCutoff++;
       this.receipt.droppedAfterCutoff = Math.min(65535, this.droppedAfterCutoff);
@@ -852,12 +872,17 @@ export class EventPlaybackCandidate {
         if (h.segment === this.segments[0]) {
           this.download.value.ackReceived = true;
           this.download.value.ackStatus = frame.readInt32LE(16);
-          this.receipt.startAcknowledged = true;
+          this.receipt.startAcknowledged = this.download.value.ackStatus === 0;
           this.mark("startAcknowledgedMs");
+          if (!this.receipt.startAcknowledged) this.end("start_refused");
         } else if (h.segment === this.segments[3]) {
           this.download.value.cancelAckReceived = true;
           this.download.value.cancelAckStatus = frame.readInt32LE(16);
         }
+      }
+      if (!this.finalized && this.download.value.terminalStatus) {
+        this.mark("eofStatusMs");
+        this.end("eof");
       }
       return false;
     }

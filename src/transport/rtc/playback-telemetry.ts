@@ -6,7 +6,7 @@ export interface PlaybackExperiment {
   playType: 1;
   clientType: "WEB";
   icePolicy?: "relay" | "all";
-  maxClips: number;
+  maxClips?: number;
 }
 
 /** Validate again at the transport boundary; arbitrary keys never reach the wire or receipts. */
@@ -21,9 +21,8 @@ export function playbackExperiment(value: unknown): PlaybackExperiment | undefin
     v.playType !== 1 ||
     v.clientType !== "WEB" ||
     (v.icePolicy !== undefined && v.icePolicy !== "relay" && v.icePolicy !== "all") ||
-    !Number.isInteger(v.maxClips) ||
-    (v.maxClips as number) < 1 ||
-    (v.maxClips as number) > 5
+    (v.maxClips !== undefined &&
+      (!Number.isSafeInteger(v.maxClips) || (v.maxClips as number) < 1 || (v.maxClips as number) > 5))
   )
     throw new RangeError("Playback experiment invalid");
   return {
@@ -32,7 +31,7 @@ export function playbackExperiment(value: unknown): PlaybackExperiment | undefin
     playType: 1,
     clientType: "WEB",
     ...(v.icePolicy === undefined ? {} : { icePolicy: v.icePolicy }),
-    maxClips: v.maxClips as number,
+    ...(v.maxClips === undefined ? {} : { maxClips: v.maxClips as number }),
   };
 }
 

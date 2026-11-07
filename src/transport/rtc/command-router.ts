@@ -99,6 +99,7 @@ import {
   type PlaybackAdmissionGate,
 } from "./event-playback-candidate.js";
 import { PlaybackIngress } from "./playback-ingress.js";
+import { downloadCaptureMs } from "./event-download-experiment.js";
 import {
   CATALOG_MIN_ATTEMPT_MS,
   CATALOG_TIMEOUT_MS,
@@ -1666,6 +1667,7 @@ export class RtcCommandRouter {
         file?: (data: Buffer) => void;
         mediaReady?: (receipt: PlaybackReceipt) => void;
         experiment?: import("./playback-telemetry.js").PlaybackExperiment;
+        transferSpeed?: 1 | 2;
         timelineOriginMs?: number;
       };
       signal?: AbortSignal;
@@ -1689,7 +1691,7 @@ export class RtcCommandRouter {
     this.preemptRecordingReads(stationSn);
     const download = opts.clip?.experiment?.mode === "download";
     const captureMs = download
-      ? 20000
+      ? downloadCaptureMs(opts.clip!.selector.expectedMs)
       : opts.clip
         ? Math.min(2147452647, opts.clip.selector.expectedMs * 3 + 15000)
         : 8000;
@@ -1725,6 +1727,7 @@ export class RtcCommandRouter {
     const candidate = new EventPlaybackCandidate({
       nativeMessage: opts.nativeMessage,
       experiment: opts.clip?.experiment,
+      transferSpeed: opts.clip?.transferSpeed,
       timelineOriginMs: opts.clip?.timelineOriginMs,
       timeZone: this.deps.recordingTimeZone,
       transient: !!opts.clip,

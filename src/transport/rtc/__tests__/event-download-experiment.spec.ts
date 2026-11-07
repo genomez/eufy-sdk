@@ -19,7 +19,7 @@ afterEach(() => {
 });
 const experiment = { mode: "download", playSpeed: 1, playType: 1, clientType: "WEB", maxClips: 1 } as const;
 
-function fixture(options: { file?: (b: Buffer) => void; ack?: number; send?: boolean } = {}) {
+function fixture(options: { file?: (b: Buffer) => void; ack?: number; send?: boolean; expectedMs?: number } = {}) {
   vi.useFakeTimers();
   vi.spyOn(nativePerformance, "now").mockImplementation(() => performance.now());
   const controller = new AbortController(),
@@ -35,8 +35,9 @@ function fixture(options: { file?: (b: Buffer) => void; ack?: number; send?: boo
     account: "account-synthetic",
     video,
     file,
+    expectedMs: options.expectedMs,
     signal: controller.signal,
-    deadlineMs: performance.now() + 36000,
+    deadlineMs: performance.now() + 136000,
     continuous: () => true,
     startAllowed: () => true,
     marker: () => {
@@ -58,6 +59,62 @@ function fixture(options: { file?: (b: Buffer) => void; ack?: number; send?: boo
   const capture = candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
   return { candidate, capture, controller, sent, video, file, latch };
 }
+
+it("accepts flagged plain XZYH video on FILE and ends only on terminal download status", async () => {
+  const s = fixture();
+  const ack = Buffer.from(JSON.stringify({ cmd: 1024, payload: { code: 0 } }));
+  s.candidate.ingress.decoded(Buffer.concat([buildPortalHeader(1351, ack.length, 0, 1), ack]), 3);
+  const body = Buffer.alloc(22);
+  const data = Buffer.from([0, 0, 0, 1, 0x67, 0x64, 0, 0x28]);
+  body.writeUInt32LE(data.length);
+  const raw = Buffer.concat([buildPortalHeader(1300, body.length + data.length, 0, 1), body, data]);
+  for (const p of packetize(raw, { channel: 3, frameId: 1, payloadBytes: 20 })) {
+    p.writeUInt16LE(p.readUInt16LE(18) | 0x0800, 18);
+    s.candidate.ingress.native(p);
+  }
+  await vi.advanceTimersByTimeAsync(25000);
+  expect(s.file.mock.calls.map(([b]) => b)).toEqual([raw]);
+  expect(s.sent).toHaveLength(1);
+  const status = Buffer.from(JSON.stringify({ cmd: 1024, payload: { cmd: 0, code: 0 } }));
+  s.candidate.ingress.decoded(Buffer.concat([buildPortalHeader(1351, status.length, 0, 1), status]), 3);
+  await s.capture;
+  expect(await s.candidate.observe()).toMatchObject({
+    captureOutcome: "eof",
+    boundedMediaObserved: false,
+    download: {
+      fileBytes: raw.length,
+      firstFileByteMs: 0,
+      lastFileByteMs: 0,
+      parsedFrameCount: 1,
+      codec: "h264",
+      terminalStatus: { command: 1351, innerCommand: 1024, subcommand: 0, state: null, code: 0 },
+    },
+  });
+});
+
+it("retains FILE data past a minute with a 3x catalog bound and reports native duration", async () => {
+  const s = fixture({ expectedMs: 40000 });
+  for (let i = 0; i < 80; i++) {
+    const body = Buffer.alloc(22);
+    const data = Buffer.from([0, 0, 0, 1, 0x67, 0x64, 0, 0x28]);
+    body.writeUInt32LE(data.length);
+    body.writeUInt32LE(i * 500, 14);
+    s.candidate.ingress.decoded(Buffer.concat([buildPortalHeader(1300, 22 + data.length, 0, 1), body, data]), 2);
+    if (i < 79) await vi.advanceTimersByTimeAsync(1000);
+  }
+  expect(s.sent).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(41000);
+  await s.capture;
+  expect(await s.candidate.observe()).toMatchObject({
+    captureOutcome: "capped",
+    download: { parsedFrameCount: 80, mediaDurationMs: 40000, firstFileByteMs: 0, lastFileByteMs: 79000 },
+  });
+});
+
+it.each(["playback", "download"] as const)("accepts %s experiments with no run limit", (mode) => {
+  const { maxClips: _max, ...unlimited } = experiment;
+  expect(playbackExperiment({ ...unlimited, mode })).toEqual({ ...unlimited, mode });
+});
 
 it("builds the exact public portal record and cancel JSON with fresh header segments", () => {
   const packet = downloadRequest("account-synthetic", 40, "camera-synthetic", 6, 1234567890000, 11);
@@ -112,17 +169,17 @@ it("reuses reserved playback selectors without reuse during owner lifetime and g
   expect(b).toBeGreaterThan(a);
 });
 
-it.each([0, -7])("captures a correlated ACK status %s, waits at most 20 seconds and cancels once", async (ack) => {
+it.each([0, -7])("captures ACK status %s, bounds capture at 60 seconds and cancels once", async (ack) => {
   const s = fixture({ ack });
-  await vi.advanceTimersByTimeAsync(19999);
-  expect(s.sent).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(59999);
+  expect(s.sent).toHaveLength(ack === 0 ? 1 : 2);
   await vi.advanceTimersByTimeAsync(1);
   await s.capture;
   s.candidate.finalize();
   const r = await s.candidate.observe(true);
   expect(r).toMatchObject({
     mode: "download",
-    captureOutcome: "capped",
+    captureOutcome: ack === 0 ? "capped" : "start_refused",
     boundedMediaObserved: false,
     accepted: false,
     latchRetained: true,
@@ -136,7 +193,7 @@ it.each([0, -7])("captures a correlated ACK status %s, waits at most 20 seconds 
   expect(vi.getTimerCount()).toBe(0);
 });
 
-it("caps raw FILE evidence at exactly 16 MiB and never sends it to video", async () => {
+it("caps raw FILE evidence at exactly 256 MiB and never sends it to video", async () => {
   const s = fixture();
   s.candidate.ingress.decoded(Buffer.alloc(DOWNLOAD_EXPERIMENT_BYTES + 100), 2);
   await s.capture;
