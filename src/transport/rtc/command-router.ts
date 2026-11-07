@@ -1663,6 +1663,7 @@ export class RtcCommandRouter {
         scope: RecordingReadScope;
         selector: InternalPlaybackSelector;
         video: (data: Buffer) => void;
+        file?: (data: Buffer) => void;
         mediaReady?: (receipt: PlaybackReceipt) => void;
         experiment?: import("./playback-telemetry.js").PlaybackExperiment;
         timelineOriginMs?: number;
@@ -1686,7 +1687,12 @@ export class RtcCommandRouter {
       recordingAdmission = this.recordingGate(opts.clip.scope, false, false, true);
     }
     this.preemptRecordingReads(stationSn);
-    const captureMs = opts.clip ? Math.min(2147452647, opts.clip.selector.expectedMs * 3 + 15000) : 8000;
+    const download = opts.clip?.experiment?.mode === "download";
+    const captureMs = download
+      ? 20000
+      : opts.clip
+        ? Math.min(2147452647, opts.clip.selector.expectedMs * 3 + 15000)
+        : 8000;
     const timeout = opts.timeoutMs ?? (opts.clip ? captureMs + 16000 : 24000);
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > (opts.clip ? 2147483647 : 24000))
       throw new RangeError("Playback deadline invalid");
@@ -1725,6 +1731,8 @@ export class RtcCommandRouter {
       captureMs,
       expectedMs: opts.clip?.selector.expectedMs,
       video: opts.clip?.video,
+      file: opts.clip?.file,
+      camera: opts.clip?.selector.cameraSn,
       deadlineMs,
       continuous,
       startAllowed,
@@ -1935,7 +1943,8 @@ export class RtcCommandRouter {
         this.release(stationSn, st);
       } finally {
         clipFinished = true;
-        if (opts.clip && clipUnresolved) void this.reconnectPlayback(stationSn, st);
+        if (opts.clip && (clipUnresolved || (download && candidate.receipt.startAttempted)))
+          void this.reconnectPlayback(stationSn, st);
         finishPlayback();
       }
     }

@@ -9,6 +9,13 @@ import { buildPortalPacket, parsePortalHeader, PortalLinkType } from "./portal-p
 import { PlaybackIngress, type PlaybackIngressEvidence } from "./playback-ingress.js";
 import { isHevcKeyframe } from "./live.js";
 import { performance } from "node:perf_hooks";
+import {
+  DownloadEvidence,
+  downloadRequest,
+  nextDownloadId,
+  DOWNLOAD_EXPERIMENT_BYTES,
+  DOWNLOAD_EXPERIMENT_MS,
+} from "./event-download-experiment.js";
 
 export type CaptureOutcome =
   | "not_admitted"
@@ -70,6 +77,8 @@ export type PlaybackAdmissionGate = (typeof PLAYBACK_ADMISSION_GATES)[number];
 export type PlaybackCompletenessFailure =
   "none" | "random_access" | "frames" | "span" | "gap" | "density" | "truncated";
 export interface PlaybackReceipt extends PlaybackIngressEvidence {
+  mode?: "playback" | "download";
+  download?: DownloadEvidence["value"];
   timeline?: Partial<
     Record<
       | "admissionGrantedMs"
@@ -245,6 +254,14 @@ export class EventPlaybackCandidate {
   private readonly started = performance.now();
   private readonly frameTiming = new PlaybackFrameTiming();
   private readonly nativeFrameTiming = new PlaybackNativeFrameTiming();
+  private readonly download = new DownloadEvidence();
+  private downloadId?: number;
+  private downloadDeadline = Number.POSITIVE_INFINITY;
+
+  /** Only an explicit validated experiment selects the FILE evidence path. */
+  get downloadMode(): boolean {
+    return this.receipt.experiment?.mode === "download";
+  }
 
   /** Monotonic offsets only; an event is retained once. */
   mark(event: keyof NonNullable<PlaybackReceipt["timeline"]>): void {
@@ -283,6 +300,8 @@ export class EventPlaybackCandidate {
       expectedMs?: number;
       transient?: boolean;
       video?: (data: Buffer) => void;
+      file?: (data: Buffer) => void;
+      camera?: string;
       continuous: () => boolean;
       startAllowed: () => boolean;
       send: (packet: Buffer) => boolean;
@@ -296,6 +315,8 @@ export class EventPlaybackCandidate {
     },
   ) {
     const experiment = playbackExperiment(opts.experiment);
+    if (experiment?.mode === "download" && (!opts.transient || !opts.file || !opts.camera))
+      throw new RangeError("Download experiment requires a clip evidence sink");
     this.ingress = new PlaybackIngress({
       streaming: opts.video
         ? { durationMs: opts.captureMs ?? 8000, frameLimit: Math.ceil(((opts.captureMs ?? 8000) * 256) / 1000) }
@@ -304,6 +325,12 @@ export class EventPlaybackCandidate {
       end: (reason) => this.end(reason),
       media: (frame, timing) => this.media(frame, timing),
       control: (frame, link) => this.control(frame, link),
+      ...(experiment?.mode === "download" && {
+        packet: (channel: number, bytes: number) => this.download.packet(channel, bytes),
+        file: (frame: Buffer) => this.file(frame),
+        frame: (frame: Buffer, link: number) =>
+          this.download.add(frame, link, Math.max(0, Math.round(performance.now() - this.started))),
+      }),
       liveAllowed: opts.liveAllowed,
       late: () => {
         if (this.lateLatched) return;
@@ -314,6 +341,8 @@ export class EventPlaybackCandidate {
       },
     });
     this.receipt = {
+      mode: experiment?.mode ?? "playback",
+      ...(experiment?.mode === "download" && { download: this.download.value }),
       ...(experiment && { experiment }),
       timeline: {},
       stationStatusCounts: [],
@@ -429,10 +458,16 @@ export class EventPlaybackCandidate {
         this.opts.signal.addEventListener("abort", abort, { once: true });
         timer = setTimeout(
           () => this.end("capped"),
-          Math.max(0, Math.min(this.opts.captureMs ?? 8000, this.opts.deadlineMs - performance.now() - 7000)),
+          Math.max(
+            0,
+            Math.min(
+              this.downloadMode ? DOWNLOAD_EXPERIMENT_MS : (this.opts.captureMs ?? 8000),
+              this.opts.deadlineMs - performance.now() - 7000,
+            ),
+          ),
         );
         noMedia = setTimeout(() => {
-          if (!this.receipt.videoFrames) this.end("no_media");
+          if (!this.downloadMode && !this.receipt.videoFrames) this.end("no_media");
         }, 5000);
         try {
           this.persistLatch(true);
@@ -452,6 +487,10 @@ export class EventPlaybackCandidate {
           }
           const segment = this.opts.segment();
           this.segments[0] = segment;
+          if (this.downloadMode) {
+            this.downloadId = nextDownloadId();
+            this.downloadDeadline = performance.now() + DOWNLOAD_EXPERIMENT_MS;
+          }
           this.ingress.capturing = true;
           this.receipt.startAttempted = true;
           this.mark("startSentMs");
@@ -459,15 +498,24 @@ export class EventPlaybackCandidate {
           this.receipt.cessationOutcome = "cessation_unknown";
           if (
             !this.opts.send(
-              playbackRequest(
-                this.opts.account,
-                selection.record,
-                selectors[0],
-                0,
-                segment,
-                selection.begin,
-                this.receipt.experiment,
-              ),
+              this.downloadMode
+                ? downloadRequest(
+                    this.opts.account,
+                    selection.record,
+                    this.opts.camera!,
+                    selectors[0],
+                    this.downloadId!,
+                    segment,
+                  )
+                : playbackRequest(
+                    this.opts.account,
+                    selection.record,
+                    selectors[0],
+                    0,
+                    segment,
+                    selection.begin,
+                    this.receipt.experiment,
+                  ),
             )
           ) {
             delete this.receipt.timeline?.startSentMs;
@@ -495,6 +543,29 @@ export class EventPlaybackCandidate {
     this.finalized = true;
     this.ingress.finishCapture();
     if (!this.receipt.startAttempted || !this.selection || this.startSelector === undefined) return;
+    if (this.downloadMode) {
+      this.download.value.cancelAttempted = true;
+      this.receipt.stopAttempted = true;
+      if (this.opts.continuous() && performance.now() < this.opts.deadlineMs) {
+        try {
+          const segment = this.opts.segment();
+          this.segments[3] = segment;
+          this.receipt.stopSent = this.download.value.cancelSent = this.opts.send(
+            downloadRequest(
+              this.opts.account,
+              this.selection.record,
+              this.opts.camera!,
+              this.startSelector,
+              this.downloadId!,
+              segment,
+              true,
+            ),
+          );
+        } catch {}
+      }
+      this.ingress.quarantine();
+      return;
+    }
     for (const sub of [1, 3] as const) {
       if (!this.opts.continuous() || performance.now() >= this.opts.deadlineMs) continue;
       if (sub === 1) this.receipt.pauseAttempted = true;
@@ -525,6 +596,13 @@ export class EventPlaybackCandidate {
   async observe(retireAtEof = false): Promise<PlaybackReceipt> {
     try {
       this.finalize();
+      if (this.downloadMode) {
+        Object.assign(this.receipt, this.ingress.evidence);
+        this.receipt.ownerContinuous = this.opts.continuous();
+        this.receipt.elapsedMs = Math.max(0, Math.round(performance.now() - this.started));
+        this.ingress.quarantine();
+        return { ...this.receipt };
+      }
       const deadline = this.opts.video
         ? Math.min(this.opts.deadlineMs, performance.now() + 16000)
         : this.opts.deadlineMs;
@@ -686,7 +764,29 @@ export class EventPlaybackCandidate {
     return this.retainedMediaFailure() === "none";
   }
 
+  /** Retains at most the remaining FILE budget, before mandatory cancel and owner retirement. */
+  private file(frame: Buffer): void {
+    if (this.finalized || !this.ingress.capturing) return;
+    if (performance.now() >= this.downloadDeadline) {
+      this.end("capped");
+      return;
+    }
+    const remaining = DOWNLOAD_EXPERIMENT_BYTES - this.download.value.fileBytes;
+    const bytes = frame.subarray(0, remaining);
+    try {
+      if (bytes.length) this.opts.file!(bytes);
+      this.download.value.fileBytes += bytes.length;
+      if (this.download.value.fileBytes >= DOWNLOAD_EXPERIMENT_BYTES) this.end("capped");
+    } catch {
+      this.end("storage_failed");
+    }
+  }
+
   private media(frame: Buffer, timing?: { frameId: number; sequence: number }): void {
+    if (this.downloadMode) {
+      this.end("transport_mismatch");
+      return;
+    }
     const h = parsePortalHeader(frame)!;
     if (h.isResponse !== this.startSelector) {
       this.ingress.invalidMedia("selector");
@@ -740,6 +840,27 @@ export class EventPlaybackCandidate {
   private control(frame: Buffer, link: number): boolean {
     const h = parsePortalHeader(frame);
     if (!h || !this.opts.continuous()) return true;
+    if (this.downloadMode) {
+      if (
+        link === PortalLinkType.COMMAND &&
+        h.commandId === 1350 &&
+        h.channel === 255 &&
+        h.isResponse === 1 &&
+        h.paramLength + 16 === frame.length &&
+        h.paramLength >= 4
+      ) {
+        if (h.segment === this.segments[0]) {
+          this.download.value.ackReceived = true;
+          this.download.value.ackStatus = frame.readInt32LE(16);
+          this.receipt.startAcknowledged = true;
+          this.mark("startAcknowledgedMs");
+        } else if (h.segment === this.segments[3]) {
+          this.download.value.cancelAckReceived = true;
+          this.download.value.cancelAckStatus = frame.readInt32LE(16);
+        }
+      }
+      return false;
+    }
     if (h.commandId === 1700 && link === PortalLinkType.COMMAND && h.channel === 255 && h.isResponse === 1) {
       const sub = ([0, 1, 3] as const).find((sub) => this.segments[sub] === h.segment);
       if (sub === undefined) {

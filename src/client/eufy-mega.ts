@@ -1121,6 +1121,7 @@ export class EufyMega extends EventEmitter {
     opts: {
       signal?: AbortSignal;
       video: (data: Buffer) => void;
+      file?: (data: Buffer) => void;
       beforeDispatch?: () => void;
       mediaReady?: (receipt: import("../transport/rtc/event-playback-candidate.js").PlaybackReceipt) => void;
       experiment?: import("../transport/rtc/playback-telemetry.js").PlaybackExperiment;
@@ -1148,6 +1149,7 @@ export class EufyMega extends EventEmitter {
         scope,
         selector,
         video: opts.video,
+        file: opts.file,
         mediaReady: opts.mediaReady,
         experiment: opts.experiment,
         timelineOriginMs: opts.timelineOriginMs,

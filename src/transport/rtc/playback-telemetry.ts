@@ -1,6 +1,7 @@
 import { parseVideoFrameHeader } from "../p2p/video.js";
 /** Explicitly experimental command values; unsupported protocol alternatives are excluded. */
 export interface PlaybackExperiment {
+  mode?: "playback" | "download";
   playSpeed: 1 | 2 | 4 | 8;
   playType: 1;
   clientType: "WEB";
@@ -14,7 +15,8 @@ export function playbackExperiment(value: unknown): PlaybackExperiment | undefin
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RangeError("Playback experiment invalid");
   const v = value as Record<string, unknown>;
   if (
-    Object.keys(v).some((k) => !["playSpeed", "playType", "clientType", "icePolicy", "maxClips"].includes(k)) ||
+    Object.keys(v).some((k) => !["mode", "playSpeed", "playType", "clientType", "icePolicy", "maxClips"].includes(k)) ||
+    (v.mode !== undefined && v.mode !== "playback" && v.mode !== "download") ||
     ![1, 2, 4, 8].includes(v.playSpeed as number) ||
     v.playType !== 1 ||
     v.clientType !== "WEB" ||
@@ -25,6 +27,7 @@ export function playbackExperiment(value: unknown): PlaybackExperiment | undefin
   )
     throw new RangeError("Playback experiment invalid");
   return {
+    ...(v.mode === undefined ? {} : { mode: v.mode }),
     playSpeed: v.playSpeed as PlaybackExperiment["playSpeed"],
     playType: 1,
     clientType: "WEB",

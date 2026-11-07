@@ -242,6 +242,9 @@ export class PlaybackIngress implements RtcIngressGuard {
       end: (reason: "capped" | "capped_wrong_route" | "transport_mismatch" | "invalid_media") => void;
       media: (frame: Buffer, timing?: { frameId: number; sequence: number }) => void;
       control?: (frame: Buffer, link: number) => boolean;
+      file?: (frame: Buffer) => void;
+      frame?: (frame: Buffer, link: number) => void;
+      packet?: (channel: number, bytes: number) => void;
       late?: () => void;
       observeOnly?: boolean;
       liveAllowed?: () => boolean;
@@ -249,9 +252,14 @@ export class PlaybackIngress implements RtcIngressGuard {
     },
   ) {
     this.assembler = new PtcsReassembler(
-      (frame, _channel, timing) => {
+      (frame, channel, timing) => {
         this.releaseReservation(this.completingId);
-        this.complete(frame, timing);
+        if (channel === 3 && this.opts.file) {
+          if (this.capturing && !this.evidence.cutoff) {
+            this.opts.frame?.(frame, PortalLinkType.FILE);
+            this.opts.file(frame);
+          }
+        } else this.complete(frame, timing);
       },
       {
         maxFrameBytes: PLAYBACK_FRAME_BYTES,
@@ -418,6 +426,7 @@ export class PlaybackIngress implements RtcIngressGuard {
       return true;
     }
     const h = parsePtcsHeader(binary);
+    if (h && this.capturing) this.opts.packet?.(h.channel, binary.length);
     if (h?.channel === 4) this.mediaTrafficObserved = true;
     if (this.opts.observeOnly && h?.channel === 4) {
       this.poison("playback_link", PortalLinkType.PLAYBACK, h.index === 0 && h.last ? binary.subarray(28) : undefined);
@@ -462,7 +471,7 @@ export class PlaybackIngress implements RtcIngressGuard {
       declaredSize: h.frameLength,
       compressionState: binary.readUInt16LE(18) & 0x0800 ? "flagged" : "uncompressed",
     };
-    if (h.channel !== 4) {
+    if (h.channel !== 4 && !(h.channel === 3 && this.opts.file)) {
       this.currentControlKey = `${h.channel}:${h.frameId}`;
       if (h.index !== 0 || !h.last) {
         this.plausible();
@@ -474,6 +483,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     }
     this.plausible();
     this.nonControlTraffic = true;
+    if (h.channel === 3 && this.opts.file && !this.capturing) return false;
     if (!this.capturing) {
       if (!this.tombstone) return false;
       if (h.index !== 0 || !h.last) return this.lateUnknown("invalid_media");
@@ -529,7 +539,7 @@ export class PlaybackIngress implements RtcIngressGuard {
               ? "limits"
               : "extent",
       );
-    const frameKey = `${h.frameId}:${h.sequence}`;
+    const frameKey = h.channel === 3 ? `${h.channel}:${h.frameId}` : `${h.channel}:${h.frameId}:${h.sequence}`;
     let reservation = this.assemblies.get(frameKey);
     if (!reservation) {
       // The station sets 0x0800 on plain portal frames here too. A first fragment that starts with the
@@ -619,6 +629,11 @@ export class PlaybackIngress implements RtcIngressGuard {
   /** Well-formed LIVE media uses a distinct link from playback, independent of live target attribution. */
   decoded(frame: Buffer, link: number): boolean {
     if (link !== PortalLinkType.PLAYBACK && this.currentControlKey) this.controlPartials.delete(this.currentControlKey);
+    if (this.capturing) this.opts.frame?.(frame, link);
+    if (link === PortalLinkType.FILE && this.opts.file) {
+      if (this.capturing) this.opts.file(frame);
+      return false;
+    }
     if (this.tombstone && link === PortalLinkType.PLAYBACK) {
       this.lateFrame(frame, true);
       return false;
@@ -682,6 +697,7 @@ export class PlaybackIngress implements RtcIngressGuard {
       return;
     }
     if (!this.capturing || this.evidence.cutoff) return;
+    this.opts.frame?.(frame, PortalLinkType.PLAYBACK);
     const h = parsePortalHeader(frame);
     if (h) this.countIngress(h.commandId);
     if (

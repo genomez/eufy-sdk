@@ -210,6 +210,93 @@ const options = () => ({
   fresh: () => true,
 });
 
+it.each(["time", "bytes", "abort", "live"] as const)(
+  "armed download uses clip authority and always replaces after %s cutoff",
+  async (bound) => {
+    const { router, session, sessions, marker } = await fixture();
+    const clip = sealedClip(router, session),
+      file = vi.fn(),
+      mediaReady = vi.fn(),
+      controller = new AbortController();
+    const before = session.sent.length;
+    const pending = router.readEventPlaybackCandidate(station, {
+      ...options(),
+      signal: controller.signal,
+      clip: {
+        ...clip,
+        file,
+        mediaReady,
+        experiment: { mode: "download", playSpeed: 1, playType: 1, clientType: "WEB", maxClips: 1 },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    const start = session.sent.slice(before).find((p) => parsePortalHeader(p)!.commandId === 1350)!;
+    expect(JSON.parse(start.subarray(16).toString())).toMatchObject({
+      cmd: 1024,
+      payload: { streamId: 6, recordIds: [{ record_id: clip.selector.record, device_sn: clip.selector.cameraSn }] },
+    });
+    expect(session.sent.slice(before).some((p) => parsePortalHeader(p)!.commandId === 1700)).toBe(false);
+    if (bound === "bytes") {
+      for (let i = 0; i < 4; i++)
+        for (const p of packetize(Buffer.alloc(4 * 1024 * 1024), { channel: 3, frameId: ++session.counter }))
+          session.inject(p);
+    } else if (bound === "abort") controller.abort();
+    const live = bound === "live" ? router.mediaProviderFor(camera).live!() : undefined;
+    await vi.advanceTimersByTimeAsync(bound === "time" ? 20010 : 10);
+    const receipt = await pending;
+    expect(receipt).toMatchObject({
+      mode: "download",
+      captureOutcome: bound === "abort" || bound === "live" ? "preempted" : "capped",
+      boundedMediaObserved: false,
+      reconnectOutcome: "connected",
+      download: {
+        ackReceived: true,
+        ackStatus: 0,
+        cancelAttempted: true,
+        cancelSent: true,
+        fileBytes: bound === "bytes" ? 16 * 1024 * 1024 : 0,
+      },
+    });
+    const commands = session.sent.slice(before).filter((p) => parsePortalHeader(p)!.commandId === 1350);
+    expect(commands).toHaveLength(2);
+    expect(JSON.parse(commands[1]!.subarray(16).toString())).toMatchObject({
+      cmd: 1024,
+      payload: { cmd: 0, backupPath: "abcd" },
+    });
+    expect(sessions).toHaveLength(2);
+    expect(session.isConnected).toBe(false);
+    expect(router.getPlaybackSafetyDiagnostics().reconnect.attempts).toBe(1);
+    expect(mediaReady).not.toHaveBeenCalled();
+    expect(marker).toEqual([]);
+    if (live) {
+      const consumer = await live;
+      expect(Reflect.get(router, "lives").get(station).live).toBeDefined();
+      expect(Reflect.get(router, "sessions").get(station).session).toBe(sessions[1]);
+      consumer.stop();
+    }
+  },
+);
+
+it("download refuses invalid sealed selection and unsafe admission without dispatch or replacement", async () => {
+  const { router, session, sessions } = await fixture();
+  const clip = {
+    ...sealedClip(router, session),
+    file: vi.fn(),
+    experiment: { mode: "download", playSpeed: 1, playType: 1, clientType: "WEB", maxClips: 1 } as const,
+  };
+  const before = session.sent.length;
+  await expect(
+    router.readEventPlaybackCandidate(station, {
+      ...options(),
+      clip: { ...clip, selector: { ...clip.selector, record: clip.selector.record + 1 } },
+    }),
+  ).rejects.toMatchObject({ reason: "not_found" });
+  const receipt = await router.readEventPlaybackCandidate(station, { ...options(), enabled: false, clip });
+  expect(receipt).toMatchObject({ mode: "download", admissionGateName: "disabled", startAttempted: false });
+  expect(session.sent).toHaveLength(before);
+  expect(sessions).toHaveLength(1);
+});
+
 it("exact sealed clip bypasses newest selection and returns typed video after clean release", async () => {
   const { router, session, marker } = await fixture();
   const scope = {
