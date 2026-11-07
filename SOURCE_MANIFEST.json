@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "version": "0.2.1-s1.experimental.12",
   "status": "local-build-unpublished",
-  "exactInputCommit": "d93a53e3da1fcf0c007a8d31a852e68e25bcf8cf",
+  "exactInputCommit": "453e75807fde585c292993f25960238f2f02e253",
   "files": {
     ".editorconfig": {
       "bytes": 505,
@@ -2077,8 +2077,8 @@
       "sha256": "c60514b7f5b7e824e94ee39af4a8260b75c203945d3e92ff36e3fbe1bc65ae0a"
     },
     "src/transport/rtc/__tests__/playback-transfer-speed.spec.ts": {
-      "bytes": 6789,
-      "sha256": "34e70147ccce9fc535ef1be0359c6a14fcf4206690701f833e426380c20f9597"
+      "bytes": 6885,
+      "sha256": "24dc2c7eeeafc8c19bcbc4c194051dac8185d23981c5a571af53ae14983ff84e"
     },
     "src/transport/rtc/__tests__/portal-packet.spec.ts": {
       "bytes": 5465,
@@ -2237,8 +2237,8 @@
       "sha256": "0a332c2a5c839e60436020360e0650fa85f64cff12ff17fc8f09151947594f76"
     },
     "src/transport/rtc/playback-telemetry.ts": {
-      "bytes": 6679,
-      "sha256": "b18cdb30508626399c8a50d88eca22d5f8f83933cc9c2dae904cd216454830e1"
+      "bytes": 6953,
+      "sha256": "16ed0d97a55d309da63be3dc846aa7d8500cca069e4f2ea53366e44f8c7d7122"
     },
     "src/transport/rtc/portal-keepalive.ts": {
       "bytes": 334,
