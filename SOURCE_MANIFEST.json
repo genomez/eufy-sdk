@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "version": "0.2.1-s1.experimental.12",
   "status": "local-build-unpublished",
-  "exactInputCommit": "4638c5d9d6da6507e64587d854bf6b1ec3e261fd",
+  "exactInputCommit": "8836af78b7b6a2e996e7e6d44cc4d6baa7ace153",
   "files": {
     ".editorconfig": {
       "bytes": 505,
@@ -49,8 +49,8 @@
       "sha256": "95b791c3b452823fe2b67de33893e4d0edc96ef6e2ce548ae78129c0f1a6ced5"
     },
     "MODIFICATIONS.md": {
-      "bytes": 71525,
-      "sha256": "3f47e256bd66f438d200efa61478fd39580dc992852cd2137d60f6ce7bd08fb1"
+      "bytes": 71540,
+      "sha256": "d4347e114f5b766b10c0938f4e95b7c21353cc12a07a2f0e076f39c6d73f6a4d"
     },
     "PUBLICATION.json": {
       "bytes": 378,
@@ -109,8 +109,8 @@
       "sha256": "36871afa8b444f827836d1523340d80e25c7c5db7d0b9bbe2e138b63ef0662ac"
     },
     "docs/recordings-sdk.md": {
-      "bytes": 7832,
-      "sha256": "65664e8e1c83e7df9bb788d53170188b83482713c84bbe1ac3f4d9f79a401ea0"
+      "bytes": 9879,
+      "sha256": "9706c353521ac0b0f80bbd3f204ff6fb3a1c02647681e5e6e5271fea603a8904"
     },
     "docs/recordings-validation.md": {
       "bytes": 7181,
@@ -525,8 +525,8 @@
       "sha256": "5f15db7ef632ca01a1481a8c2fd0178674828633c39e0c0a5b6d3ea4f059ba31"
     },
     "src/client/eufy-mega.ts": {
-      "bytes": 205077,
-      "sha256": "a3cee8b6c8da2dadb5136f91bba738bdc1ee1b66f6123090327aa6236fab57a8"
+      "bytes": 205293,
+      "sha256": "f5b166219cd6e59835a006312684195830b3089b89465de8ad14d1b2c3c4520a"
     },
     "src/client/event-routing-diagnostics.ts": {
       "bytes": 4448,
@@ -569,8 +569,8 @@
       "sha256": "668020631c2d45adafdec04cccf6f66f75906707129abb6fb59822a0271e35d0"
     },
     "src/client/types.ts": {
-      "bytes": 25603,
-      "sha256": "cd635d4d3007f189af11ca4044cfe56c4069f6aeae4a5b8aacb6a85a3f96b308"
+      "bytes": 25719,
+      "sha256": "97ffea3a901ea0c42a5893bccb02f454b55a228138251aa646c79f7f4d1bafdb"
     },
     "src/core/README.md": {
       "bytes": 2114,
@@ -1993,12 +1993,12 @@
       "sha256": "55666a784f3b972391367dc043da3ed8e1e76ff41cc2f06d0878df8f7e535796"
     },
     "src/transport/rtc/__tests__/event-playback-candidate.spec.ts": {
-      "bytes": 47534,
-      "sha256": "eac9f013d3fb22584750b4bff986f7fad85730eb18e3415bff6baaf4e594af58"
+      "bytes": 48456,
+      "sha256": "e5ebd250b10faac8fd3c54a3becd92154e04faf93f64f2f23eff5be561d376a3"
     },
     "src/transport/rtc/__tests__/event-playback-router.spec.ts": {
-      "bytes": 38108,
-      "sha256": "21bf7c33265470998c1dc4b7d9f296be48a66ba5c9af2aacb4d6f585e897e15d"
+      "bytes": 43655,
+      "sha256": "a039b90094982332df123591a5e21d6c3d2da77dc736974a70598e45613c8138"
     },
     "src/transport/rtc/__tests__/event-table-candidate.spec.ts": {
       "bytes": 27170,
@@ -2097,8 +2097,8 @@
       "sha256": "b3969545c7c842c622a4cfa6bc918af4ec68121e6314e8976152d5dbee734a6d"
     },
     "src/transport/rtc/__tests__/recording-clip.spec.ts": {
-      "bytes": 4993,
-      "sha256": "5b1eca33e5a235e169e88ac49d8f240cbee6ceb637c375f83ff784ff0f1302a5"
+      "bytes": 5558,
+      "sha256": "c34ea4097f61d0b3f200ec06dafc60a2d218b1ab2ebad93483fae147d0e3c355"
     },
     "src/transport/rtc/__tests__/recordings-arbitration.spec.ts": {
       "bytes": 15216,
@@ -2165,8 +2165,8 @@
       "sha256": "c52c4c0076830f3f671dd1fb2d383933bf254751b8cba6c5a8a0bee48fd71e73"
     },
     "src/transport/rtc/command-router.ts": {
-      "bytes": 151613,
-      "sha256": "ecbbeaf05fc61f4c023400bcb1e2ead99bdb604c65bb14e13431a046314c7a53"
+      "bytes": 152579,
+      "sha256": "8513d00a021c9b4cae276861f17f191eeba09e664a6cd38bfeecd19babc4611f"
     },
     "src/transport/rtc/command-transport-evidence.ts": {
       "bytes": 4845,
@@ -2185,8 +2185,8 @@
       "sha256": "2f349552d205a0887b9868fef31af3d416b8153836def44427e7d6008ccaee51"
     },
     "src/transport/rtc/event-playback-candidate.ts": {
-      "bytes": 28603,
-      "sha256": "e465c90b3e8daa4437bbfea5e2c569acbc0941ae924ec9096a9322de5b2b5edd"
+      "bytes": 28154,
+      "sha256": "602611de4ef8f3e5dbe391bda8704f2b37e42f519c0582cefa10b26d09189087"
     },
     "src/transport/rtc/event-table-candidate.ts": {
       "bytes": 7898,
@@ -2197,8 +2197,8 @@
       "sha256": "280b7eabbec32c797cc2455e732479624d52c53015966beac0ab444128f16432"
     },
     "src/transport/rtc/event-time.ts": {
-      "bytes": 2715,
-      "sha256": "20571a4f70798c40bd37c1a0c14958bf218a5eb25d3e5a9db79c52997b73bfd3"
+      "bytes": 3097,
+      "sha256": "02f5e32fb52c361a27c41302d54af4a7883f3167ca926b2fa16fb84b0152fe20"
     },
     "src/transport/rtc/framer.ts": {
       "bytes": 5488,
@@ -2241,8 +2241,8 @@
       "sha256": "5615eac801b325e4d068ceeaac814930000d386a9abb2a25ea1e625cab917c8d"
     },
     "src/transport/rtc/recordings.ts": {
-      "bytes": 19011,
-      "sha256": "38f8dbd2d1cdf426c31b0e9fddfddf1222a8e46fd233d6db7bf853e02f50f4e5"
+      "bytes": 19073,
+      "sha256": "fbdb96db199f30cd1d1cf3630901858741c8ab6be102b807e7733744fdd3145f"
     },
     "src/transport/rtc/renewal-diagnostics.ts": {
       "bytes": 5543,
