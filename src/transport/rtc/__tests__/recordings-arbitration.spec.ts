@@ -30,6 +30,31 @@ const selector = (id = 1) => {
 };
 
 describe("recording admission without station side effects", () => {
+  it("preserves cover spacing when a metadata read intervenes", async () => {
+    const f = await fixture();
+    const selected = selector();
+    const cover = f.router.readRecordingCover(scope, selected);
+    await sent(f.session);
+    f.session.notify({ file: selected.thumbPath, content: "/9j/2Q==" }, 1308);
+    expect((await cover).status).toBe("ok");
+    f.advance(2_000);
+    const catalog = f.router.readRecordingCatalog(scope);
+    await sent(f.session, 2);
+    f.session.table([row()]);
+    expect((await catalog).status).toBe("ok");
+    f.advance(2_999);
+    expect(await f.router.readRecordingCover(scope, selector(2))).toEqual({
+      status: "deferred",
+      reason: "quiet_period",
+    });
+    f.advance(1);
+    f.session.accept = false;
+    expect(await f.router.readRecordingCover(scope, selector(2))).toEqual({
+      status: "unavailable",
+      reason: "send_refused",
+    });
+  });
+
   it.each([false, true])("admits metadata two seconds after a cover, continuation %s", async (continuation) => {
     const f = await fixture();
     if (continuation) {
