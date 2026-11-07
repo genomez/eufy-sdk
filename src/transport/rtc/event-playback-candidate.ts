@@ -1,4 +1,4 @@
-import { chicagoInstant } from "./event-time.js";
+import { chicagoInstant, recordingTimeZone } from "./event-time.js";
 import { buildPortalPacket, parsePortalHeader, PortalLinkType } from "./portal-packet.js";
 import { PlaybackIngress, type PlaybackIngressEvidence } from "./playback-ingress.js";
 import { isHevcKeyframe } from "./live.js";
@@ -79,7 +79,8 @@ export interface PlaybackReceipt extends PlaybackIngressEvidence {
   healthOutcome: "clean" | "degraded";
   accepted: false;
   boundedMediaObserved: boolean;
-  timeBasis: "owner_accepted_America_Chicago";
+  timeBasis: "owner_accepted_station_timezone";
+  timeZone: string;
   timeUnique: boolean;
   beginTimeAcceptance: "unknown" | "accepted" | "refused";
   startAttempted: boolean;
@@ -120,7 +121,7 @@ export interface PlaybackReceipt extends PlaybackIngressEvidence {
 export { chicagoInstant } from "./event-time.js";
 
 /**
- * Descending record selectors define recency; clips must have unique times and end at least 60 seconds ago.
+ * Descending record selectors define recency; clips must have unique times and end at least 10 seconds ago.
  * Malformed rows and invalid or duplicate selectors refuse the entire table as time_invalid.
  * A time-valid but recent clip takes precedence over invalid times when no clip is selectable.
  */
@@ -129,6 +130,7 @@ export function selectPlayback(
   cameras: ReadonlySet<string>,
   excluded: ReadonlySet<string>,
   now = Date.now(),
+  timeZone = "America/Chicago",
 ):
   | { selectionOutcome: "selected"; record: number; begin: number }
   | { selectionOutcome: Exclude<PlaybackSelectionOutcome, "selected"> } {
@@ -146,10 +148,10 @@ export function selectPlayback(
   if (!eligible.length) return { selectionOutcome: "no_camera_rows" };
   let selectionOutcome: PlaybackSelectionOutcome = "time_invalid";
   for (const row of eligible.sort((a, b) => (b.record_id as number) - (a.record_id as number))) {
-    const begin = chicagoInstant(row.start_time),
-      end = chicagoInstant(row.end_time);
+    const begin = chicagoInstant(row.start_time, timeZone),
+      end = chicagoInstant(row.end_time, timeZone);
     if (begin === undefined || end === undefined || end < begin) continue;
-    if (end * 1000 > now - 60000) {
+    if (end * 1000 > now - 10000) {
       selectionOutcome = "end_not_past";
       continue;
     }
@@ -231,12 +233,13 @@ export class EventPlaybackCandidate {
   private firstVideoAt?: number;
   private lastVideoAt?: number;
   private maxVideoGapMs = 0;
-  /** Unsaturated count for the truncation check; the receipt carries a bounded projection. */
+  /** Non-streaming cutoff count; the receipt carries a bounded projection. */
   private droppedAfterCutoff = 0;
 
   constructor(
     private readonly opts: {
       deadlineMs: number;
+      timeZone?: string;
       captureMs?: number;
       expectedMs?: number;
       transient?: boolean;
@@ -284,7 +287,8 @@ export class EventPlaybackCandidate {
       healthOutcome: "degraded",
       accepted: false,
       boundedMediaObserved: false,
-      timeBasis: "owner_accepted_America_Chicago",
+      timeBasis: "owner_accepted_station_timezone",
+      timeZone: recordingTimeZone(opts.timeZone),
       timeUnique: false,
       beginTimeAcceptance: "unknown",
       startAttempted: false,
@@ -463,13 +467,19 @@ export class EventPlaybackCandidate {
     }
   }
 
-  async observe(): Promise<PlaybackReceipt> {
+  async observe(retireAtEof = false): Promise<PlaybackReceipt> {
     try {
       this.finalize();
       const deadline = this.opts.video
         ? Math.min(this.opts.deadlineMs, performance.now() + 16000)
         : this.opts.deadlineMs;
-      if (this.stoppedAt !== undefined) {
+      const retiringEof =
+        retireAtEof &&
+        this.fullClip &&
+        this.eofSeen &&
+        this.receipt.captureOutcome === "eof" &&
+        this.retainedMediaComplete();
+      if (this.stoppedAt !== undefined && !retiringEof) {
         while (performance.now() < deadline && this.opts.continuous()) {
           const complete = this.ingress.observationComplete();
           const quiet =
@@ -535,7 +545,7 @@ export class EventPlaybackCandidate {
       this.receipt.elapsedMs = Math.max(0, Math.round(performance.now() - this.started));
       const span = (this.lastVideoAt ?? 0) - (this.firstVideoAt ?? 0);
       if (this.fullClip && this.receipt.videoFrames >= 2 && span > 0)
-        this.receipt.mediaDurationMs = Math.round(span + span / (this.receipt.videoFrames - 1));
+        this.receipt.mediaDurationMs = Math.max(1, Math.round(span + span / (this.receipt.videoFrames - 1)));
       this.receipt.retainedVideoSpanMs = Math.max(0, Math.round(span));
       this.receipt.maxVideoGapMs = Math.max(0, Math.round(this.maxVideoGapMs));
       this.receipt.retainedVideoFrames = this.receipt.videoFrames;
@@ -595,25 +605,14 @@ export class EventPlaybackCandidate {
     const eof = this.eofSeen && this.receipt.captureOutcome === "eof";
     if (eof && !this.receipt.randomAccess) return "random_access";
     if (this.receipt.videoFrames < 2) return "frames";
-    if (eof ? span < Math.max(1000, this.opts.expectedMs * 0.4) : span <= 0 || span < this.opts.expectedMs - 250)
-      return "span";
-    if (eof && this.droppedAfterCutoff > Math.max(15, this.receipt.videoFrames * 0.1)) return "truncated";
-    // A correlated EOF whose untruncated arrival covers the event to within 1000 ms is complete
-    // regardless of arrival pauses; partial EOF coverage keeps the 3000 ms pause limit.
-    const fullEofCoverage = eof && span >= this.opts.expectedMs - 1000;
-    if (!fullEofCoverage && this.maxVideoGapMs > (eof ? 3000 : 1000)) return "gap";
+    if (eof) return span > 0 ? "none" : "span";
+    if (span <= 0 || span < this.opts.expectedMs - 250) return "span";
+    if (this.maxVideoGapMs > 1000) return "gap";
     if ((this.receipt.videoFrames - 1) * 1000 < span * 5) return "density";
     return "none";
   }
 
-  /**
-   * Duration completion requires retained arrival coverage within 250 ms of the requested end,
-   * no gap above 1000 ms, and at least five frame intervals per second.
-   * Correlated EOF permits bursty arrival gaps up to 3000 ms, retaining the keyframe start,
-   * two-frame minimum, 1000 ms/40% span floor and five-interval density floor.
-   * EOF rejects discarded tails above the larger of 15 frames or 10% of retained frames.
-   * Completion-margin frames are excluded; probes without a duration retain their observation contract.
-   */
+  /** EOF requires random access, two frames and positive span; other outcomes retain strict coverage checks. */
   private retainedMediaComplete(): boolean {
     return this.retainedMediaFailure() === "none";
   }
@@ -645,7 +644,7 @@ export class EventPlaybackCandidate {
     const now = performance.now();
     this.firstVideoAt ??= now;
     const coverageMs = now - this.firstVideoAt;
-    if (this.opts.expectedMs !== undefined && coverageMs > this.opts.expectedMs) {
+    if (!this.fullClip && this.opts.expectedMs !== undefined && coverageMs > this.opts.expectedMs) {
       this.droppedAfterCutoff++;
       this.receipt.droppedAfterCutoff = Math.min(65535, this.droppedAfterCutoff);
       if (coverageMs >= this.opts.expectedMs + 750 && this.retainedMediaComplete() && this.receipt.randomAccess)

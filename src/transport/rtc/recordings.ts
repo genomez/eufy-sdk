@@ -310,6 +310,7 @@ export function normalizeRecordingRows(
   scope: RecordingReadScope,
   identityKey = scope.identityKey,
   nowMs = Date.now(),
+  timeZone = "America/Chicago",
 ): CatalogReadResult {
   if (identityKey?.length !== 32) return { status: "unavailable", reason: "store_unavailable" };
   if (rows.length > CATALOG_QUERY_COUNT) return { status: "unavailable", reason: "invalid_reply" };
@@ -336,7 +337,7 @@ export function normalizeRecordingRows(
       continue;
     }
     ids.push(row.record_id);
-    const time = parseRecordingTime(row.start_time).atMs;
+    const time = parseRecordingTime(row.start_time, timeZone).atMs;
     if (time !== null) times.push(time);
   }
   const page: RecordingPage = {
@@ -386,7 +387,7 @@ export function normalizeRecordingRows(
     const previousStart = records.get(recordKey);
     if (previousStart && previousStart !== basis) diagnostics.identity_conflict++;
     records.set(recordKey, basis);
-    const start = parseRecordingTime(typeof row.start_time === "string" ? basis.slice(7) : row.start_time);
+    const start = parseRecordingTime(typeof row.start_time === "string" ? basis.slice(7) : row.start_time, timeZone);
     if (start.timeStatus !== "valid") {
       const shape =
         typeof row.start_time === "string"
@@ -401,7 +402,7 @@ export function normalizeRecordingRows(
       if (entry) entry.count++;
       else diagnostics.unknownStartTimeShapes.push({ shape, count: 1 });
     }
-    const end = parseRecordingTime(row.end_time);
+    const end = parseRecordingTime(row.end_time, timeZone);
     const duration = start.atMs !== null && end.atMs !== null ? (end.atMs - start.atMs) / 1000 : null;
     const durationSeconds = duration !== null && duration >= 0 && duration <= 86400 ? duration : null;
     const selector = validRecordingPath(row.thumb_path)

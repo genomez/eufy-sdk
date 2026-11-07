@@ -185,6 +185,7 @@ export interface RtcCommandRouterDeps {
   idleCloseMs?: number;
   /** Optional proactive replacement age; permits one health-gated retry. Zero disables replacement (default). */
   sessionRefreshMs?: number;
+  recordingTimeZone?: string;
   /** Raw command-session keepalive interval; zero or omitted disables it (default), otherwise 1–120 seconds. */
   commandKeepaliveMs?: number;
   onError?: (e: Error) => void;
@@ -1302,7 +1303,7 @@ export class RtcCommandRouter {
     )
       return "owner_unavailable";
     if (st.informationTainted || !st.lastInformationRead) return "owner_unhealthy";
-    if (performance.now() - st.connectedAtMonotonicMs < OWNER_OBSERVE_MS) return "observing";
+    if (performance.now() - st.connectedAtMonotonicMs < (foreground ? 5000 : OWNER_OBSERVE_MS)) return "observing";
     if (
       this.playbackActive() ||
       this.playbackUnresolved ||
@@ -1323,7 +1324,8 @@ export class RtcCommandRouter {
       st.refreshRetryAtMs ??
       ((this.deps.sessionRefreshMs ?? 0) ? st.connectedAtMs! + this.deps.sessionRefreshMs! : Infinity);
     const renewalMonotonic = st.refreshDueMonotonicMs ?? st.connectedAtMonotonicMs + (renewalEpoch - st.connectedAtMs!);
-    if (renewalMonotonic - performance.now() <= CATALOG_TIMEOUT_MS + RENEWAL_RESERVE_MS) return "renewal_due";
+    if (!foreground && renewalMonotonic - performance.now() <= CATALOG_TIMEOUT_MS + RENEWAL_RESERVE_MS)
+      return "renewal_due";
     this.pruneEventTableReplies();
     if (this.eventTableReplies.size + this.eventThumbReplies.size >= 16) return "reply_capacity";
     if (foreground) return;
@@ -1527,7 +1529,13 @@ export class RtcCommandRouter {
                   continuity,
                   observation,
                   (rows, envelopeValid) => {
-                    normalized = normalizeRecordingRows(rows, scope);
+                    normalized = normalizeRecordingRows(
+                      rows,
+                      scope,
+                      scope.identityKey,
+                      Date.now(),
+                      this.deps.recordingTimeZone,
+                    );
                     if (normalized.status === "ok") {
                       normalized.page.consistent &&= envelopeValid;
                       if (
@@ -1638,12 +1646,20 @@ export class RtcCommandRouter {
     st.session.attachIngressGuard(guard);
   }
 
-  /** Disabled unless a caller has durably consumed explicit one-use authority. Never acquires an owner. */
+  /**
+   * Probes require one-use authority; clips require sealed selection authority on an existing owner.
+   * Age renewal is optional, with no documented hard expiry; clip leases defer it inside expected duration plus 20 seconds.
+   */
   async readEventPlaybackCandidate(
     stationSn: string,
     opts: {
       enabled?: boolean;
-      clip?: { scope: RecordingReadScope; selector: InternalPlaybackSelector; video: (data: Buffer) => void };
+      clip?: {
+        scope: RecordingReadScope;
+        selector: InternalPlaybackSelector;
+        video: (data: Buffer) => void;
+        mediaReady?: (receipt: PlaybackReceipt) => void;
+      };
       signal?: AbortSignal;
       timeoutMs?: number;
       deadlineMs?: number;
@@ -1687,14 +1703,15 @@ export class RtcCommandRouter {
       opts.fresh?.() === true &&
       !st!.informationTainted &&
       !st!.replacement &&
-      !st!.refreshPending &&
+      (!st!.refreshPending || (!!opts.clip && candidate.receipt.startAttempted)) &&
       (!this.playbackProbes.has(stationSn) || (st!.leases === 1 && st!.pendingExchanges === 1)) &&
       st!.scheduler.snapshot().queued === 0 &&
-      renewalAt() - Date.now() > deadlineMs - performance.now() + 5000;
+      (!!opts.clip || renewalAt() - Date.now() > deadlineMs - performance.now() + 5000);
     let clipUnresolved = false;
     let clipFinished = false;
     const candidate = new EventPlaybackCandidate({
       nativeMessage: opts.nativeMessage,
+      timeZone: this.deps.recordingTimeZone,
       transient: !!opts.clip,
       captureMs,
       expectedMs: opts.clip?.selector.expectedMs,
@@ -1747,7 +1764,7 @@ export class RtcCommandRouter {
       () => !continuous(),
       () => opts.signal?.aborted,
       () => !observation,
-      () => performance.now() - observation!.observedSinceMs < 60000,
+      () => performance.now() - observation!.observedSinceMs < 5000,
       () => !observation!.ordinaryFrames,
       () => !observation!.keepalives,
       () => !observation!.prestartSafe(),
@@ -1762,7 +1779,7 @@ export class RtcCommandRouter {
       () => this.lives.has(stationSn),
       () => this.playbackProbes.size,
       () => this.eventTableProbes.size,
-      () => renewalAt() - Date.now() < 30000,
+      () => !opts.clip && renewalAt() - Date.now() < 30000,
       () => !startAllowed(),
     ].findIndex((blocked) => !!blocked());
     if (admission !== -1) {
@@ -1812,7 +1829,7 @@ export class RtcCommandRouter {
             if (!startAllowed() || signal.aborted) return;
             if (opts.clip) {
               const selection = opts.clip.selector;
-              if (selection.begin * 1000 + selection.expectedMs > Date.now() - 60000) {
+              if (selection.begin * 1000 + selection.expectedMs > Date.now() - 10000) {
                 candidate.end("time_refused");
                 return;
               }
@@ -1857,7 +1874,13 @@ export class RtcCommandRouter {
               clearTimeout(tableTimer);
             }
             if (table.outcome !== "success" || !startAllowed() || signal.aborted) return;
-            const selected = selectPlayback(rows, opts.cameras!, opts.excluded!);
+            const selected = selectPlayback(
+              rows,
+              opts.cameras!,
+              opts.excluded!,
+              Date.now(),
+              this.deps.recordingTimeZone,
+            );
             candidate.receipt.selectionOutcome = selected.selectionOutcome;
             if (selected.selectionOutcome !== "selected") {
               candidate.end("time_refused");
@@ -1881,7 +1904,12 @@ export class RtcCommandRouter {
     }
     let receipt: PlaybackReceipt;
     try {
-      receipt = await candidate.observe();
+      receipt = await candidate.observe(!!opts.clip);
+      if (opts.clip && receipt.captureOutcome === "eof" && receipt.boundedMediaObserved) {
+        try {
+          opts.clip.mediaReady?.(structuredClone(receipt));
+        } catch {}
+      }
     } finally {
       clearTimeout(timer);
       const issued = this.eventTableReplies.get(transaction);

@@ -236,7 +236,7 @@ it("exact sealed clip bypasses newest selection and returns typed video after cl
   expect(session.sent.filter((p) => parsePortalHeader(p)!.commandId === 1350)).toHaveLength(before);
 });
 
-it("a clip that cannot fit before renewal refuses without start or latch", async () => {
+it("a clip longer than the optional renewal interval starts under lease deferral", async () => {
   const { router, session, marker } = await fixture();
   const key = new Uint8Array(32).fill(7),
     scope = {
@@ -251,12 +251,13 @@ it("a clip that cannot fit before renewal refuses without start or latch", async
     scope,
   );
   if (result.status !== "ok") throw Error("fixture");
-  const receipt = await router.readEventPlaybackCandidate(station, {
+  const pending = router.readEventPlaybackCandidate(station, {
     ...options(),
     excluded: new Set(),
     clip: { scope, selector: result.rows[0]!.playbackSelector!, video: () => {} },
   });
-  expect(receipt).toMatchObject({ admissionGate: 26, startAttempted: false, latchRetained: false });
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await pending).toMatchObject({ admissionGate: 0, startAttempted: true, latchRetained: false });
   expect(marker).toEqual([]);
 });
 
@@ -603,7 +604,7 @@ it("keeps a slow correlated EOF capture alive beyond duration plus fifteen secon
   });
 });
 
-it("duration-complete capture reconnects and re-admits the replacement after observation and a live view", async () => {
+it("EOF capture reconnects and re-admits the replacement after observation and a live view", async () => {
   const { router, session, sessions } = await fixture();
   session.eof = false;
   session.releaseStatus = false;
@@ -622,24 +623,25 @@ it("duration-complete capture reconnects and re-admits the replacement after obs
   }
   await vi.advanceTimersByTimeAsync(850);
   input();
+  session.input(1351, { cmd: 6001, payload: { state: 2, code: 14 } });
   await vi.advanceTimersByTimeAsync(1);
   for (let i = 0; i < 16; i++) {
     input();
     await vi.advanceTimersByTimeAsync(1000);
   }
   expect(await pending).toMatchObject({
-    captureOutcome: "complete",
+    captureOutcome: "eof",
     boundedMediaObserved: true,
     releaseOutcome: "stop_unconfirmed",
     reconnectOutcome: "connected",
   });
-  expect(video).toHaveBeenCalledTimes(16);
+  expect(video).toHaveBeenCalledTimes(17);
   const replacement = Reflect.get(router, "sessions").get(station);
   expect(replacement.lastInformationRead).toBeDefined();
   expect(replacement.playbackObservation.ordinaryFrames).toBeGreaterThan(0);
   expect(Reflect.get(router, "playbackHolds").size).toBe(0);
   const refused = await router.readEventPlaybackCandidate(station, { ...options(), clip });
-  expect(refused).toMatchObject({ captureOutcome: "not_admitted", admissionGateName: "observation_window" });
+  expect(refused).toMatchObject({ captureOutcome: "not_admitted", admissionGateName: "no_keepalives" });
   const livePending = router.mediaProviderFor(camera).live!();
   await vi.advanceTimersByTimeAsync(1);
   const consumer = await livePending;
@@ -879,3 +881,128 @@ it.each([
     expect(router.getPlaybackSafetyDiagnostics().reconnect.attempts).toBe(1);
   },
 );
+
+it.each(["connected", "failed"])(
+  "EOF media is delivered before %s cleanup and live waits for retirement",
+  async (outcome) => {
+    const { router, session, sessions } = await fixture();
+    session.eof = false;
+    session.releaseStatus = false;
+    const connected = Promise.withResolvers<void>();
+    const create = Reflect.get(router, "deps").createSession;
+    Reflect.get(router, "deps").createSession = () => {
+      const next = create() as Session;
+      const connect = next.connect.bind(next);
+      next.connect = async () => {
+        await connected.promise;
+        if (outcome === "failed") throw new Error("synthetic setup failure");
+        await connect();
+      };
+      return next;
+    };
+    const mediaReady = vi.fn();
+    let settled = false;
+    const pulling = router
+      .readEventPlaybackCandidate(station, {
+        ...options(),
+        clip: { ...sealedClip(router, session), mediaReady },
+      })
+      .finally(() => {
+        settled = true;
+      });
+    await vi.advanceTimersByTimeAsync(250);
+    const body = Buffer.alloc(29);
+    body.writeUInt32LE(7);
+    body[5] = 1;
+    Buffer.from([0, 0, 0, 1, 0x26, 1, 0x80]).copy(body, 22);
+    session.input(1300, body, 4, 101, 6);
+    session.input(1351, { cmd: 6001, payload: { state: 2, code: 14 } });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mediaReady).toHaveBeenCalledOnce();
+    expect(mediaReady.mock.calls[0]![0]).toMatchObject({
+      captureOutcome: "eof",
+      boundedMediaObserved: true,
+      mediaDurationMs: 500,
+    });
+    expect(settled).toBe(false);
+    expect(router.getPlaybackSafetyDiagnostics().reconnect.attempts).toBe(1);
+    if (outcome === "connected") {
+      let liveSettled = false;
+      const live = router.mediaProviderFor(camera).live!().then((consumer) => {
+        liveSettled = true;
+        return consumer;
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      expect(liveSettled).toBe(false);
+      session.input(1300, body, 4, 101, 6);
+      expect(Reflect.get(router, "lives").size).toBe(0);
+      connected.resolve();
+      await vi.advanceTimersByTimeAsync(1);
+      const consumer = await live;
+      expect(Reflect.get(Reflect.get(router, "lives").get(station).live, "opts").session).toBe(sessions[1]);
+      consumer.stop();
+    } else {
+      connected.resolve();
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    expect(await pulling).toMatchObject({
+      captureOutcome: "eof",
+      boundedMediaObserved: true,
+      reconnectOutcome: outcome,
+    });
+  },
+);
+
+it.each([4999, 5000])("foreground readiness requires five seconds: %s ms", async (age) => {
+  const { router, session } = await fixture();
+  const clip = sealedClip(router, session);
+  const owner = Reflect.get(router, "sessions").get(station);
+  owner.connectedAtMonotonicMs = performance.now() - age;
+  owner.playbackObservation.observedSinceMs = performance.now() - age;
+  const pending = router.readEventPlaybackCandidate(station, { ...options(), clip });
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await pending).toMatchObject(
+    age < 5000
+      ? { admissionGateName: "observation_window", startAttempted: false }
+      : { admissionGateName: "none", startAttempted: true },
+  );
+});
+
+it("a renewal inside the capture window is deferred without aborting the clip", async () => {
+  const { router, session } = await fixture();
+  session.eof = false;
+  const clip = sealedClip(router, session);
+  const owner = Reflect.get(router, "sessions").get(station);
+  clearTimeout(owner.refreshTimer);
+  owner.refreshTimer = undefined;
+  owner.connectedAtMs = Date.now() - 599900;
+  Reflect.get(router, "armRefresh").call(router, station, owner);
+  const pending = router.readEventPlaybackCandidate(station, { ...options(), clip });
+  await vi.advanceTimersByTimeAsync(250);
+  expect(owner.refreshPending).toBe(true);
+  expect(Reflect.get(router, "playbackProbes").get(station).candidate.receipt.captureOutcome).not.toBe("preempted");
+  const body = Buffer.alloc(29);
+  body.writeUInt32LE(7);
+  body[5] = 1;
+  Buffer.from([0, 0, 0, 1, 0x26, 1, 0x80]).copy(body, 22);
+  session.input(1300, body, 4, 101, 6);
+  session.input(1351, { cmd: 6001, payload: { state: 2, code: 14 } });
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await pending).toMatchObject({
+    captureOutcome: "eof",
+    boundedMediaObserved: true,
+    reconnectOutcome: "connected",
+  });
+});
+
+it.each([9999, 10000])("sealed events use a ten-second end margin: %s ms", async (age) => {
+  const { router, session } = await fixture();
+  vi.setSystemTime(Date.parse("2026-01-15T18:00:01Z") + age);
+  const pending = router.readEventPlaybackCandidate(station, { ...options(), clip: sealedClip(router, session) });
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await pending).toMatchObject(
+    age < 10000
+      ? { captureOutcome: "time_refused", startAttempted: false }
+      : { captureOutcome: "eof", startAttempted: true },
+  );
+});

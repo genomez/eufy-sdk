@@ -638,6 +638,7 @@ export class EufyMega extends EventEmitter {
       connectTimeoutMs: opts.rtc?.connectTimeoutMs,
       idleCloseMs: opts.rtc?.idleCloseMs,
       sessionRefreshMs: opts.rtc?.sessionRefreshMs,
+      recordingTimeZone: opts.rtc?.recordingTimeZone,
       commandKeepaliveMs: opts.rtc?.commandKeepaliveMs,
       maxCallRetries: opts.rtc?.maxCallRetries,
       onFrame: (stationSn, frame, identity) => this.onRtcFrame(stationSn, frame, identity),
@@ -1116,7 +1117,12 @@ export class EufyMega extends EventEmitter {
   async pullRecordingClip(
     scope: RecordingReadScope,
     selector: InternalPlaybackSelector,
-    opts: { signal?: AbortSignal; video: (data: Buffer) => void; beforeDispatch?: () => void },
+    opts: {
+      signal?: AbortSignal;
+      video: (data: Buffer) => void;
+      beforeDispatch?: () => void;
+      mediaReady?: (receipt: import("../transport/rtc/event-playback-candidate.js").PlaybackReceipt) => void;
+    },
   ) {
     const admissionGateName = this.recordingsAdmission(scope);
     if (admissionGateName)
@@ -1134,7 +1140,7 @@ export class EufyMega extends EventEmitter {
       cameras: scope.cameraSns,
       excluded: new Set(),
       fresh: () => this.recordingsAllowed(scope, true),
-      clip: { scope, selector, video: opts.video },
+      clip: { scope, selector, video: opts.video, mediaReady: opts.mediaReady },
     });
   }
 

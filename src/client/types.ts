@@ -130,6 +130,8 @@ export interface EufyMegaOptions extends MegaClientConfig {
     idleCloseMs?: number;
     /** Optional age-based replacement; zero disables it (default), otherwise 30–600 seconds. */
     sessionRefreshMs?: number;
+    /** IANA zone for station recording timestamps; defaults to America/Chicago. */
+    recordingTimeZone?: string;
     /** Raw command-session keepalive interval; zero or omitted disables it (default), otherwise 1–120 seconds. */
     commandKeepaliveMs?: number;
     /**

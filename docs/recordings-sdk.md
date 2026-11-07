@@ -15,10 +15,23 @@ interface RecordingPolicy {
 The scope must match all five installed FLC identities and the current unambiguous station topology. The excluded camera label is checked only as an additional denial. Names do not enroll a device. Persist a random 32-byte installation key durably before using it. The SDK never creates or reads a key file. Obtain the opaque account namespace through the cache-only method below; `null` means there is no usable key or authenticated account.
 
 ```ts
-getRecordingAccountNamespace(identityKey: Uint8Array): string | null;
-readRecordingCatalog(scope: RecordingReadScope, opts?: RecordingReadOptions): Promise<CatalogReadResult>;
-readRecordingCover(scope: RecordingReadScope, selector: InternalCoverSelector, opts?: RecordingReadOptions): Promise<CoverReadResult>;
-setRecordingPacing(pacing?: Partial<RecordingPacing> | null): RecordingPacing;
+import type {
+  InternalCoverSelector,
+  InternalRecordingRow,
+  RecordingDiagnostics,
+  RecordingReadReason,
+} from "@mega-yfue/eufy-sdk";
+
+interface RecordingReader {
+  getRecordingAccountNamespace(identityKey: Uint8Array): string | null;
+  readRecordingCatalog(scope: RecordingReadScope, opts?: RecordingReadOptions): Promise<CatalogReadResult>;
+  readRecordingCover(
+    scope: RecordingReadScope,
+    selector: InternalCoverSelector,
+    opts?: RecordingReadOptions,
+  ): Promise<CoverReadResult>;
+  setRecordingPacing(pacing?: Partial<RecordingPacing> | null): RecordingPacing;
+}
 
 interface RecordingPacing {
   coverGapMs: number;
@@ -37,8 +50,7 @@ interface RecordingReadOptions {
   timeoutMs?: number;
 }
 type CatalogReadResult =
-  | { status: "ok"; rows: InternalRecordingRow[]; diagnostics: RecordingDiagnostics }
-  | RecordingReadFailure;
+  { status: "ok"; rows: InternalRecordingRow[]; diagnostics: RecordingDiagnostics } | RecordingReadFailure;
 type CoverReadResult = { status: "ok"; jpeg: Buffer } | RecordingReadFailure;
 type RecordingReadFailure = {
   status: "deferred" | "unavailable";
@@ -55,6 +67,35 @@ The selector seal also binds the opaque account namespace, preventing reuse in a
 `projectRecordingRow(row)` is an exported allowlist projection that excludes all private row fields and reconstructs fixed type labels. It returns `RecordingRowView`; the service still owns its versioned public contract, retention, accumulated deduplication and full-hash collision checks against its existing catalog. Keep the earliest persisted `firstObservedAtMs` when merging a re-observed event.
 
 Admission is idle-only, routine priority, and requires 60 seconds of connected-owner observation plus qualified ordinary information health. Active playback and the unresolved playback latch both deny. Ordinary refresh, correction, queued work, probes, live demand and renewal outrank recordings. A canceled optional collector detaches locally and retains the existing 60-second late-reply reservations. Catalog attempts are spaced by two minutes, including failure; cover completions impose a five-second gap, with six cover attempts per sliding minute. The entire eight-second read plus five-second reserve must fit before the existing renewal deadline. No separate renewal schedule is introduced.
+
+### Foreground playback
+
+Foreground clips require five seconds of connected-owner and ingress observation,
+ordinary information frames, keepalive evidence and safe prestart ingress. Live view,
+other work, replacement, pending renewal, taint, scope and enrollment conflicts still deny admission.
+`rtc.sessionRefreshMs` is optional proactive replacement, disabled by default, with
+no documented hard session expiry. An admitted clip holds a lease, so renewal is
+deferred even when it falls within the expected media duration plus 20 seconds.
+The capture keeps its independent hard deadline and byte limits; no renewal can
+interrupt it merely because the proactive renewal timer becomes pending.
+
+Full clips retain video until station EOF or the existing hard capture limit,
+including frames arriving after the catalog duration. EOF completeness requires
+random access, at least two retained frames and a positive arrival span. Other
+capture outcomes retain the strict duration, gap and density checks.
+
+`pullRecordingClip` optionally calls `mediaReady(receipt)` once for a complete EOF
+capture, after the sink has received its last video bytes. This receipt is a
+snapshot, before session retirement. A caller can publish converted media then,
+but must keep the station job occupied until the returned promise settles.
+EOF cleanup sends pause/stop and skips cessation observation in favor of bounded
+session replacement. Live acquisition waits for that replacement and uses the
+fresh owner. The final receipt reports reconnect outcome and duration separately;
+cleanup failure does not invalidate the earlier media snapshot.
+
+`rtc.recordingTimeZone` selects the IANA zone used for catalog selectors and probe
+selection, defaulting to `America/Chicago`. Ambiguous or nonexistent local times
+remain refused. Events become eligible ten seconds after their end.
 
 The caller owns browse interests, cover budgets and queueing, persistent identity/store recovery, negative cache and disk quotas. Startup, detection, cache reads and public image transfer must not call these methods automatically. Stored covers and catalog pages can remain readable when new RTC reads are refused.
 

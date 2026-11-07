@@ -127,3 +127,19 @@ it("an already cancelled full clip never writes a latch or sends a start", async
   expect(marker).not.toHaveBeenCalled();
   expect(send).not.toHaveBeenCalled();
 });
+
+it.each([
+  ["America/New_York", "2026-01-15T17:00:00.000Z"],
+  ["Asia/Kathmandu", "2026-01-15T06:15:00.000Z"],
+  ["invalid/zone", "2026-01-15T18:00:00.000Z"],
+])("catalog selectors use configured IANA zone %s", (timeZone, utc) => {
+  const result = normalizeRecordingRows(
+    [row({ start_time: "2026-01-15 12:00:00", end_time: "2026-01-15 12:00:12" })],
+    scope,
+    scope.identityKey,
+    Date.now(),
+    timeZone,
+  );
+  if (result.status !== "ok") throw Error("fixture");
+  expect(result.rows[0]!.playbackSelector!.begin).toBe(Date.parse(utc) / 1000);
+});

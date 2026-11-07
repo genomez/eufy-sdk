@@ -64,7 +64,7 @@ describe("database-backed Chicago conversion", () => {
     "2026-07-01 12:00:60",
     "私密",
   ])("refuses %s", (local) => expect(chicagoInstant(local)).toBeUndefined());
-  it.each(["2026-11-01 01:30:00", "2026-07-02 12:00:00", "2026-07-01 12:00:30"])(
+  it.each(["2026-11-01 01:30:00", "2026-07-02 12:00:00", "2026-07-01 12:00:55"])(
     "selects an older valid clip when the newest time is %s",
     (newest) => {
       expect(
@@ -91,7 +91,7 @@ describe("database-backed Chicago conversion", () => {
     [[{ ...row("2026-07-01 12:00:00"), device_sn: "other-synthetic" }], "no_camera_rows"],
     [[row("invalid")], "time_invalid"],
     [[row("2026-07-01 12:00:00", "2026-06-30 12:00:00")], "time_invalid"],
-    [[row("2026-07-01 12:00:00", "2026-07-01 12:00:01")], "end_not_past"],
+    [[row("2026-07-01 12:00:00", "2026-07-01 12:00:55")], "end_not_past"],
     [[row("2026-07-02 12:00:00")], "end_not_past"],
   ])("reports selection outcome for %j", (rows, selectionOutcome) => {
     expect(
@@ -483,7 +483,7 @@ it("streams a complete clip beyond the probe byte cutoff through EOF and qualifi
   expect(s.candidate.receipt.nativeBytes).toBeGreaterThan(4 * 1024 ** 2);
 });
 
-it("completes by received video duration, trims the margin and retains complete media through unconfirmed cleanup", async () => {
+it("retains streaming video beyond expected duration until EOF through unconfirmed cleanup", async () => {
   vi.useFakeTimers();
   vi.spyOn(nativePerformance, "now").mockImplementation(() => performance.now());
   const output = vi.fn(),
@@ -516,10 +516,11 @@ it("completes by received video duration, trims the margin and retains complete 
   }
   await vi.advanceTimersByTimeAsync(500);
   inject();
-  expect(output).toHaveBeenCalledTimes(46);
+  expect(output).toHaveBeenCalledTimes(47);
   expect(candidate.receipt.captureOutcome).not.toBe("complete");
   await vi.advanceTimersByTimeAsync(250);
   inject();
+  candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 2, code: 14 } }), 3);
   await capture;
   expect(sent).toEqual([0, 1, 3]);
   const observing = candidate.observe();
@@ -528,14 +529,14 @@ it("completes by received video duration, trims the margin and retains complete 
     inject();
   }
   expect(await observing).toMatchObject({
-    captureOutcome: "complete",
-    videoFrames: 46,
+    captureOutcome: "eof",
+    videoFrames: 48,
     randomAccess: true,
     boundedMediaObserved: true,
     releaseOutcome: "stop_unconfirmed",
     latchRetained: true,
   });
-  expect(output).toHaveBeenCalledTimes(46);
+  expect(output).toHaveBeenCalledTimes(48);
 });
 
 it.each([
@@ -557,7 +558,7 @@ it.each([
     previous = arrival;
   }
   expect(s.candidate.receipt.captureOutcome).not.toBe("complete");
-  expect(s.candidate.receipt.videoFrames).toBe(arrivals.length);
+  expect(s.candidate.receipt.videoFrames).toBe(arrivals.length + 1);
   await vi.advanceTimersByTimeAsync(60001);
   await capture;
   const observing = s.candidate.observe();
@@ -857,8 +858,8 @@ it("releases concurrent reservations while bounding cumulative decoder work", ()
 it.each([
   ["night bursts", 2500, 12000, true, "none"],
   ["night smaller bursts", 1200, 12000, true, "none"],
-  ["truncated EOF", 2500, 60000, false, "span"],
-  ["excessive EOF gap with dropped tail", 3100, 12000, false, "truncated"],
+  ["short EOF", 2500, 60000, true, "none"],
+  ["late EOF tail", 3100, 12000, true, "none"],
 ] as const)("retained EOF diagnostics: %s", async (_, gap, expectedMs, accepted, completenessFailure) => {
   const s = candidateSetup({ streaming: true, streamingFrames: 0, release: false });
   Reflect.get(s.candidate, "opts").expectedMs = expectedMs;
@@ -875,7 +876,7 @@ it.each([
   await capture;
   const observing = s.candidate.observe();
   await vi.advanceTimersByTimeAsync(16001);
-  const retained = arrivals.filter((at) => at <= expectedMs);
+  const retained = arrivals;
   expect(await observing).toMatchObject({
     captureOutcome: "eof",
     boundedMediaObserved: accepted,
@@ -890,12 +891,12 @@ it.each([
 });
 
 it.each([
-  ["slow prefix", 70, 2000, 230, "eof", false],
+  ["slow prefix", 70, 2000, 230, "eof", true],
   ["night small gaps", 120, 1200, 15, "eof", true],
   ["night large gaps", 120, 2500, 15, "eof", true],
-  ["absolute tail limit", 120, 2000, 16, "eof", false],
+  ["absolute tail limit", 120, 2000, 16, "eof", true],
   ["relative tail limit", 200, 2000, 20, "eof", true],
-  ["relative tail exceeded", 200, 2000, 21, "eof", false],
+  ["relative tail exceeded", 200, 2000, 21, "eof", true],
   ["non-EOF tail", 120, 0, 20, "capped", true],
 ] as const)("post-cutoff video: %s", async (_, frames, gap, dropped, outcome, accepted) => {
   const s = candidateSetup({ streaming: true, streamingFrames: 0 });
@@ -924,9 +925,9 @@ it.each([
   await vi.advanceTimersByTimeAsync(5010);
   expect(await observing).toMatchObject({
     captureOutcome: outcome,
-    retainedVideoFrames: frames,
-    retainedVideoSpanMs: 11900,
-    droppedAfterCutoff: dropped,
+    retainedVideoFrames: frames + dropped,
+    retainedVideoSpanMs: arrivals.at(-1),
+    droppedAfterCutoff: 0,
     boundedMediaObserved: accepted,
     completenessFailure: accepted ? "none" : "truncated",
   });
@@ -935,9 +936,9 @@ it.each([
 it.each([
   ["full coverage, long pause", 11544, 3525, 0, "none", 129],
   ["full coverage boundary", 11000, 8000, 0, "none", 129],
-  ["partial coverage, long pause", 10900, 3525, 0, "gap", 129],
-  ["full coverage, truncated", 11544, 3525, 40, "truncated", 129],
-  ["full coverage, sparse", 11544, 3525, 0, "density", 40],
+  ["partial coverage, long pause", 10900, 3525, 0, "none", 129],
+  ["full coverage, late tail", 11544, 3525, 40, "none", 129],
+  ["full coverage, sparse", 11544, 3525, 0, "none", 40],
 ] as const)("EOF pause tolerance: %s", (_, span, gap, dropped, failure, frames) => {
   const s = candidateSetup({});
   const c = s.candidate as unknown as Record<string, unknown>;
@@ -970,10 +971,30 @@ it("non-EOF keeps the strict pause limit at full coverage", () => {
   expect(Reflect.apply(Reflect.get(s.candidate, "retainedMediaFailure"), s.candidate, [])).toBe("gap");
 });
 
+it.each([0, 1, 15000])("EOF needs only positive span after two frames: %s ms", async (span) => {
+  const s = candidateSetup({ streaming: true, streamingFrames: 0, release: false });
+  Reflect.get(s.candidate, "opts").expectedMs = 7000;
+  const capture = s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  for (const packet of wrapped(video())) s.candidate.ingress.native(packet);
+  await vi.advanceTimersByTimeAsync(span);
+  for (const packet of wrapped(video())) s.candidate.ingress.native(packet);
+  s.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 2, code: 14 } }), 3);
+  await capture;
+  const observing = s.candidate.observe(true);
+  if (!span) await vi.advanceTimersByTimeAsync(16001);
+  expect(await observing).toMatchObject({
+    captureOutcome: "eof",
+    retainedVideoFrames: 2,
+    droppedAfterCutoff: 0,
+    boundedMediaObserved: span > 0,
+    completenessFailure: span > 0 ? "none" : "span",
+  });
+});
+
 it.each([
   [65535, "none"],
-  [100000, "truncated"],
-] as const)("truncation uses the unsaturated tail count: %s dropped", (dropped, failure) => {
+  [100000, "none"],
+] as const)("EOF ignores historical cutoff counters: %s dropped", (dropped, failure) => {
   const s = candidateSetup({});
   const c = s.candidate as unknown as Record<string, unknown>;
   Reflect.get(s.candidate, "opts").expectedMs = 3_000_000;
@@ -989,13 +1010,13 @@ it.each([
 });
 
 it.each([
-  ["short low-fps", [0, 750, 1500, 2250, 3000], 7000, true, false],
+  ["short low-fps", [0, 750, 1500, 2250, 3000], 7000, true, true],
   ["dense EOF", Array.from({ length: 51 }, (_, i) => i * 86), 7000, true, true],
   ["density boundary", Array.from({ length: 16 }, (_, i) => i * 200), 7000, true, true],
-  ["below density boundary", Array.from({ length: 15 }, (_, i) => i * 210), 7000, true, false],
-  ["large gap sparse", [0, 500, 2000, 2500, 3000], 7000, true, false],
-  ["absolute floor", [0, 400, 800], 1500, true, false],
-  ["relative floor", [0, 750, 1500, 2250], 7000, true, false],
+  ["below density boundary", Array.from({ length: 15 }, (_, i) => i * 210), 7000, true, true],
+  ["large gap sparse", [0, 500, 2000, 2500, 3000], 7000, true, true],
+  ["absolute floor", [0, 400, 800], 1500, true, true],
+  ["relative floor", [0, 750, 1500, 2250], 7000, true, true],
   ["non-EOF short", [0, 750, 1500, 2250, 3000], 7000, false, false],
   ["non-EOF low-fps", [0, 750, 1500, 2250, 3000], 3000, false, false],
 ] as const)("EOF coverage: %s", async (_, arrivals, expectedMs, eof, accepted) => {
