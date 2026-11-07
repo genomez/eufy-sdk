@@ -70,6 +70,7 @@ export interface NativeDataChannel {
 
 /** The slice of `node-datachannel`'s `PeerConnection` the peer uses. */
 export interface NativePeerConnection {
+  getSelectedCandidatePair?(): { local: { type: string }; remote: { type: string } } | null;
   close(): void;
   setRemoteDescription(sdp: string, type: "offer" | "answer"): void;
   localDescription(): { type: string; sdp: string } | null;
@@ -211,6 +212,20 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
   /** Install native admission and post-decode classification before any session consumer. */
   attachIngressGuard(guard: RtcIngressGuard | undefined): void {
     this.ingressGuard = guard;
+  }
+  /** Selected pair types only; native addresses and ports never leave this boundary. */
+  getSelectedIceCandidateTypes(): {
+    local?: "relay" | "srflx" | "host" | "prflx";
+    remote?: "relay" | "srflx" | "host" | "prflx";
+  } {
+    try {
+      const pair = this.pc?.getSelectedCandidatePair?.();
+      const type = (value?: string) =>
+        value === "relay" || value === "srflx" || value === "host" || value === "prflx" ? value : undefined;
+      return { local: type(pair?.local.type), remote: type(pair?.remote.type) };
+    } catch {
+      return {};
+    }
   }
   private pc?: NativePeerConnection;
   private readonly channels = new Map<string, NativeDataChannel>();

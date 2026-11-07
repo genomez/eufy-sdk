@@ -1070,3 +1070,22 @@ describe("RTC native transport evidence", () => {
     other.peer.close();
   });
 });
+
+it.each(["relay", "srflx", "host", "prflx"])("reports only the selected %s ICE pair types", async (type) => {
+  const f = setup("all");
+  await f.peer.init();
+  Object.assign(f.pc(), {
+    getSelectedCandidatePair: () => ({
+      local: { type, address: "private", port: 123 },
+      remote: { type: "host", address: "private", port: 123 },
+    }),
+  });
+  expect(f.peer.getSelectedIceCandidateTypes()).toEqual({ local: type, remote: "host" });
+  Object.assign(f.pc(), {
+    getSelectedCandidatePair: () => {
+      throw Error("private");
+    },
+  });
+  expect(f.peer.getSelectedIceCandidateTypes()).toEqual({});
+  f.peer.close();
+});

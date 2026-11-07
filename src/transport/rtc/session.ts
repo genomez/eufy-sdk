@@ -89,6 +89,10 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
   }
   private connectionEvidence = new ConnectionStageRecorder();
   private readonly signaling: RtcSignalingClient;
+  /** Selected ICE types only, when the native peer exposes a selected pair. */
+  getSelectedIceCandidateTypes() {
+    return this.peer.getSelectedIceCandidateTypes?.() ?? {};
+  }
   private readonly peer: RtcPeer;
   private readonly channelId: number;
   private readonly logger: Logger;

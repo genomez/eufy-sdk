@@ -31,7 +31,11 @@ describe("framing diagnostics", () => {
     expect(r.getDiagnostics()).toMatchObject({ receivedPackets: 2, pendingFrames: 1, bufferedBytes: 5 });
     expect(r.push(packets[0]!)).toBe(true);
     expect(r.push(packets[1]!)).toBe(true);
-    expect(delivered).toHaveBeenCalledExactlyOnceWith(Buffer.from("synthetic-frame"), 0);
+    expect(delivered).toHaveBeenCalledExactlyOnceWith(
+      Buffer.from("synthetic-frame"),
+      0,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
     const complete = r.getDiagnostics();
     expect(complete).toMatchObject({
       receivedPackets: 4,
@@ -165,7 +169,11 @@ describe("framing diagnostics", () => {
     const r = new PtcsReassembler(delivered, { maxFrameBytes: 256 });
     const frame = Buffer.from("synthetic-compressed-frame".repeat(4));
     for (const packet of compressedPackets(frame, 40)) expect(r.push(packet)).toBe(true);
-    expect(delivered).toHaveBeenCalledExactlyOnceWith(frame, 0);
+    expect(delivered).toHaveBeenCalledExactlyOnceWith(
+      frame,
+      0,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
     const [invalid] = packetize(Buffer.from("invalid-compressed-content"), { frameId: 41 });
     invalid!.writeUInt16LE(invalid!.readUInt16LE(18) | 0x0800, 18);
     expect(r.push(invalid!)).toBe(false);

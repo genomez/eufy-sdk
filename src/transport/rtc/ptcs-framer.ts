@@ -225,6 +225,7 @@ function decompressFrame(
 }
 
 interface Partial {
+  frameId: number;
   channel: number;
   sequence: number;
   frameLength: number;
@@ -285,7 +286,7 @@ export class PtcsReassembler {
   };
 
   constructor(
-    private readonly onFrame: (frame: Buffer, channel: number) => void,
+    private readonly onFrame: (frame: Buffer, channel: number, timing: { frameId: number; sequence: number }) => void,
     private readonly opts: PtcsReassemblerOptions = {},
   ) {
     this.now = opts.now ?? Date.now;
@@ -376,6 +377,7 @@ export class PtcsReassembler {
         return false;
       }
       p = {
+        frameId: h.frameId,
         channel: h.channel,
         sequence: h.sequence,
         frameLength: h.frameLength,
@@ -426,7 +428,7 @@ export class PtcsReassembler {
       frame = decoded;
     }
     this.count("completedFrames");
-    this.onFrame(frame, p.channel);
+    this.onFrame(frame, p.channel, { frameId: p.frameId, sequence: p.sequence });
     return true;
   }
 

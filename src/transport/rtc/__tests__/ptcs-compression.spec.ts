@@ -40,7 +40,11 @@ function expectRejected(encoded: Buffer, maxFrameBytes = 8192): void {
   expect(r.bufferedBytes).toBe(0);
   const plain = Buffer.from("recovered");
   for (const chunk of packetize(plain, { frameId: 1, channel: 2 })) expect(r.push(chunk)).toBe(true);
-  expect(frame).toHaveBeenCalledExactlyOnceWith(plain, 2);
+  expect(frame).toHaveBeenCalledExactlyOnceWith(
+    plain,
+    2,
+    expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+  );
 }
 
 describe("PTCS compressed receive frames", () => {
@@ -54,7 +58,11 @@ describe("PTCS compressed receive frames", () => {
     for (const chunk of chunks.slice(0, -1)) expect(r.push(chunk)).toBe(true);
     expect(frame).not.toHaveBeenCalled();
     expect(r.push(chunks.at(-1)!)).toBe(true);
-    expect(frame).toHaveBeenCalledExactlyOnceWith(original, 2);
+    expect(frame).toHaveBeenCalledExactlyOnceWith(
+      original,
+      2,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
     expect(r.pending).toBe(0);
     expect(r.bufferedBytes).toBe(0);
   });
@@ -64,7 +72,11 @@ describe("PTCS compressed receive frames", () => {
     const frame = vi.fn();
     const r = new PtcsReassembler(frame);
     for (const packet of packetize(encoded, { frameId: 1, channel: 2 })) expect(r.push(packet)).toBe(true);
-    expect(frame).toHaveBeenCalledExactlyOnceWith(encoded, 2);
+    expect(frame).toHaveBeenCalledExactlyOnceWith(
+      encoded,
+      2,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
   });
 
   it("uses compressed length for assembly and supports an empty decoded frame", () => {
@@ -76,7 +88,11 @@ describe("PTCS compressed receive frames", () => {
         expect(packet.readUInt32LE(12)).toBe(encoded.length);
         expect(r.push(packet)).toBe(true);
       }
-      expect(frame).toHaveBeenCalledExactlyOnceWith(original, 2);
+      expect(frame).toHaveBeenCalledExactlyOnceWith(
+        original,
+        2,
+        expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+      );
     }
   });
 
@@ -126,7 +142,11 @@ describe("PTCS compressed receive frames", () => {
     expect(r.push(chunks[0]!)).toBe(true);
     expect(r.bufferedBytes).toBe(retained);
     for (const chunk of chunks.slice(1)) expect(r.push(chunk)).toBe(true);
-    expect(frame).toHaveBeenCalledExactlyOnceWith(original, 2);
+    expect(frame).toHaveBeenCalledExactlyOnceWith(
+      original,
+      2,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
   });
 
   it("rejects every incomplete prefix even when native decoding could return partial bytes", () => {
@@ -168,7 +188,11 @@ describe("PTCS compressed receive frames", () => {
     const frame = vi.fn();
     const r = new PtcsReassembler(frame);
     for (const chunk of compressedPackets(rawFrame(original, 10, width))) expect(r.push(chunk)).toBe(true);
-    expect(frame).toHaveBeenCalledExactlyOnceWith(original, 2);
+    expect(frame).toHaveBeenCalledExactlyOnceWith(
+      original,
+      2,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
   });
 
   it("accepts complete RLE blocks and ignores the unused descriptor bit", () => {
@@ -179,7 +203,11 @@ describe("PTCS compressed receive frames", () => {
     const frame = vi.fn();
     const r = new PtcsReassembler(frame);
     for (const chunk of compressedPackets(encoded.subarray(0, 10))) expect(r.push(chunk)).toBe(true);
-    expect(frame).toHaveBeenCalledExactlyOnceWith(original, 2);
+    expect(frame).toHaveBeenCalledExactlyOnceWith(
+      original,
+      2,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
   });
 
   it("rejects a declared content size that differs from decoded output", () => {
@@ -206,7 +234,11 @@ describe("PTCS compressed receive frames", () => {
     const frame = vi.fn();
     const r = new PtcsReassembler(frame, { maxFrameBytes: 1024 });
     for (const chunk of compressedPackets(rawFrame(original, 10))) expect(r.push(chunk)).toBe(true);
-    expect(frame).toHaveBeenCalledExactlyOnceWith(original, 2);
+    expect(frame).toHaveBeenCalledExactlyOnceWith(
+      original,
+      2,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
   });
 
   it("bounds unknown-size expansion even when the declared window fits", () => {

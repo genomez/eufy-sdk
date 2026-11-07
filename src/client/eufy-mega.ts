@@ -632,6 +632,7 @@ export class EufyMega extends EventEmitter {
       findDevice: (sn) => this.registry.list().find((d) => d.sn === sn),
       logger: opts.logger,
       icePolicy: opts.rtc?.icePolicy,
+      icePolicyAtSessionCreation: opts.rtc?.icePolicyAtSessionCreation,
       ackTimeoutMs: opts.rtc?.ackTimeoutMs,
       commandAckTimeoutMs: opts.rtc?.commandAckTimeoutMs,
       commandTimeoutMs: opts.rtc?.commandTimeoutMs,
@@ -1122,6 +1123,9 @@ export class EufyMega extends EventEmitter {
       video: (data: Buffer) => void;
       beforeDispatch?: () => void;
       mediaReady?: (receipt: import("../transport/rtc/event-playback-candidate.js").PlaybackReceipt) => void;
+      experiment?: import("../transport/rtc/playback-telemetry.js").PlaybackExperiment;
+      /** Process monotonic origin for caller pipeline telemetry, independent of protocol deadlines. */
+      timelineOriginMs?: number;
     },
   ) {
     const admissionGateName = this.recordingsAdmission(scope);
@@ -1140,7 +1144,14 @@ export class EufyMega extends EventEmitter {
       cameras: scope.cameraSns,
       excluded: new Set(),
       fresh: () => this.recordingsAllowed(scope, true),
-      clip: { scope, selector, video: opts.video, mediaReady: opts.mediaReady },
+      clip: {
+        scope,
+        selector,
+        video: opts.video,
+        mediaReady: opts.mediaReady,
+        experiment: opts.experiment,
+        timelineOriginMs: opts.timelineOriginMs,
+      },
     });
   }
 

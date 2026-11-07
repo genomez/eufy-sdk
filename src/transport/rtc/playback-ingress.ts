@@ -240,7 +240,7 @@ export class PlaybackIngress implements RtcIngressGuard {
       streaming?: { durationMs: number; frameLimit: number };
       nativeMessage?: (direction: "in" | "out", message: unknown) => void;
       end: (reason: "capped" | "capped_wrong_route" | "transport_mismatch" | "invalid_media") => void;
-      media: (frame: Buffer) => void;
+      media: (frame: Buffer, timing?: { frameId: number; sequence: number }) => void;
       control?: (frame: Buffer, link: number) => boolean;
       late?: () => void;
       observeOnly?: boolean;
@@ -249,9 +249,9 @@ export class PlaybackIngress implements RtcIngressGuard {
     },
   ) {
     this.assembler = new PtcsReassembler(
-      (frame) => {
+      (frame, _channel, timing) => {
         this.releaseReservation(this.completingId);
-        this.complete(frame);
+        this.complete(frame, timing);
       },
       {
         maxFrameBytes: PLAYBACK_FRAME_BYTES,
@@ -674,7 +674,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     if (command === 1301) this.evidence.ingressAudioFrames = add(this.evidence.ingressAudioFrames, 1);
   }
 
-  private complete(frame: Buffer): void {
+  private complete(frame: Buffer, timing?: { frameId: number; sequence: number }): void {
     this.plausible();
     if (this.tombstone && !this.capturing) {
       this.chargeLate(frame.length);
@@ -717,7 +717,7 @@ export class PlaybackIngress implements RtcIngressGuard {
     this.evidence.mediaBytes += frame.length;
     this.evidence.mediaFrames++;
     this.evidence.collectorAttempts++;
-    this.opts.media(frame);
+    this.opts.media(frame, timing);
     if (
       this.evidence.mediaBytes >= (this.opts.streaming ? 2 * 1024 ** 3 : PLAYBACK_BYTES) ||
       this.evidence.mediaFrames >= (this.opts.streaming?.frameLimit ?? 256)

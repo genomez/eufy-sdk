@@ -17,7 +17,11 @@ describe("PTCS reassembly bounds", () => {
     expect(r.bufferedBytes).toBe(0);
     expect(frame).not.toHaveBeenCalled();
     for (const valid of packets(4)) expect(r.push(valid)).toBe(true);
-    expect(frame).toHaveBeenCalledWith(Buffer.alloc(4, 1), 0);
+    expect(frame).toHaveBeenCalledWith(
+      Buffer.alloc(4, 1),
+      0,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
     expect(r.bufferedBytes).toBe(0);
   });
 
@@ -61,7 +65,11 @@ describe("PTCS reassembly bounds", () => {
     expect(r.push(packets(6)[2]!)).toBe(false);
     expect(r.pending).toBe(0);
     for (const packet of packets(4).reverse()) expect(r.push(packet)).toBe(true);
-    expect(frame).toHaveBeenCalledWith(Buffer.alloc(4, 1), 0);
+    expect(frame).toHaveBeenCalledWith(
+      Buffer.alloc(4, 1),
+      0,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
   });
 
   it("drops an assembly as soon as its payload exceeds the declared length", () => {
@@ -80,7 +88,11 @@ describe("PTCS reassembly bounds", () => {
     const r = new PtcsReassembler(frame);
     const empty = packets(0)[0]!;
     expect(r.push(empty)).toBe(true);
-    expect(frame).toHaveBeenCalledWith(Buffer.alloc(0), 0);
+    expect(frame).toHaveBeenCalledWith(
+      Buffer.alloc(0),
+      0,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
     empty.writeUInt16LE(1, 16);
     expect(r.push(empty)).toBe(false);
     empty.writeUInt16LE(0, 16);
@@ -120,7 +132,11 @@ describe("PTCS reassembly bounds", () => {
     expect(r.pending).toBe(0);
     expect(r.bufferedBytes).toBe(0);
     expect(r.push(packets(2, 2)[0]!)).toBe(true);
-    expect(frame).toHaveBeenLastCalledWith(Buffer.alloc(2, 2), 0);
+    expect(frame).toHaveBeenLastCalledWith(
+      Buffer.alloc(2, 2),
+      0,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
   });
 
   it("keeps budgets bounded through interleaved incomplete traffic and recovers capacity", () => {
@@ -147,7 +163,11 @@ describe("PTCS reassembly bounds", () => {
     expect(r.pending).toBe(0);
     expect(r.bufferedBytes).toBe(0);
     for (const packet of packets(6)) expect(r.push(packet)).toBe(true);
-    expect(frame).toHaveBeenLastCalledWith(Buffer.alloc(6, 1), 0);
+    expect(frame).toHaveBeenLastCalledWith(
+      Buffer.alloc(6, 1),
+      0,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
     expect(r.bufferedBytes).toBe(0);
   });
 });
@@ -176,7 +196,11 @@ describe("PTCS conflicting fragments", () => {
     r.push(chunks[0]!);
     expect(r.push(chunks[0]!)).toBe(true);
     r.push(chunks[1]!);
-    expect(frame).toHaveBeenCalledExactlyOnceWith(Buffer.alloc(6, 1), 0);
+    expect(frame).toHaveBeenCalledExactlyOnceWith(
+      Buffer.alloc(6, 1),
+      0,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
     expect(r.bufferedBytes).toBe(0);
   });
 
@@ -286,7 +310,11 @@ describe("PTCS assembly expiry", () => {
     r.push(packets()[0]!);
     now = 10;
     expect(r.push(packets(2, 2)[0]!)).toBe(true);
-    expect(frame).toHaveBeenCalledExactlyOnceWith(Buffer.alloc(2, 2), 0);
+    expect(frame).toHaveBeenCalledExactlyOnceWith(
+      Buffer.alloc(2, 2),
+      0,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
     expect(r.pending).toBe(0);
     expect(r.bufferedBytes).toBe(0);
   });
@@ -316,8 +344,16 @@ describe("PTCS frame identity", () => {
     const b = packetize(Buffer.alloc(4, 9), { frameId: 7, channel: 4, sequence: 2, payloadBytes: 2 });
     for (const p of [a[0]!, b[0]!, a[1]!, b[1]!, a[2]!]) expect(r.push(p)).toBe(true);
     expect(frame).toHaveBeenCalledTimes(2);
-    expect(frame).toHaveBeenCalledWith(Buffer.alloc(4, 9), 4);
-    expect(frame).toHaveBeenCalledWith(Buffer.alloc(6, 7), 4);
+    expect(frame).toHaveBeenCalledWith(
+      Buffer.alloc(4, 9),
+      4,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
+    expect(frame).toHaveBeenCalledWith(
+      Buffer.alloc(6, 7),
+      4,
+      expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+    );
     expect(r.pending).toBe(0);
   });
 

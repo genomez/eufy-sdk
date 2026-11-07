@@ -1,3 +1,9 @@
+import {
+  PlaybackFrameTiming,
+  PlaybackNativeFrameTiming,
+  playbackExperiment,
+  type PlaybackExperiment,
+} from "./playback-telemetry.js";
 import { chicagoInstant, recordingTimeZone } from "./event-time.js";
 import { buildPortalPacket, parsePortalHeader, PortalLinkType } from "./portal-packet.js";
 import { PlaybackIngress, type PlaybackIngressEvidence } from "./playback-ingress.js";
@@ -64,6 +70,25 @@ export type PlaybackAdmissionGate = (typeof PLAYBACK_ADMISSION_GATES)[number];
 export type PlaybackCompletenessFailure =
   "none" | "random_access" | "frames" | "span" | "gap" | "density" | "truncated";
 export interface PlaybackReceipt extends PlaybackIngressEvidence {
+  timeline?: Partial<
+    Record<
+      | "admissionGrantedMs"
+      | "startSentMs"
+      | "startAcknowledgedMs"
+      | "firstVideoFrameMs"
+      | "eofStatusMs"
+      | "mediaReadyMs"
+      | "releaseSettledMs",
+      number
+    >
+  >;
+  experiment?: PlaybackExperiment;
+  arrivalFps?: ReturnType<PlaybackFrameTiming["snapshot"]>["arrivalFps"];
+  frameTiming?: ReturnType<PlaybackFrameTiming["snapshot"]>["frameTiming"];
+  nativeFrameTiming?: ReturnType<PlaybackNativeFrameTiming["snapshot"]>;
+  selectedIceCandidateType?: "relay" | "srflx" | "host" | "prflx";
+  selectedRemoteIceCandidateType?: "relay" | "srflx" | "host" | "prflx";
+  durationBasis?: "arrival" | "catalog_experiment" | "native_header_experiment";
   reconnectOutcome?: "not_needed" | "connected" | "failed" | "timed_out";
   reconnectDurationMs?: number;
   playbackObservation?: ReturnType<PlaybackIngress["observationEvidence"]>;
@@ -114,7 +139,7 @@ export interface PlaybackReceipt extends PlaybackIngressEvidence {
   codec: "unknown" | "h265";
   elapsedMs: number;
   silenceMs: number;
-  /** Retained monotonic video span plus its mean frame interval; absent without two timed frames. */
+  /** Arrival duration normally; active EOF experiments prefer a catalog-consistent native clock, then catalog duration. */
   mediaDurationMs?: number;
 }
 
@@ -179,7 +204,9 @@ export function playbackRequest(
   sub: 0 | 1 | 3,
   segment: number,
   begin: number,
+  experiment?: PlaybackExperiment,
 ): Buffer {
+  const active = playbackExperiment(experiment);
   const selector = sub === 3 ? start + 1 : start;
   return buildPortalPacket({
     commandId: 1700,
@@ -195,9 +222,9 @@ export function playbackRequest(
       segmen: segment,
       data: {
         cmd: sub,
-        play_type: 1,
-        play_speed: 1,
-        client_type: "WEB",
+        play_type: active?.playType ?? 1,
+        play_speed: active?.playSpeed ?? 1,
+        client_type: active?.clientType ?? "WEB",
         device_sn: "",
         record_id: record,
         play_id: selector,
@@ -216,6 +243,16 @@ export class EventPlaybackCandidate {
   readonly ingress: PlaybackIngress;
   readonly receipt: PlaybackReceipt;
   private readonly started = performance.now();
+  private readonly frameTiming = new PlaybackFrameTiming();
+  private readonly nativeFrameTiming = new PlaybackNativeFrameTiming();
+
+  /** Monotonic offsets only; an event is retained once. */
+  mark(event: keyof NonNullable<PlaybackReceipt["timeline"]>): void {
+    (this.receipt.timeline ??= {})[event] ??= Math.max(
+      0,
+      Math.round(performance.now() - (this.opts.timelineOriginMs ?? this.started)),
+    );
+  }
   private readonly segments: Partial<Record<0 | 1 | 3, number>> = {};
   private finish?: () => void;
   private finalized = false;
@@ -229,7 +266,7 @@ export class EventPlaybackCandidate {
   private lateLatched = false;
   private selection?: { record: number; begin: number };
   private startSelector?: number;
-  /** Framed ingress exposes no validated media timestamp; coverage uses monotonic video arrival time. */
+  /** No validated presentation clock; normal coverage uses monotonic video arrival time. */
   private firstVideoAt?: number;
   private lastVideoAt?: number;
   private maxVideoGapMs = 0;
@@ -238,6 +275,8 @@ export class EventPlaybackCandidate {
 
   constructor(
     private readonly opts: {
+      timelineOriginMs?: number;
+      experiment?: PlaybackExperiment;
       deadlineMs: number;
       timeZone?: string;
       captureMs?: number;
@@ -256,13 +295,14 @@ export class EventPlaybackCandidate {
       nativeMessage?: (direction: "in" | "out", message: unknown) => void;
     },
   ) {
+    const experiment = playbackExperiment(opts.experiment);
     this.ingress = new PlaybackIngress({
       streaming: opts.video
         ? { durationMs: opts.captureMs ?? 8000, frameLimit: Math.ceil(((opts.captureMs ?? 8000) * 256) / 1000) }
         : undefined,
       nativeMessage: opts.nativeMessage,
       end: (reason) => this.end(reason),
-      media: (frame) => this.media(frame),
+      media: (frame, timing) => this.media(frame, timing),
       control: (frame, link) => this.control(frame, link),
       liveAllowed: opts.liveAllowed,
       late: () => {
@@ -274,6 +314,8 @@ export class EventPlaybackCandidate {
       },
     });
     this.receipt = {
+      ...(experiment && { experiment }),
+      timeline: {},
       stationStatusCounts: [],
       stationStatusOverflow: 0,
       stationRefusalConfirmed: false,
@@ -412,15 +454,27 @@ export class EventPlaybackCandidate {
           this.segments[0] = segment;
           this.ingress.capturing = true;
           this.receipt.startAttempted = true;
+          this.mark("startSentMs");
           this.receipt.releaseOutcome = "release_unknown";
           this.receipt.cessationOutcome = "cessation_unknown";
           if (
             !this.opts.send(
-              playbackRequest(this.opts.account, selection.record, selectors[0], 0, segment, selection.begin),
+              playbackRequest(
+                this.opts.account,
+                selection.record,
+                selectors[0],
+                0,
+                segment,
+                selection.begin,
+                this.receipt.experiment,
+              ),
             )
-          )
+          ) {
+            delete this.receipt.timeline?.startSentMs;
             this.end("start_refused");
+          }
         } catch {
+          delete this.receipt.timeline?.startSentMs;
           this.end(
             !this.receipt.startAttempted && this.receipt.latchPersistenceFailed ? "storage_failed" : "start_refused",
           );
@@ -459,6 +513,7 @@ export class EventPlaybackCandidate {
             sub,
             segment,
             this.selection.begin,
+            this.receipt.experiment,
           ),
         );
         if (sub === 1) this.receipt.pauseSent = sent;
@@ -546,6 +601,20 @@ export class EventPlaybackCandidate {
       const span = (this.lastVideoAt ?? 0) - (this.firstVideoAt ?? 0);
       if (this.fullClip && this.receipt.videoFrames >= 2 && span > 0)
         this.receipt.mediaDurationMs = Math.max(1, Math.round(span + span / (this.receipt.videoFrames - 1)));
+      Object.assign(this.receipt, this.frameTiming.snapshot());
+      this.receipt.nativeFrameTiming = this.nativeFrameTiming.snapshot();
+      this.receipt.durationBasis = "arrival";
+      if (
+        this.receipt.experiment &&
+        this.fullClip &&
+        this.eofSeen &&
+        this.opts.expectedMs &&
+        this.receipt.videoFrames >= 2
+      ) {
+        const nativeDuration = this.nativeFrameTiming.durationMs(this.opts.expectedMs);
+        this.receipt.mediaDurationMs = nativeDuration ?? this.opts.expectedMs;
+        this.receipt.durationBasis = nativeDuration === undefined ? "catalog_experiment" : "native_header_experiment";
+      }
       this.receipt.retainedVideoSpanMs = Math.max(0, Math.round(span));
       this.receipt.maxVideoGapMs = Math.max(0, Math.round(this.maxVideoGapMs));
       this.receipt.retainedVideoFrames = this.receipt.videoFrames;
@@ -605,7 +674,7 @@ export class EventPlaybackCandidate {
     const eof = this.eofSeen && this.receipt.captureOutcome === "eof";
     if (eof && !this.receipt.randomAccess) return "random_access";
     if (this.receipt.videoFrames < 2) return "frames";
-    if (eof) return span > 0 ? "none" : "span";
+    if (eof) return span > 0 || !!this.receipt.experiment ? "none" : "span";
     if (span <= 0 || span < this.opts.expectedMs - 250) return "span";
     if (this.maxVideoGapMs > 1000) return "gap";
     if ((this.receipt.videoFrames - 1) * 1000 < span * 5) return "density";
@@ -617,7 +686,7 @@ export class EventPlaybackCandidate {
     return this.retainedMediaFailure() === "none";
   }
 
-  private media(frame: Buffer): void {
+  private media(frame: Buffer, timing?: { frameId: number; sequence: number }): void {
     const h = parsePortalHeader(frame)!;
     if (h.isResponse !== this.startSelector) {
       this.ingress.invalidMedia("selector");
@@ -659,6 +728,9 @@ export class EventPlaybackCandidate {
     }
     if (this.lastVideoAt !== undefined) this.maxVideoGapMs = Math.max(this.maxVideoGapMs, now - this.lastVideoAt);
     this.lastVideoAt = now;
+    this.frameTiming.add(now, timing);
+    this.nativeFrameTiming.add(body, now);
+    this.mark("firstVideoFrameMs");
     this.receipt.videoFrames++;
     this.receipt.codec = "h265";
     this.receipt.randomAccess ||= isHevcKeyframe(data);
@@ -710,6 +782,7 @@ export class EventPlaybackCandidate {
       if (this.refusalAt !== undefined) this.conflict = true;
       if (!this.finalized) {
         this.receipt.startAcknowledged = true;
+        this.mark("startAcknowledgedMs");
         if (this.receipt.videoFrames) this.receipt.beginTimeAcceptance = "accepted";
       }
     } else if (p.state === 2 && p.code === 14 && this.stoppedAt === undefined) {
@@ -719,6 +792,7 @@ export class EventPlaybackCandidate {
         return false;
       }
       this.eofSeen = true;
+      this.mark("eofStatusMs");
       this.end("eof");
     } else if (p.state === 2 && p.code === 15 && this.stoppedAt !== undefined) {
       this.releaseSeen = true;

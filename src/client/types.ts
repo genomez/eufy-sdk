@@ -121,6 +121,8 @@ export interface EufyMegaOptions extends MegaClientConfig {
     /** Optional internal recording enrollment; disabled when absent. */
     recordings?: import("../transport/rtc/recordings.js").RecordingPolicy;
     icePolicy?: "relay" | "all";
+    /** Evaluated at shared session creation; affects both live and stored media. */
+    icePolicyAtSessionCreation?: () => "relay" | "all" | undefined;
     ackTimeoutMs?: number;
     /** ACK acceptance for passive commands, independently of information-read timing; defaults to 12 seconds. */
     commandAckTimeoutMs?: number;

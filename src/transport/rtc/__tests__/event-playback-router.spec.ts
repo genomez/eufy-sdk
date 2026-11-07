@@ -941,9 +941,14 @@ it.each([
   },
 );
 
-it.each(["connected", "failed"])(
-  "EOF media is delivered before %s cleanup and live waits for retirement",
-  async (outcome) => {
+it.each([
+  ["connected", undefined],
+  ["failed", undefined],
+  ["connected", { playSpeed: 8, playType: 1, clientType: "WEB", maxClips: 1 }],
+  ["failed", { playSpeed: 8, playType: 1, clientType: "WEB", maxClips: 1 }],
+] as const)(
+  "EOF media is delivered before %s cleanup and live waits for retirement with %j",
+  async (outcome, experiment) => {
     const { router, session, sessions } = await fixture();
     session.eof = false;
     session.releaseStatus = false;
@@ -964,7 +969,7 @@ it.each(["connected", "failed"])(
     const pulling = router
       .readEventPlaybackCandidate(station, {
         ...options(),
-        clip: { ...sealedClip(router, session), mediaReady },
+        clip: { ...sealedClip(router, session), mediaReady, experiment },
       })
       .finally(() => {
         settled = true;
@@ -981,7 +986,7 @@ it.each(["connected", "failed"])(
     expect(mediaReady.mock.calls[0]![0]).toMatchObject({
       captureOutcome: "eof",
       boundedMediaObserved: true,
-      mediaDurationMs: 500,
+      mediaDurationMs: experiment ? 1000 : 500,
     });
     expect(settled).toBe(false);
     expect(router.getPlaybackSafetyDiagnostics().reconnect.attempts).toBe(1);
@@ -1073,4 +1078,57 @@ it.each([9999, 10000])("sealed events use a ten-second end margin: %s ms", async
       ? { captureOutcome: "time_refused", startAttempted: false }
       : { captureOutcome: "eof", startAttempted: true },
   );
+});
+
+it("plumbs dynamic ICE policy to new shared sessions and retains selected pair types in receipts", async () => {
+  const { router, session, sessions } = await fixture();
+  const deps = Reflect.get(router, "deps");
+  let policy: "relay" | "all" | undefined = "all";
+  deps.icePolicyAtSessionCreation = () => policy;
+  const factory = deps.createSession;
+  const policies: string[] = [];
+  deps.createSession = (o: { peer: { icePolicy: string } }) => {
+    policies.push(o.peer.icePolicy);
+    return factory(o);
+  };
+  Object.assign(session, { getSelectedIceCandidateTypes: () => ({ local: "host", remote: "srflx" }) });
+  const experiment = { playSpeed: 4, playType: 1, clientType: "WEB", maxClips: 2, icePolicy: "all" } as const;
+  session.eof = false;
+  const clip = {
+    ...sealedClip(router, session),
+    experiment,
+    mediaReady: undefined as ((r: unknown) => void) | undefined,
+  };
+  const ready = vi.fn();
+  clip.mediaReady = ready;
+  const pending = router.readEventPlaybackCandidate(station, { ...options(), clip });
+  await vi.advanceTimersByTimeAsync(10);
+  const body = Buffer.alloc(29);
+  body.writeUInt32LE(7);
+  body[5] = 1;
+  Buffer.from([0, 0, 0, 1, 0x26, 1, 0x80]).copy(body, 22);
+  session.input(1300, body, 4, 101, 6);
+  session.input(1351, { cmd: 6001, payload: { state: 2, code: 14 } });
+  await vi.advanceTimersByTimeAsync(100);
+  const receipt = await pending;
+  expect(receipt).toMatchObject({
+    experiment,
+    selectedIceCandidateType: "host",
+    selectedRemoteIceCandidateType: "srflx",
+    durationBasis: "catalog_experiment",
+    reconnectOutcome: "connected",
+  });
+  expect(ready).toHaveBeenCalledOnce();
+  expect(receipt.timeline!.releaseSettledMs).toBeGreaterThanOrEqual(receipt.timeline!.mediaReadyMs!);
+  expect(policies).toEqual(["all"]);
+  policy = undefined;
+  const replacement = Reflect.get(router, "reconnectPlayback").call(
+    router,
+    station,
+    Reflect.get(router, "sessions").get(station),
+  );
+  await vi.advanceTimersByTimeAsync(10);
+  await replacement;
+  expect(policies).toEqual(["all", "relay"]);
+  expect(sessions).toHaveLength(3);
 });

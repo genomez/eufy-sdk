@@ -167,6 +167,7 @@ export interface RtcCommandRouterDeps {
   logger?: Logger;
   /** `relay` (default) or `all`. Never `host-only` — see the module doc. */
   icePolicy?: "relay" | "all";
+  icePolicyAtSessionCreation?: () => "relay" | "all" | undefined;
   /** Information/ordinary-command ACK timeout and passive fallback-read trigger (default 8 s). */
   ackTimeoutMs?: number;
   /** Passive command ACK acceptance window, independent of information reads (default 12 s). */
@@ -1663,6 +1664,8 @@ export class RtcCommandRouter {
         selector: InternalPlaybackSelector;
         video: (data: Buffer) => void;
         mediaReady?: (receipt: PlaybackReceipt) => void;
+        experiment?: import("./playback-telemetry.js").PlaybackExperiment;
+        timelineOriginMs?: number;
       };
       signal?: AbortSignal;
       timeoutMs?: number;
@@ -1715,6 +1718,8 @@ export class RtcCommandRouter {
     let clipFinished = false;
     const candidate = new EventPlaybackCandidate({
       nativeMessage: opts.nativeMessage,
+      experiment: opts.clip?.experiment,
+      timelineOriginMs: opts.clip?.timelineOriginMs,
       timeZone: this.deps.recordingTimeZone,
       transient: !!opts.clip,
       captureMs,
@@ -1808,6 +1813,10 @@ export class RtcCommandRouter {
       return candidate.observe();
     }
     if (!st) return candidate.observe();
+    candidate.mark("admissionGrantedMs");
+    const selectedIce = st.session.getSelectedIceCandidateTypes?.();
+    candidate.receipt.selectedIceCandidateType = selectedIce?.local;
+    candidate.receipt.selectedRemoteIceCandidateType = selectedIce?.remote;
     opts.beforeDispatch?.();
     st.session.attachIngressGuard(candidate.ingress);
     let finishPlayback!: () => void;
@@ -1911,6 +1920,8 @@ export class RtcCommandRouter {
       receipt = await candidate.observe(!!opts.clip);
       if (opts.clip && receipt.captureOutcome === "eof" && receipt.boundedMediaObserved) {
         try {
+          candidate.mark("mediaReadyMs");
+          receipt.timeline = { ...candidate.receipt.timeline };
           opts.clip.mediaReady?.(structuredClone(receipt));
         } catch {}
       }
@@ -1939,7 +1950,18 @@ export class RtcCommandRouter {
         reconnect ? await reconnect.settled : { reconnectOutcome: "not_needed", reconnectDurationMs: 0 },
       );
     }
+    candidate.mark("releaseSettledMs");
+    receipt.timeline = { ...candidate.receipt.timeline };
     return receipt;
+  }
+
+  /** Dynamic policy is evaluated only for a new shared session, with a closed fallback. */
+  private sessionIcePolicy(): "relay" | "all" {
+    try {
+      const value = this.deps.icePolicyAtSessionCreation?.();
+      if (value === "relay" || value === "all") return value;
+    } catch {}
+    return this.deps.icePolicy ?? "relay";
   }
 
   /** Retire uncertain playback ownership with one bounded replacement and no persistent state. */
@@ -2956,7 +2978,7 @@ export class RtcCommandRouter {
       channelId: 0,
       maxCallRetries,
       logger: this.deps.logger,
-      peer: { logger: this.deps.logger, icePolicy: this.deps.icePolicy ?? "relay" },
+      peer: { logger: this.deps.logger, icePolicy: this.sessionIcePolicy() },
     });
     const stages = session instanceof RtcSession ? new ConnectionStageRecorder() : null;
     if (stages) session.attachConnectionEvidence(stages);

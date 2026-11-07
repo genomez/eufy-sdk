@@ -20,10 +20,12 @@ afterEach(() => {
 const binary = (command: number, body: Buffer, selector = 6, channel = 101, segment = 9) =>
   Buffer.concat([buildPortalHeader(command, body.length, channel, segment, selector), body]);
 const json = (value: unknown, segment = 9) => binary(1351, Buffer.from(JSON.stringify(value)), 0, 0, segment);
-const video = (size = 7) => {
+const video = (size = 7, timestamp = 0, sequence = 0) => {
   const body = Buffer.alloc(22 + size);
   body.writeUInt32LE(size);
   body[5] = 1;
+  body.writeUInt32LE(timestamp >>> 0, 14);
+  body.writeUInt16LE(sequence & 0xffff, 6);
   Buffer.from([0, 0, 0, 1, 0x26, 1, 0x80]).copy(body, 22);
   return binary(1300, body);
 };
@@ -292,6 +294,7 @@ describe("A1 real framing path", () => {
 });
 
 function candidateSetup({
+  experiment = undefined as import("../playback-telemetry.js").PlaybackExperiment | undefined,
   pauseThrows = false,
   ownerChanged = false,
   matching = true,
@@ -301,6 +304,7 @@ function candidateSetup({
   stopSend = "sent" as "sent" | "refused" | "throws",
   streaming = false,
   streamingFrames = 24,
+  nativeFrameIntervalMs = 0,
   refusal = "none",
   refusalState = 0,
   refusalCode = 7,
@@ -315,6 +319,7 @@ function candidateSetup({
     markerFails = false,
     latched = false;
   const candidate = new EventPlaybackCandidate({
+    experiment,
     deadlineMs: performance.now() + (streaming ? 91000 : 24000),
     captureMs: streaming ? 60000 : undefined,
     video: streaming ? () => {} : undefined,
@@ -361,7 +366,10 @@ function candidateSetup({
       if (body.data.cmd === 0) {
         candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 1, code: 0 } }), 3);
         for (let n = 0; n < (streaming ? streamingFrames : 1); n++)
-          for (const packet of wrapped(video(streaming ? 256 * 1024 : 7))) candidate.ingress.native(packet);
+          for (const packet of wrapped(
+            video(streaming ? 256 * 1024 : 7, n * nativeFrameIntervalMs, nativeFrameIntervalMs ? n : 0),
+          ))
+            candidate.ingress.native(packet);
         if (eof) candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 2, code: 14 } }), 3);
         if (ownerChanged) continuous = false;
       }
@@ -806,7 +814,10 @@ it("accepts a synthetic non-single-segment 8 MiB zstd window and output above 25
     p.writeUInt16LE(p.readUInt16LE(18) | 0x0800, 18);
     guard.native(p);
   }
-  expect(collected).toHaveBeenCalledExactlyOnceWith(bytes);
+  expect(collected).toHaveBeenCalledExactlyOnceWith(
+    bytes,
+    expect.objectContaining({ frameId: expect.any(Number), sequence: expect.any(Number) }),
+  );
   expect(guard.evidence).toMatchObject({
     rejected: 0,
     decodedWorkBytes: 8388608,
@@ -1223,4 +1234,90 @@ it("bounds station status classes and saturates repeated counts", async () => {
   status.count = 65535;
   s.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 0, code: 7 } }), 3);
   expect(status.count).toBe(65535);
+});
+
+it("always records timeline offsets, arrival buckets and PTCS header evidence", async () => {
+  const f = candidateSetup({ streaming: true, eof: true });
+  f.candidate.mark("admissionGrantedMs");
+  await f.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+  const receipt = await f.candidate.observe(true);
+  expect(Object.keys(receipt.timeline!)).toEqual([
+    "admissionGrantedMs",
+    "startSentMs",
+    "startAcknowledgedMs",
+    "firstVideoFrameMs",
+    "eofStatusMs",
+  ]);
+  expect(Object.values(receipt.timeline!)).toEqual([...Object.values(receipt.timeline!)].sort((a, b) => a - b));
+  expect(receipt.arrivalFps).toEqual({ buckets: 1, min: 24, median: 24, max: 24 });
+  expect(receipt.frameTiming).toMatchObject({
+    frames: 24,
+    timestampDeltaMs: 23,
+    maxTimestampGapMs: 1,
+    mediaTimestampValidated: false,
+  });
+  expect(receipt.nativeFrameTiming).toMatchObject({
+    frames: 24,
+    timestampDeltaTicks: 0,
+    sequenceDelta: 0,
+    mediaTimestampValidated: false,
+  });
+  expect(receipt.experiment).toBeUndefined();
+});
+
+it("accelerated EOF uses catalog duration and repeats the experiment tuple during cleanup", async () => {
+  const experiment = { playSpeed: 8, playType: 1, clientType: "WEB", maxClips: 1 } as const;
+  const f = candidateSetup({ streaming: true, eof: true, experiment });
+  Reflect.get(f.candidate, "opts").expectedMs = 10000;
+  await f.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+  const receipt = await f.candidate.observe(true);
+  expect(receipt).toMatchObject({
+    experiment,
+    mediaDurationMs: 10000,
+    durationBasis: "catalog_experiment",
+    boundedMediaObserved: true,
+  });
+  for (const packet of f.sent)
+    expect(JSON.parse(packet.subarray(16).toString()).data).toMatchObject({
+      play_speed: 8,
+      play_type: 1,
+      client_type: "WEB",
+    });
+});
+
+it.each(["no-eof", "unexpected", "preempted"])("experimental %s retains bounded cleanup", async (mode) => {
+  const experiment = { playSpeed: 8, playType: 1, clientType: "WEB", maxClips: 1 } as const;
+  const f = candidateSetup({ streaming: true, experiment });
+  Reflect.get(f.candidate, "opts").expectedMs = 10000;
+  const capture = f.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+  if (mode === "unexpected") f.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 9, code: 99 } }), 3);
+  else if (mode === "preempted") f.controller.abort();
+  else await vi.advanceTimersByTimeAsync(60001);
+  await capture;
+  const observing = f.candidate.observe();
+  await vi.advanceTimersByTimeAsync(16001);
+  expect(await observing).toMatchObject({
+    experiment,
+    boundedMediaObserved: false,
+    pauseAttempted: true,
+    stopAttempted: true,
+  });
+  expect(f.sent.map((p) => JSON.parse(p.subarray(16).toString()).data.cmd)).toEqual([0, 1, 3]);
+});
+
+it("active EOF prefers an advancing catalog-consistent native timestamp word", async () => {
+  const experiment = { playSpeed: 8, playType: 1, clientType: "WEB", maxClips: 1 } as const;
+  const f = candidateSetup({ streaming: true, eof: true, experiment, streamingFrames: 20, nativeFrameIntervalMs: 500 });
+  Reflect.get(f.candidate, "opts").expectedMs = 10200;
+  await f.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+  expect(await f.candidate.observe(true)).toMatchObject({
+    mediaDurationMs: 10000,
+    durationBasis: "native_header_experiment",
+    nativeFrameTiming: {
+      timestampDeltaTicks: 9500,
+      maxTimestampGapTicks: 500,
+      sequenceDelta: 19,
+      mediaTimestampValidated: false,
+    },
+  });
 });
