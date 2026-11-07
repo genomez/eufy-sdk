@@ -6,7 +6,7 @@ import type { RtcIngressGuard } from "../playback-ingress.js";
 import type { EufyDevice } from "../../../core/types.js";
 import { buildPortalHeader, parsePortalHeader } from "../portal-packet.js";
 import { packetize, PtcsFramer } from "../ptcs-framer.js";
-import { PORTAL_KEEPALIVE } from "../portal-keepalive.js";
+import { PORTAL_KEEPALIVE, PORTAL_KEEPALIVE_MS } from "../portal-keepalive.js";
 import { performance as nativePerformance } from "node:perf_hooks";
 import { zstdCompressSync } from "node:zlib";
 import { normalizeRecordingRows, recordingAccountNamespace } from "../recordings.js";
@@ -22,6 +22,8 @@ afterEach(() => {
 class Session extends EventEmitter {
   isConnected = false;
   sent: Buffer[] = [];
+  raw: Buffer[] = [];
+  echoRaw = true;
   guard?: RtcIngressGuard;
   framer = new PtcsFramer();
   counter = 0;
@@ -72,6 +74,12 @@ class Session extends EventEmitter {
       { channel: route, frameId: ++this.counter, payloadBytes: 40 },
     ))
       this.inject(p);
+  }
+  sendRaw(packet: Buffer) {
+    if (!this.isConnected) return false;
+    this.raw.push(Buffer.from(packet));
+    if (this.echoRaw) this.inject(packet);
+    return true;
   }
   sendCommand(packet: Buffer) {
     this.sent.push(packet);
@@ -130,7 +138,7 @@ class Session extends EventEmitter {
     return true;
   }
 }
-async function fixture() {
+async function fixture(commandKeepaliveMs?: number) {
   vi.useFakeTimers();
   vi.spyOn(nativePerformance, "now").mockImplementation(() => performance.now());
   const sessions: Session[] = [],
@@ -141,6 +149,7 @@ async function fixture() {
     shard: () => "us",
     idleCloseMs: 900000,
     sessionRefreshMs: 600000,
+    commandKeepaliveMs,
     findDevice: (sn) =>
       ({ sn, stationSn: station, model: sn === station ? "T9000" : "T8425", raw: { device_channel: 2 } }) as EufyDevice,
     createSession: () => {
@@ -553,6 +562,56 @@ function sealedClip(router: RtcCommandRouter, session: Session) {
   if (result.status !== "ok") throw Error("fixture");
   return { scope, selector: result.rows[0]!.playbackSelector!, video: () => {} };
 }
+
+it.each([true, false])(
+  "fresh playback owner gets an early keepalive without bypassing observation (echo=%s)",
+  async (echo) => {
+    const { router, session, sessions } = await fixture(PORTAL_KEEPALIVE_MS);
+    const clip = sealedClip(router, session);
+    const original = Reflect.get(router, "sessions").get(station);
+    const reconnecting = Reflect.get(router, "reconnectPlayback").call(router, station, original);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await reconnecting).toMatchObject({ reconnectOutcome: "connected" });
+    const replacement = Reflect.get(router, "sessions").get(station);
+    const fresh = sessions[1]!;
+    fresh.echoRaw = echo;
+    expect(replacement).not.toBe(original);
+    expect(fresh.isConnected).toBe(true);
+    expect(replacement.playbackObservation.ordinaryFrames).toBeGreaterThan(0);
+    expect(replacement.playbackObservation.keepalives).toBe(0);
+    const connectedAt = performance.now();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fresh.raw).toEqual([]);
+    expect(replacement.playbackObservation.keepalives).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fresh.raw).toEqual([PORTAL_KEEPALIVE]);
+    expect(replacement.playbackObservation.keepalives).toBe(echo ? 1 : 0);
+    expect(await router.readEventPlaybackCandidate(station, { ...options(), clip })).toMatchObject({
+      admissionGateName: "observation_window",
+      startAttempted: false,
+    });
+    await vi.advanceTimersByTimeAsync(3999);
+    expect(await router.readEventPlaybackCandidate(station, { ...options(), clip })).toMatchObject({
+      admissionGateName: "observation_window",
+      startAttempted: false,
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(performance.now() - connectedAt).toBe(5000);
+    const pending = router.readEventPlaybackCandidate(station, { ...options(), clip });
+    await vi.advanceTimersByTimeAsync(0);
+    if (echo) {
+      expect(Reflect.get(router, "playbackProbes").get(station).candidate.receipt).toMatchObject({
+        admissionGateName: "none",
+        startAttempted: true,
+      });
+      await vi.advanceTimersByTimeAsync(5100);
+      expect(await pending).toMatchObject({ admissionGateName: "none", captureOutcome: "eof" });
+    } else {
+      expect(await pending).toMatchObject({ admissionGateName: "no_keepalives", startAttempted: false });
+      expect(fresh.sent.filter((p) => parsePortalHeader(p)!.commandId === 1700)).toEqual([]);
+    }
+  },
+);
 
 it("names a transient admission refusal when freshness changes before the scheduler recheck", async () => {
   const { router, session } = await fixture();

@@ -123,26 +123,49 @@ describe("opt-in current command-session keepalive", () => {
     },
   );
 
-  it("sends exact raw bytes only at the interval, accepting synchronous echoes before the send returns", async () => {
+  it("sends an exact early probe then at interval boundaries, accepting synchronous echoes before send returns", async () => {
     const { router, sessions } = setup();
     await router.refreshInformation(SN);
-    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS - 1);
+    await vi.advanceTimersByTimeAsync(999);
     expect(sessions[0]!.raw).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     expect(sessions[0]!.raw).toEqual([PORTAL_KEEPALIVE]);
+    expect(router.getKeepaliveDiagnostics()).toMatchObject({ sent: 1, echoed: 1, lastEchoAtMs: 1000 });
+    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS - 1001);
+    expect(sessions[0]!.raw).toEqual([PORTAL_KEEPALIVE]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sessions[0]!.raw).toEqual([PORTAL_KEEPALIVE, PORTAL_KEEPALIVE]);
     await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS * 3);
-    expect(sessions[0]!.raw).toHaveLength(4);
+    expect(sessions[0]!.raw).toEqual(Array(5).fill(PORTAL_KEEPALIVE));
     expect(sessions[0]!.closed).toBe(false);
     expect(router.getKeepaliveDiagnostics()).toEqual({
       enabled: true,
-      sent: 4,
-      echoed: 4,
+      sent: 5,
+      echoed: 5,
       missedEchoDrops: 0,
       sendFailureDrops: 0,
       lastEchoAtMs: PORTAL_KEEPALIVE_MS * 4,
     });
     router.getKeepaliveDiagnostics().sent = 100;
-    expect(router.getKeepaliveDiagnostics().sent).toBe(4);
+    expect(router.getKeepaliveDiagnostics().sent).toBe(5);
+  });
+
+  it.each([1000, 1500, 2000, 2001])("avoids an overlapping early probe at interval %s", async (interval) => {
+    const { router, sessions } = setup({ commandKeepaliveMs: interval });
+    await router.refreshInformation(SN);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(sessions[0]!.raw).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sessions[0]!.raw).toHaveLength(interval === 1000 || interval > 2000 ? 1 : 0);
+    if (interval > 1000) {
+      await vi.advanceTimersByTimeAsync(interval - 1001);
+      expect(sessions[0]!.raw).toHaveLength(interval > 2000 ? 1 : 0);
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    expect(sessions[0]!.raw).toHaveLength(interval > 2000 ? 2 : 1);
+    await vi.advanceTimersByTimeAsync(interval);
+    expect(sessions[0]!.raw).toHaveLength(interval > 2000 ? 3 : 2);
+    expect(router.getKeepaliveDiagnostics()).toMatchObject({ missedEchoDrops: 0, sendFailureDrops: 0 });
   });
 
   it("clears awaitingEcho on a later echo and ignores unsolicited or duplicate echoes", async () => {
@@ -153,12 +176,12 @@ describe("opt-in current command-session keepalive", () => {
     const session = sessions[0]!;
     session.emit("keepaliveEcho");
     expect(router.getKeepaliveDiagnostics().echoed).toBe(0);
-    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS);
+    await vi.advanceTimersByTimeAsync(1000);
     await vi.advanceTimersByTimeAsync(100);
     session.emit("keepaliveEcho");
     session.emit("keepaliveEcho");
-    expect(router.getKeepaliveDiagnostics()).toMatchObject({ echoed: 1, lastEchoAtMs: 29_100 });
-    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS - 100);
+    expect(router.getKeepaliveDiagnostics()).toMatchObject({ echoed: 1, lastEchoAtMs: 1100 });
+    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS - 1100);
     expect(session.raw).toHaveLength(2);
     expect(session.closed).toBe(false);
   });
@@ -169,9 +192,12 @@ describe("opt-in current command-session keepalive", () => {
     });
     await router.refreshInformation(SN);
     const original = sessions[0]!;
-    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(original.raw).toEqual([PORTAL_KEEPALIVE]);
+    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS - 1001);
     expect(original.closed).toBe(false);
-    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS);
+    expect(router.getKeepaliveDiagnostics().missedEchoDrops).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
     expect(original.closeCalls).toBe(1);
     expect(original.listenerCount("keepaliveEcho")).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
@@ -189,9 +215,27 @@ describe("opt-in current command-session keepalive", () => {
     });
     await router.refreshInformation(SN);
     expect(sessions).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(sessions[1]!.raw).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
     expect(sessions[1]!.raw).toHaveLength(1);
     expect(router.getKeepaliveDiagnostics()).toMatchObject({ sent: 2, echoed: 1, missedEchoDrops: 1 });
+  });
+
+  it("gives an unechoed regular send until the next interval after an echoed early probe", async () => {
+    const { router, sessions } = setup();
+    await router.refreshInformation(SN);
+    await vi.advanceTimersByTimeAsync(1000);
+    const session = sessions[0]!;
+    session.echo = false;
+    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS * 2 - 1001);
+    expect(session.raw).toEqual([PORTAL_KEEPALIVE, PORTAL_KEEPALIVE]);
+    expect(session.closed).toBe(false);
+    expect(router.getKeepaliveDiagnostics()).toMatchObject({ sent: 2, echoed: 1, missedEchoDrops: 0 });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(session.closeCalls).toBe(1);
+    expect(router.getKeepaliveDiagnostics().missedEchoDrops).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it.each(["false", "throw"] as const)(
@@ -201,7 +245,9 @@ describe("opt-in current command-session keepalive", () => {
         if (index === 0) session.rawResult = failure;
       });
       await router.refreshInformation(SN);
-      await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS * 4);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(sessions[0]!.closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
       expect(sessions).toHaveLength(1);
       expect(sessions[0]!.closeCalls).toBe(1);
       expect(vi.getTimerCount()).toBe(0);
@@ -211,52 +257,86 @@ describe("opt-in current command-session keepalive", () => {
         missedEchoDrops: 0,
         sendFailureDrops: 1,
       });
+      await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS * 4);
+      expect(sessions[0]!.closeCalls).toBe(1);
+      expect(router.getKeepaliveDiagnostics().sendFailureDrops).toBe(1);
       await router.refreshInformation(SN);
       expect(sessions).toHaveLength(2);
     },
   );
 
-  it("moves the timer to the adopted replacement and starts its interval at adoption", async () => {
+  it("moves both timers to the adopted replacement and anchors its cadence at adoption", async () => {
     const { router, sessions } = setup({ sessionRefreshMs: 60_000 });
     await router.refreshInformation(SN);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(sessions).toHaveLength(2);
-    expect(sessions[0]!.raw).toHaveLength(2);
+    expect(sessions[0]!.raw).toHaveLength(3);
     expect(sessions[0]!.closed).toBe(true);
     expect(sessions[0]!.listenerCount("keepaliveEcho")).toBe(0);
     expect(sessions[1]!.raw).toEqual([]);
     expect(router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 1, successes: 1, deferred: 0 });
-    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS - 1);
+    await vi.advanceTimersByTimeAsync(999);
     expect(sessions[1]!.raw).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
     expect(sessions[1]!.raw).toEqual([PORTAL_KEEPALIVE]);
-    expect(sessions[0]!.raw).toHaveLength(2);
-    expect(router.getKeepaliveDiagnostics()).toMatchObject({ sent: 3, echoed: 3 });
+    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS - 1001);
+    expect(sessions[1]!.raw).toEqual([PORTAL_KEEPALIVE]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sessions[1]!.raw).toEqual([PORTAL_KEEPALIVE, PORTAL_KEEPALIVE]);
+    expect(sessions[0]!.raw).toHaveLength(3);
+    expect(router.getKeepaliveDiagnostics()).toMatchObject({ sent: 5, echoed: 5 });
   });
 
-  it("keeps candidates unarmed while connecting and while verified but waiting for existing leases", async () => {
-    const { router, sessions } = setup({ sessionRefreshMs: 30_000, commandKeepaliveMs: 1_000 }, (session, index) => {
-      if (index === 1) session.autoOpen = false;
-    });
+  it("cancels the original's pending early probe when a replacement is adopted before it fires", async () => {
+    const { router, sessions } = setup({ sessionRefreshMs: 30_000 });
     await router.refreshInformation(SN);
-    await vi.advanceTimersByTimeAsync(30_000);
-    const candidate = sessions[1]!;
-    expect(candidate.listenerCount("keepaliveEcho")).toBe(0);
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(candidate.raw).toEqual([]);
-    const lease = await router.sessionFor(SN);
-    candidate.open();
-    await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(4_000);
-    expect(candidate.raw).toEqual([]);
-    expect(candidate.listenerCount("keepaliveEcho")).toBe(0);
-    expect(sessions[0]!.closed).toBe(false);
-    lease.release();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(500);
+    const original = Reflect.get(router, "sessions").get(SN);
+    await Reflect.get(router, "replaceSession").call(router, SN, original);
+    expect(sessions).toHaveLength(2);
     expect(sessions[0]!.closed).toBe(true);
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(candidate.raw).toEqual([PORTAL_KEEPALIVE]);
+    expect(sessions[0]!.listenerCount("keepaliveEcho")).toBe(0);
+    expect(original.keepalive).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(4);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(sessions[0]!.raw).toEqual([]);
+    expect(sessions[1]!.raw).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sessions[1]!.raw).toEqual([PORTAL_KEEPALIVE]);
+    expect(router.getKeepaliveDiagnostics()).toMatchObject({ sent: 1, echoed: 1 });
+    router.close();
+    expect(vi.getTimerCount()).toBe(0);
   });
+
+  it.each([1000, PORTAL_KEEPALIVE_MS])(
+    "keeps candidates unarmed through connection and lease deferral (%s ms)",
+    async (interval) => {
+      const { router, sessions } = setup(
+        { sessionRefreshMs: 30_000, commandKeepaliveMs: interval },
+        (session, index) => {
+          if (index === 1) session.autoOpen = false;
+        },
+      );
+      await router.refreshInformation(SN);
+      await vi.advanceTimersByTimeAsync(30_000);
+      const candidate = sessions[1]!;
+      expect(candidate.listenerCount("keepaliveEcho")).toBe(0);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(candidate.raw).toEqual([]);
+      const lease = await router.sessionFor(SN);
+      candidate.open();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(4_000);
+      expect(candidate.raw).toEqual([]);
+      expect(candidate.listenerCount("keepaliveEcho")).toBe(0);
+      expect(sessions[0]!.closed).toBe(false);
+      lease.release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sessions[0]!.closed).toBe(true);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(candidate.raw).toEqual([PORTAL_KEEPALIVE]);
+    },
+  );
 
   it("does not acquire leases or prevent the existing lease deferral from releasing renewal", async () => {
     const { router, sessions } = setup({ sessionRefreshMs: 30_000, commandKeepaliveMs: 1_000 });
@@ -279,19 +359,28 @@ describe("opt-in current command-session keepalive", () => {
     await vi.advanceTimersByTimeAsync(610_000);
     expect(sessions).toHaveLength(2);
     expect(sessions[0]!.closed).toBe(false);
-    expect(sessions[0]!.raw).toHaveLength(21);
+    expect(sessions[0]!.raw).toHaveLength(22);
     expect(sessions[1]!.closed).toBe(true);
     expect(sessions[1]!.raw).toEqual([]);
     expect(router.getSessionRefreshDiagnostics()).toMatchObject({ attempts: 1, failures: 1 });
-    expect(router.getKeepaliveDiagnostics()).toMatchObject({ sent: 21, echoed: 21, missedEchoDrops: 0 });
+    expect(router.getKeepaliveDiagnostics()).toMatchObject({ sent: 22, echoed: 22, missedEchoDrops: 0 });
   });
 
-  it.each(["idle", "remote", "router"])("clears keepalive timers and listeners on %s closure", async (reason) => {
-    const { router, sessions } = setup({ idleCloseMs: 60_000 });
+  it.each([
+    ["idle", 500],
+    ["remote", 500],
+    ["router", 500],
+    ["idle", 60_000],
+    ["remote", 60_000],
+    ["router", 60_000],
+  ] as const)("clears keepalive timers and listeners on %s closure at %s ms", async (reason, closeAt) => {
+    const { router, sessions } = setup({ idleCloseMs: reason === "idle" ? closeAt : 1_000_000 });
     await router.refreshInformation(SN);
-    await vi.advanceTimersByTimeAsync(PORTAL_KEEPALIVE_MS);
+    await vi.advanceTimersByTimeAsync(closeAt - 1);
     const session = sessions[0]!;
-    if (reason === "idle") await vi.advanceTimersByTimeAsync(60_000 - PORTAL_KEEPALIVE_MS);
+    expect(session.closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    if (reason === "idle") expect(session.closed).toBe(true);
     else if (reason === "remote") session.close();
     else router.close();
     expect(session.closed).toBe(true);

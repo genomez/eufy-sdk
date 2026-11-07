@@ -249,7 +249,11 @@ interface StationSession {
   nonBusySessionError?: boolean;
   refreshTimer?: ReturnType<typeof setTimeout>;
   refreshDueMonotonicMs?: number;
-  keepalive?: { timer: ReturnType<typeof setInterval>; onEcho: () => void };
+  keepalive?: {
+    timer: ReturnType<typeof setInterval>;
+    earlyTimer?: ReturnType<typeof setTimeout>;
+    onEcho: () => void;
+  };
   refreshPending?: boolean;
   refreshAttempts?: number;
   /** Completed attempts before this cycle; diagnostic ordinals remain generation-wide. */
@@ -3585,6 +3589,7 @@ export class RtcCommandRouter {
 
   /**
    * Watch only the connected current owner, without acquiring a lease or extending its idle deadline.
+   * Intervals above two seconds include a one-second probe; its echo is due at the first interval tick.
    * A failed send or an unechoed previous send retires it; subsequent operations acquire a new session.
    */
   private armKeepalive(sn: string, st: StationSession): void {
@@ -3598,7 +3603,7 @@ export class RtcCommandRouter {
       this.keepaliveStats.lastEchoAtMs = Date.now();
     };
     st.session.on("keepaliveEcho", onEcho);
-    const timer = setInterval(() => {
+    const tick = () => {
       if (this.sessions.get(sn) !== st || !st.session.isConnected) {
         this.stopKeepalive(st);
         return;
@@ -3617,15 +3622,19 @@ export class RtcCommandRouter {
       } catch {}
       this.keepaliveStats.sendFailureDrops++;
       this.drop(sn, st);
-    }, interval);
-    st.keepalive = { timer, onEcho };
+    };
+    const timer = setInterval(tick, interval);
+    const earlyTimer = interval > 2000 ? setTimeout(tick, 1000) : undefined;
+    st.keepalive = { timer, earlyTimer, onEcho };
     timer.unref?.();
+    earlyTimer?.unref?.();
   }
 
   /** Remove the current generation's timer and echo listener on every retirement path. */
   private stopKeepalive(st: StationSession): void {
     if (!st.keepalive) return;
     clearInterval(st.keepalive.timer);
+    clearTimeout(st.keepalive.earlyTimer);
     st.session.off("keepaliveEcho", st.keepalive.onEcho);
     st.keepalive = undefined;
   }
