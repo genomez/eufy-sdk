@@ -231,6 +231,8 @@ export class EventPlaybackCandidate {
   private firstVideoAt?: number;
   private lastVideoAt?: number;
   private maxVideoGapMs = 0;
+  /** Unsaturated count for the truncation check; the receipt carries a bounded projection. */
+  private droppedAfterCutoff = 0;
 
   constructor(
     private readonly opts: {
@@ -597,7 +599,7 @@ export class EventPlaybackCandidate {
       return "span";
     if (this.maxVideoGapMs > (eof ? 3000 : 1000)) return "gap";
     if ((this.receipt.videoFrames - 1) * 1000 < span * 5) return "density";
-    if (eof && this.receipt.droppedAfterCutoff > Math.max(15, this.receipt.videoFrames * 0.1)) return "truncated";
+    if (eof && this.droppedAfterCutoff > Math.max(15, this.receipt.videoFrames * 0.1)) return "truncated";
     return "none";
   }
 
@@ -641,7 +643,8 @@ export class EventPlaybackCandidate {
     this.firstVideoAt ??= now;
     const coverageMs = now - this.firstVideoAt;
     if (this.opts.expectedMs !== undefined && coverageMs > this.opts.expectedMs) {
-      this.receipt.droppedAfterCutoff = Math.min(65535, this.receipt.droppedAfterCutoff + 1);
+      this.droppedAfterCutoff++;
+      this.receipt.droppedAfterCutoff = Math.min(65535, this.droppedAfterCutoff);
       if (coverageMs >= this.opts.expectedMs + 750 && this.retainedMediaComplete() && this.receipt.randomAccess)
         this.end("complete");
       return;

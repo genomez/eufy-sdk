@@ -1115,3 +1115,7 @@ Offline synthetic validation only; installation acceptance remains false.
 
 - Count post-cutoff video frames in a receipt bounded at 65535. Correlated EOF fails as truncated when discarded frames exceed the larger of 15 frames or 10 percent of retained video frames, after existing completeness checks.
 - Small tail overruns remain admissible. Non-EOF completeness, the expected-duration plus 750 ms trigger, latch, reconnect and refusal behavior are unchanged. Synthetic regressions cover slow-prefix truncation, night bursts and threshold boundaries; no runtime acceptance is claimed.
+
+### Offline playback truncation count, 2026-11-06
+
+- The truncation check uses an unsaturated internal count of discarded post-cutoff video frames; only the diagnostic receipt value is bounded.

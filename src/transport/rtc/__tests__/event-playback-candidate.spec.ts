@@ -933,6 +933,24 @@ it.each([
 });
 
 it.each([
+  [65535, "none"],
+  [100000, "truncated"],
+] as const)("truncation uses the unsaturated tail count: %s dropped", (dropped, failure) => {
+  const s = candidateSetup({});
+  const c = s.candidate as unknown as Record<string, unknown>;
+  Reflect.get(s.candidate, "opts").expectedMs = 3_000_000;
+  Object.assign(c, { eofSeen: true, firstVideoAt: 0, lastVideoAt: 2_990_000, maxVideoGapMs: 2000 });
+  Object.assign(Reflect.get(s.candidate, "receipt"), {
+    captureOutcome: "eof",
+    randomAccess: true,
+    videoFrames: 700_000,
+    droppedAfterCutoff: 65535,
+  });
+  c.droppedAfterCutoff = dropped;
+  expect(Reflect.apply(Reflect.get(s.candidate, "retainedMediaFailure"), s.candidate, [])).toBe(failure);
+});
+
+it.each([
   ["short low-fps", [0, 750, 1500, 2250, 3000], 7000, true, false],
   ["dense EOF", Array.from({ length: 51 }, (_, i) => i * 86), 7000, true, true],
   ["density boundary", Array.from({ length: 16 }, (_, i) => i * 200), 7000, true, true],
