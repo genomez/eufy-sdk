@@ -695,9 +695,8 @@ export class EventPlaybackCandidate {
       this.receipt.nativeFrameTiming = this.nativeFrameTiming.snapshot();
       this.receipt.durationBasis = "arrival";
       if (
-        (this.receipt.experiment || this.receipt.transferSpeed !== 1) &&
         this.fullClip &&
-        (this.eofSeen || this.retainedMediaComplete()) &&
+        (this.retainedMediaComplete() || (this.receipt.experiment && this.eofSeen)) &&
         this.opts.expectedMs &&
         this.receipt.videoFrames >= 2
       ) {
@@ -763,7 +762,12 @@ export class EventPlaybackCandidate {
     );
   }
 
-  /** The first failed retained-media check; framed ingress has no validated media timestamp. */
+  /**
+   * EOF coverage allows 15% missing arrival span (at least 1 s tolerance), but
+   * requires five frame intervals per second of both catalog and scaled arrival
+   * time. Individual delivery gaps have no EOF limit. Experiments keep their
+   * independent timing policy; non-EOF captures require strict span and gaps.
+   */
   private retainedMediaFailure(): PlaybackCompletenessFailure {
     if (this.opts.expectedMs === undefined) return "none";
     const speed = this.receipt.transferSpeed ?? 1;
@@ -771,14 +775,19 @@ export class EventPlaybackCandidate {
     const eof = this.eofSeen && this.receipt.captureOutcome === "eof";
     if (eof && !this.receipt.randomAccess) return "random_access";
     if (this.receipt.videoFrames < 2) return "frames";
-    if (eof) return span > 0 || !!this.receipt.experiment ? "none" : "span";
+    if (eof) {
+      if (this.receipt.experiment) return "none";
+      if (span <= 0 || span < this.opts.expectedMs - Math.max(1000, this.opts.expectedMs * 0.15)) return "span";
+      if ((this.receipt.videoFrames - 1) * 1000 < Math.max(span, this.opts.expectedMs) * 5) return "density";
+      return "none";
+    }
     if (span <= 0 || span < this.opts.expectedMs - 250) return "span";
     if (this.maxVideoGapMs * speed > 1000) return "gap";
     if ((this.receipt.videoFrames - 1) * 1000 < span * 5) return "density";
     return "none";
   }
 
-  /** EOF requires random access, two frames and positive span; other outcomes retain strict coverage checks. */
+  /** Completeness requires retained duration coverage and frame density, with random access at EOF. */
   private retainedMediaComplete(): boolean {
     return this.retainedMediaFailure() === "none";
   }

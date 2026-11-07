@@ -769,7 +769,7 @@ it("EOF capture reconnects and re-admits the replacement after observation and a
     input();
   }
   await vi.advanceTimersByTimeAsync(850);
-  input();
+  for (let i = 0; i < 3; i++) input();
   session.input(1351, { cmd: 6001, payload: { state: 2, code: 14 } });
   await vi.advanceTimersByTimeAsync(1);
   for (let i = 0; i < 16; i++) {
@@ -782,7 +782,7 @@ it("EOF capture reconnects and re-admits the replacement after observation and a
     releaseOutcome: "stop_unconfirmed",
     reconnectOutcome: "connected",
   });
-  expect(video).toHaveBeenCalledTimes(17);
+  expect(video).toHaveBeenCalledTimes(19);
   const replacement = Reflect.get(router, "sessions").get(station);
   expect(replacement.lastInformationRead).toBeDefined();
   expect(replacement.playbackObservation.ordinaryFrames).toBeGreaterThan(0);
@@ -1067,7 +1067,7 @@ it.each([
     body.writeUInt32LE(7);
     body[5] = 1;
     Buffer.from([0, 0, 0, 1, 0x26, 1, 0x80]).copy(body, 22);
-    session.input(1300, body, 4, 101, 6);
+    for (let i = 0; i < 5; i++) session.input(1300, body, 4, 101, 6);
     session.input(1351, { cmd: 6001, payload: { state: 2, code: 14 } });
     await vi.advanceTimersByTimeAsync(1);
     expect(mediaReady).toHaveBeenCalledOnce();
@@ -1146,7 +1146,7 @@ it("a renewal inside the capture window is deferred without aborting the clip", 
   body.writeUInt32LE(7);
   body[5] = 1;
   Buffer.from([0, 0, 0, 1, 0x26, 1, 0x80]).copy(body, 22);
-  session.input(1300, body, 4, 101, 6);
+  for (let i = 0; i < 5; i++) session.input(1300, body, 4, 101, 6);
   session.input(1351, { cmd: 6001, payload: { state: 2, code: 14 } });
   await vi.advanceTimersByTimeAsync(1);
   expect(await pending).toMatchObject({

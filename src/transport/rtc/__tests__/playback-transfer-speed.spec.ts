@@ -36,13 +36,13 @@ function fixture(options = {}) {
   return { candidate, capture, sent };
 }
 
-function frame(candidate: EventPlaybackCandidate, index: number) {
+function frame(candidate: EventPlaybackCandidate, index: number, intervalMs = 100) {
   const data = Buffer.from([0, 0, 0, 1, 0x26, 1, 9]);
   const body = Buffer.alloc(22);
   body.writeUInt32LE(data.length);
   body[5] = 1;
   body.writeUInt16LE(index, 6);
-  body.writeUInt32LE(index * 100, 14);
+  body.writeUInt32LE(Math.round(index * intervalMs), 14);
   for (const p of packetize(
     Buffer.concat([buildPortalHeader(1300, body.length + data.length, 101, 1, 6), body, data]),
     { channel: 4, frameId: index + 1 },
@@ -99,3 +99,57 @@ it.each([
   await vi.advanceTimersByTimeAsync(16000);
   expect((await pending).completenessFailure).toBe(failure);
 });
+
+it.each([
+  ["premature 2x EOF", 2, 2, 1, 0, false, "arrival", 4],
+  ["sparse 2x EOF at full span", 2, 2, 18500, 0, false, "arrival", 74000],
+  ["partial 2x EOF with consistent native clock", 2, 100, 1000, 370, false, "arrival", 2020],
+  ["full 2x native clock", 2, 552, 18356.685, 36780 / 552, true, "native_header", 36780],
+  ["full 1x with delivery pauses", 1, 555, 48250, 0, true, "catalog", 37000],
+  ["full 1x native clock with delivery pauses", 1, 555, 48250, 36780 / 555, true, "native_header", 36780],
+  ["night 2x with 3.5s pauses", 2, 370, 25450, 0, true, "catalog", 37000],
+] as const)(
+  "ordinary duration regression: %s",
+  async (name, speed, frames, span, interval, complete, basis, duration) => {
+    const s = fixture({ transferSpeed: speed, expectedMs: 37000, captureMs: 60000, deadlineMs: 91000 });
+    s.candidate.ingress.decoded(
+      buildPortalPacket({
+        commandId: 1351,
+        channel: 0,
+        segment: 1,
+        payload: { cmd: 6001, payload: { state: 1, code: 0 } },
+      }),
+      3,
+    );
+    let previous = 0;
+    for (let i = 0; i < frames; i++) {
+      const at = name.startsWith("night")
+        ? (i * 18450) / (frames - 1) + (i >= 123 ? 3500 : 0) + (i >= 246 ? 3500 : 0)
+        : (i * span) / (frames - 1);
+      await vi.advanceTimersByTimeAsync(at - previous);
+      frame(s.candidate, i, interval);
+      previous = at;
+    }
+    s.candidate.ingress.decoded(
+      buildPortalPacket({
+        commandId: 1351,
+        channel: 0,
+        segment: 1,
+        payload: { cmd: 6001, payload: { state: 2, code: 14 } },
+      }),
+      3,
+    );
+    await s.capture;
+    const pending = s.candidate.observe(true);
+    await vi.advanceTimersByTimeAsync(16000);
+    const receipt = await pending;
+    expect(receipt).toMatchObject({
+      captureOutcome: "eof",
+      boundedMediaObserved: complete,
+      durationBasis: basis,
+      mediaDurationMs: duration,
+      retainedVideoFrames: frames,
+    });
+    expect(receipt.completenessFailure).toBe(complete ? "none" : frames === 2 && span > 1 ? "density" : "span");
+  },
+);
