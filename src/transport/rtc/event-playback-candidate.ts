@@ -779,6 +779,7 @@ export class EventPlaybackCandidate {
       if (this.receipt.experiment) return "none";
       if (span <= 0 || span < this.opts.expectedMs - Math.max(1000, this.opts.expectedMs * 0.15)) return "span";
       if ((this.receipt.videoFrames - 1) * 1000 < Math.max(span, this.opts.expectedMs) * 5) return "density";
+      if (this.nativeFrameTiming.shortOf(this.opts.expectedMs)) return "truncated";
       return "none";
     }
     if (span <= 0 || span < this.opts.expectedMs - 250) return "span";

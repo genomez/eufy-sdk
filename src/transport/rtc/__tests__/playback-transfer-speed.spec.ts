@@ -153,3 +153,33 @@ it.each([
     expect(receipt.completenessFailure).toBe(complete ? "none" : frames === 2 && span > 1 ? "density" : "span");
   },
 );
+
+it.each([
+  ["1x truncated media hidden by a delivery pause", 1, 301, 33500, 100, "truncated", false],
+  ["1x complete native clock with a delivery pause", 1, 370, 40500, 100, "none", true],
+  ["2x truncated media hidden by delivery pauses", 2, 301, 16750, 100, "truncated", false],
+] as const)("native clock shortfall: %s", async (_name, speed, frames, span, interval, failure, complete) => {
+  const s = fixture({ transferSpeed: speed, expectedMs: 37000, captureMs: 60000, deadlineMs: 91000 });
+  const status = (state: number, code: number) =>
+    s.candidate.ingress.decoded(
+      buildPortalPacket({ commandId: 1351, channel: 0, segment: 1, payload: { cmd: 6001, payload: { state, code } } }),
+      3,
+    );
+  status(1, 0);
+  let previous = 0;
+  for (let i = 0; i < frames; i++) {
+    const pause = i >= Math.floor(frames / 2) ? 3500 / speed : 0;
+    const at = (i * (span - 3500 / speed)) / (frames - 1) + pause;
+    await vi.advanceTimersByTimeAsync(at - previous);
+    frame(s.candidate, i, interval);
+    previous = at;
+  }
+  status(2, 14);
+  await s.capture;
+  const pending = s.candidate.observe(true);
+  await vi.advanceTimersByTimeAsync(16000);
+  const receipt = await pending;
+  expect(receipt.captureOutcome).toBe("eof");
+  expect(receipt.completenessFailure).toBe(failure);
+  expect(receipt.boundedMediaObserved).toBe(complete);
+});
