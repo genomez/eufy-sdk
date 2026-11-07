@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "version": "0.2.1-s1.experimental.12",
   "status": "local-build-unpublished",
-  "exactInputCommit": "2d5dfd2934a5cfc9ae4eccb451176da90d884f62",
+  "exactInputCommit": "ec5d7c205ce9509cf8d10861252853581662d5fc",
   "files": {
     ".editorconfig": {
       "bytes": 505,
@@ -2221,8 +2221,8 @@
       "sha256": "30774ca35a558b9f6fc53d705c0fc3412c5c1fbfdb25a153b8605b38a13a950f"
     },
     "src/transport/rtc/index.ts": {
-      "bytes": 1222,
-      "sha256": "bb50e84291005dfb2a904bdfb361ba85408f6dec57acf628054bb5a3fc52be0d"
+      "bytes": 1292,
+      "sha256": "97ae3b973345f00eda5cf038b18f91ab5eea8da3c0f5239c47ce8f834f14d430"
     },
     "src/transport/rtc/live.ts": {
       "bytes": 18659,
@@ -2389,8 +2389,8 @@
       "sha256": "82feea3cefcc027bb04f5e98f0c5785965926c10cf5b9885f37bd8316370d957"
     },
     "src/transport/rtc/__tests__/recordings-query-count.spec.ts": {
-      "bytes": 2705,
-      "sha256": "2fba10ea73e9fc485ffa61a122f253fb2af324cec37e085593ee9d427903e8f6"
+      "bytes": 2840,
+      "sha256": "f84b122572cb851b2d7e8149b945af2322840acb7ebab819220228e3f788a253"
     }
   }
 }
