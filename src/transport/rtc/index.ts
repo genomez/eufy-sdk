@@ -22,6 +22,7 @@ export type {
   RtcConnectionStageEvidence,
 } from "./connection-diagnostics.js";
 
+export { CATALOG_QUERY_COUNT_MAX } from "./event-table-candidate.js";
 export type { EventTableReceipt } from "./event-table-candidate.js";
 
 export type { EventThumbnailReceipt } from "./event-thumb-candidate.js";

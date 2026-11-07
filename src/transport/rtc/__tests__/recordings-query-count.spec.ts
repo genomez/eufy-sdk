@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { CATALOG_QUERY_COUNT_MAX, normalizeRecordingRows } from "../recordings.js";
+import { CATALOG_QUERY_COUNT_MAX as publicCountMax } from "../../../index.js";
 import { EVENT_TABLE_BYTE_CAP } from "../event-table-candidate.js";
 import { recordingFixture, row, scope, sent } from "./recordings-fixture.js";
 import type { RtcCommandRouter } from "../command-router.js";
@@ -9,6 +10,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 it("derives the row domain from the existing decoded reply packet bound", () => {
+  expect(publicCountMax).toBe(CATALOG_QUERY_COUNT_MAX);
   expect(CATALOG_QUERY_COUNT_MAX).toBe(Math.floor((EVENT_TABLE_BYTE_CAP - 1) / 3));
 });
 it.each([undefined, 1, 20, 50, 100, CATALOG_QUERY_COUNT_MAX])(
