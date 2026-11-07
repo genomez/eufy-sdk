@@ -1669,7 +1669,7 @@ export class RtcCommandRouter {
       clip?: {
         scope: RecordingReadScope;
         selector: InternalPlaybackSelector;
-        video: (data: Buffer) => void;
+        video: (data: Buffer, timing?: { nativeTimestamp: number }) => void;
         file?: (data: Buffer) => void;
         mediaReady?: (receipt: PlaybackReceipt) => void;
         experiment?: import("./playback-telemetry.js").PlaybackExperiment;

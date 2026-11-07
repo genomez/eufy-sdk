@@ -8,6 +8,7 @@ import { chicagoInstant, recordingTimeZone } from "./event-time.js";
 import { buildPortalPacket, parsePortalHeader, PortalLinkType } from "./portal-packet.js";
 import { PlaybackIngress, type PlaybackIngressEvidence } from "./playback-ingress.js";
 import { isHevcKeyframe } from "./live.js";
+import { parseVideoFrameHeader } from "../p2p/video.js";
 import { performance } from "node:perf_hooks";
 import {
   DownloadEvidence,
@@ -302,7 +303,7 @@ export class EventPlaybackCandidate {
       captureMs?: number;
       expectedMs?: number;
       transient?: boolean;
-      video?: (data: Buffer) => void;
+      video?: (data: Buffer, timing?: { nativeTimestamp: number }) => void;
       file?: (data: Buffer) => void;
       camera?: string;
       continuous: () => boolean;
@@ -851,7 +852,8 @@ export class EventPlaybackCandidate {
       return;
     }
     try {
-      this.opts.video?.(data);
+      const header = parseVideoFrameHeader(body);
+      this.opts.video?.(data, header ? { nativeTimestamp: header.timestamp } : undefined);
     } catch {
       this.end("invalid_media");
       return;

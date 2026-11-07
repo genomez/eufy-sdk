@@ -1120,7 +1120,7 @@ export class EufyMega extends EventEmitter {
     selector: InternalPlaybackSelector,
     opts: {
       signal?: AbortSignal;
-      video: (data: Buffer) => void;
+      video: (data: Buffer, timing?: { nativeTimestamp: number }) => void;
       file?: (data: Buffer) => void;
       beforeDispatch?: () => void;
       mediaReady?: (receipt: import("../transport/rtc/event-playback-candidate.js").PlaybackReceipt) => void;

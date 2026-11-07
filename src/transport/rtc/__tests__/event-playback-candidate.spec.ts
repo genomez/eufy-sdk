@@ -1328,3 +1328,18 @@ it("active EOF prefers an advancing catalog-consistent native timestamp word", a
     },
   });
 });
+
+it("delivers each native header timestamp beside the unchanged HEVC access unit", async () => {
+  const f = candidateSetup({ streaming: true, eof: true, streamingFrames: 3, nativeFrameIntervalMs: 4069 });
+  const delivered = vi.fn();
+  Reflect.get(f.candidate, "opts").video = delivered;
+  await f.candidate.capture({ record: 40, begin: 1000000 }, [6, 7]);
+  expect(delivered.mock.calls.map(([, timing]) => timing)).toEqual([
+    { nativeTimestamp: 0 },
+    { nativeTimestamp: 4069 },
+    { nativeTimestamp: 8138 },
+  ]);
+  expect(delivered.mock.calls.every(([bytes]) => bytes.length === 256 * 1024 && bytes.readUInt32BE(0) === 1)).toBe(
+    true,
+  );
+});
