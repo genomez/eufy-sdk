@@ -52,7 +52,8 @@ export function connectionCloseOrigin(session: { readonly closeOrigin?: unknown 
       value === "remote_hangup" ||
       value === "command_channel_closed" ||
       value === "peer_failed" ||
-      value === "peer_closed"
+      value === "peer_closed" ||
+      value === "grant_timeout"
       ? value
       : null;
   } catch {

@@ -1,6 +1,8 @@
 import { EventEmitter } from "node:events";
+import { performance } from "node:perf_hooks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EufyDevice } from "../../../core/types.js";
+import { observeCommand } from "../../../core/contracts.js";
 import { RtcCommandRouter } from "../command-router.js";
 import { buildPortalHeader, parsePortalHeader } from "../portal-packet.js";
 import { RtcSession, type RtcSessionOptions } from "../session.js";
@@ -14,6 +16,7 @@ class Session extends EventEmitter {
   isConnected = false;
   closed = false;
   information = true;
+  sent: Buffer[] = [];
   attachIngressGuard() {}
   constructor(
     readonly options: RtcSessionOptions,
@@ -39,6 +42,7 @@ class Session extends EventEmitter {
   }
   sendCommand(packet: Buffer) {
     if (!this.isConnected) return false;
+    this.sent.push(packet);
     if (this.information)
       queueMicrotask(() => {
         const h = parsePortalHeader(packet)!;
@@ -83,6 +87,41 @@ function reconnect(router: RtcCommandRouter) {
   }>;
 }
 
+function lightCommand() {
+  return observeCommand(
+    { kind: "set-json", param: 1400, data: { value: 1 }, channel: 0 },
+    {
+      event: "property changed",
+      property: "enabled",
+      param: 1400,
+      expected: 1,
+      passiveReadback: true,
+      replaceableState: true,
+      timeoutMs: 14_000,
+    },
+  );
+}
+
+function sendLight(router: RtcCommandRouter, scheduled: boolean, signal?: AbortSignal, isCurrent?: () => boolean) {
+  const bornAtMs = Math.floor(performance.now());
+  return router.dispatchCommandWithReceipt(
+    station,
+    lightCommand(),
+    scheduled
+      ? {
+          execution: {
+            profile: "bounded-state-v1",
+            bornAtMs,
+            sendByMs: bornAtMs + 60_000,
+            totalByMs: bornAtMs + 72_000,
+            signal,
+            isCurrent,
+          },
+        }
+      : { intent: { isCurrent } },
+  );
+}
+
 describe("ICE safety", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -93,6 +132,56 @@ describe("ICE safety", () => {
     expect(vi.getTimerCount()).toBe(0);
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  it.each([true, false])("sends pending and new commands after relay fallback (scheduled=%s)", async (scheduled) => {
+    const f = setup(["silent", "silent"]);
+    const first = sendLight(f.router, scheduled).catch((e: Error) => e);
+    const queued = sendLight(f.router, scheduled).catch((e: Error) => e);
+    await vi.advanceTimersByTimeAsync(12_000);
+    const arriving = sendLight(f.router, scheduled).catch((e: Error) => e);
+    let current = true;
+    const cancelled = sendLight(f.router, scheduled, undefined, () => current).catch((e: Error) => e);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.sessions.map((s) => s.options.peer?.icePolicy)).toEqual(["all", "relay"]);
+    expect(f.sessions.every((s) => s.sent.length === 0)).toBe(true);
+    current = false;
+    f.sessions[1]!.isConnected = true;
+    f.sessions[1]!.emit("connected");
+    await vi.advanceTimersByTimeAsync(1);
+    for (const result of await Promise.all([first, queued, arriving]))
+      expect(result).toMatchObject({ status: "acknowledged", sendAttempted: true });
+    expect(await cancelled).toMatchObject(
+      scheduled ? { status: "superseded_before_send", sendAttempted: false } : { reason: "superseded_before_send" },
+    );
+    await expect(sendLight(f.router, scheduled)).resolves.toMatchObject({
+      status: "acknowledged",
+      sendAttempted: true,
+    });
+    expect(f.sessions[0]!.sent).toHaveLength(0);
+    expect(f.sessions[1]!.sent).toHaveLength(4);
+    expect(owner(f.router).scheduler.snapshot()).toMatchObject({ active: 0, queued: 0 });
+  });
+
+  it("honors active and queued cancellations through fallback without closing the surviving command queue", async () => {
+    const f = setup(["silent", "silent"]);
+    const active = new AbortController();
+    const queued = new AbortController();
+    const first = sendLight(f.router, true, active.signal);
+    const second = sendLight(f.router, true, queued.signal);
+    const survivor = sendLight(f.router, true);
+    await vi.advanceTimersByTimeAsync(12_000);
+    active.abort();
+    queued.abort();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.sessions).toHaveLength(2);
+    f.sessions[1]!.isConnected = true;
+    f.sessions[1]!.emit("connected");
+    await vi.advanceTimersByTimeAsync(1);
+    for (const result of await Promise.all([first, second]))
+      expect(result).toMatchObject({ status: "cancelled_before_send", sendAttempted: false });
+    expect(await survivor).toMatchObject({ status: "acknowledged", sendAttempted: true });
+    expect(f.sessions[1]!.sent).toHaveLength(1);
   });
 
   it.each(["error", "close", "throw", "hang", "silent"] as const)(

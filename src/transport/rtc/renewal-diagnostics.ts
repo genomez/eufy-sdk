@@ -107,7 +107,8 @@ export function retainedRenewalFailure(evidence: RenewalEvidence, sequence: numb
       origin === "remote_hangup" ||
       origin === "command_channel_closed" ||
       origin === "peer_failed" ||
-      origin === "peer_closed"
+      origin === "peer_closed" ||
+      origin === "grant_timeout"
         ? origin
         : null,
   };

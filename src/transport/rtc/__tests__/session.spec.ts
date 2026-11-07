@@ -83,6 +83,59 @@ const flush = () => new Promise((r) => setImmediate(r));
 
 describe("RtcSession", () => {
   describe("ICE safety", () => {
+    it.each(["all", "relay"] as const)("bounds a missing TURN grant after an offer for %s", async (icePolicy) => {
+      const s = await authenticated(setup({ peer: { icePolicy } }));
+      vi.useFakeTimers();
+      try {
+        const closed = vi.fn();
+        s.session.on("close", closed);
+        s.sig.hub({ action: 3, dataType: "info", data: { sdp: JSON.stringify(HUB_SDP) } });
+        await vi.advanceTimersByTimeAsync(14_000);
+        s.sig.hub({ action: 3, dataType: "info", data: { sdp: JSON.stringify(HUB_SDP) } });
+        await vi.advanceTimersByTimeAsync(999);
+        expect(closed).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(s.errors.map((e) => e.message)).toEqual(["RTC TURN grant timeout"]);
+        expect(closed).toHaveBeenCalledOnce();
+        expect(s.sig.close).toHaveBeenCalledOnce();
+        expect(s.peer.close).toHaveBeenCalledOnce();
+        expect(s.session.getConnectionDiagnostics().establishment?.deadlines).toEqual([
+          { kind: "turn_grant", atMs: expect.any(Number) },
+        ]);
+        s.sig.hub({ action: 3, dataType: "scall", data: { status: 100, turn: TURN } });
+        await vi.advanceTimersByTimeAsync(1);
+        expect(s.peer.init).not.toHaveBeenCalled();
+        expect(s.sig.sendInfoSdp).not.toHaveBeenCalled();
+      } finally {
+        s.session.close();
+        expect(vi.getTimerCount()).toBe(0);
+        vi.useRealTimers();
+      }
+    });
+
+    it.each(["all", "relay"] as const)("accepts a late TURN grant within the deadline for %s", async (icePolicy) => {
+      const s = await authenticated(setup({ peer: { icePolicy } }));
+      vi.useFakeTimers();
+      try {
+        s.sig.hub({ action: 3, dataType: "info", data: { sdp: JSON.stringify(HUB_SDP) } });
+        await vi.advanceTimersByTimeAsync(14_999);
+        expect(vi.getTimerCount()).toBe(1);
+        expect(s.peer.init).not.toHaveBeenCalled();
+        s.sig.hub({ action: 3, dataType: "scall", data: { status: 100, turn: TURN } });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(s.peer.init).toHaveBeenCalledExactlyOnceWith(TURN);
+        expect(s.sig.sendInfoSdp).toHaveBeenCalledOnce();
+        s.peer.emit("commandChannelOpen");
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(s.session.isConnected).toBe(true);
+        expect(s.errors).toEqual([]);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        s.session.close();
+        vi.useRealTimers();
+      }
+    });
+
     it.each(["all", "relay"] as const)("defers an offer until TURN is granted for %s", async (icePolicy) => {
       const s = await authenticated(setup({ peer: { icePolicy } }));
       s.sig.hub({ action: 3, dataType: "info", data: { sdp: JSON.stringify(HUB_SDP) } });

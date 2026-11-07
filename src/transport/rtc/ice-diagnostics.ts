@@ -2,7 +2,7 @@ import type { IcePolicy } from "./peer.js";
 import { iceCandidateType } from "./scall-sdp.js";
 
 export type IceCandidateKind = "host" | "srflx" | "prflx" | "relay" | "unknown";
-export type EstablishmentDeadline = "connection" | "signaling_auth" | "local_answer" | "replacement";
+export type EstablishmentDeadline = "connection" | "signaling_auth" | "turn_grant" | "local_answer" | "replacement";
 export interface IceEstablishmentDiagnostics {
   policy: IcePolicy;
   grantOfferOrder: "grant_first" | "offer_first" | "grant_only" | "offer_only" | "neither";

@@ -35,7 +35,13 @@ import { copyRtcTransportDiagnostics, type RtcTransportDiagnostics } from "./tra
 
 /** First local entry point into session closure, without remote content. */
 export type RtcSessionCloseOrigin =
-  "local" | "signaling_closed" | "remote_hangup" | "command_channel_closed" | "peer_failed" | "peer_closed";
+  | "local"
+  | "signaling_closed"
+  | "remote_hangup"
+  | "command_channel_closed"
+  | "peer_failed"
+  | "peer_closed"
+  | "grant_timeout";
 
 export interface RtcSessionOptions extends RtcSignalingOptions {
   /** 0 = the hub itself; a camera channel for per-camera calls. */
@@ -91,6 +97,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
   private connectionEvidence = new ConnectionStageRecorder();
   private readonly establishment: IceEstablishmentRecorder;
   private pendingOffer?: InfoPayload;
+  private grantTimer?: ReturnType<typeof setTimeout>;
   private readonly signaling: RtcSignalingClient;
   /** Selected ICE types only, when the native peer exposes a selected pair. */
   getSelectedIceCandidateTypes() {
@@ -295,6 +302,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     const failure = this.peerInitFailure;
     this.closure = failure ? "peer_failed" : origin;
     this.closed = true;
+    this.clearGrantDeadline();
     this.pendingOffer = undefined;
     this.connected = false;
     try {
@@ -316,6 +324,26 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
 
   private assertOpen(): void {
     if (this.closed) throw new Error("RTC session closed");
+  }
+
+  /** A deferred non-host offer may wait at most fifteen seconds for its TURN grant. */
+  private armGrantDeadline(): void {
+    if (this.grantTimer) return;
+    this.grantTimer = setTimeout(() => {
+      this.establishment.deadline("turn_grant");
+      this.note("grant", "failed");
+      try {
+        this.emit("error", new Error("RTC TURN grant timeout"));
+      } finally {
+        this.closeWithOrigin("grant_timeout");
+      }
+    }, 15_000);
+  }
+
+  /** Clear the current offer's deadline on grant, call retry or session disposal. */
+  private clearGrantDeadline(): void {
+    clearTimeout(this.grantTimer);
+    this.grantTimer = undefined;
   }
 
   private waitForAuth(): Promise<void> {
@@ -379,6 +407,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     if (this.closed) return;
     const status = payload.status;
     if (status === 100 && payload.turn) {
+      this.clearGrantDeadline();
       this.establishment.order("grant");
       this.note("grant", "observed");
       this.callRetries = 0;
@@ -416,6 +445,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
       return;
     }
     if (status === 486 || status === 408) {
+      this.clearGrantDeadline();
       this.note("call_retry", "observed");
       this.callRetries++;
       this.logger.warn(`[rtc] ${this.opts.stationSn} scall ${status}, retry ${this.callRetries}`);
@@ -465,6 +495,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     this.establishment.order("offer");
     if (!this.turn && (this.opts.peer?.icePolicy === "all" || this.opts.peer?.icePolicy === "relay")) {
       this.pendingOffer ??= payload;
+      this.armGrantDeadline();
       return;
     }
     this.note("offer", "observed");

@@ -596,7 +596,7 @@ export class RtcCommandRouter {
     };
   }
 
-  /** One bounded owner exists before acquisition and is never moved across a retired generation. */
+  /** One bounded owner exists before acquisition and survives the single establishment-only relay handoff. */
   private workOwner(stationSn: string): StationWorkScheduler {
     let owner = this.workOwners.get(stationSn);
     if (!owner) {
@@ -2984,6 +2984,7 @@ export class RtcCommandRouter {
         if (!st.relayFallback) {
           st.relayFallback = this.createStationSession(sn, adminUserId, identity, false, "relay");
           this.sessions.set(sn, st.relayFallback);
+          this.drop(sn, st);
         }
         return this.stationSession(sn, adminUserId, identity, signal, st.relayFallback);
       }
@@ -3083,9 +3084,11 @@ export class RtcCommandRouter {
       this.cancelRefresh(sn, created);
       created.detach();
       if (this.sessions.get(sn) === created) {
-        this.sessions.delete(sn);
-        created.scheduler.close();
-        if (this.workOwners.get(sn) === created.scheduler) this.workOwners.delete(sn);
+        if (replacement || icePolicy === "relay" || created.connectedAtMs !== undefined) {
+          this.sessions.delete(sn);
+          created.scheduler.close();
+          if (this.workOwners.get(sn) === created.scheduler) this.workOwners.delete(sn);
+        }
         this.transportState(sn, "disconnected");
         this.deps.onSessionClosed?.(sn);
       }
@@ -3197,7 +3200,8 @@ export class RtcCommandRouter {
   }
 
   /**
-   * Verify a replacement within fifteen seconds and adopt it only between operations.
+   * Verify a relay replacement within fifteen seconds, or an all attempt plus relay fallback within
+   * thirty seconds, and adopt it only between operations.
    * A verified candidate blocked by leases may use the single proof-gated retry after its cooldown.
    */
   private async replaceSession(sn: string, original: StationSession, playback = false): Promise<void> {
@@ -3737,7 +3741,7 @@ export class RtcCommandRouter {
     for (const stop of [...st.diagnosticRetirement]) stop("retired");
     this.cancelRefresh(sn, st);
     if (st.idle) clearTimeout(st.idle);
-    st.scheduler.close();
+    if (this.sessions.get(sn) === st || this.sessions.get(sn)?.scheduler !== st.scheduler) st.scheduler.close();
     if (this.workOwners.get(sn) === st.scheduler && this.sessions.get(sn) === st) this.workOwners.delete(sn);
     if (this.sessions.get(sn) === st) {
       this.sessions.delete(sn);
