@@ -574,6 +574,35 @@ it("names a transient admission refusal when freshness changes before the schedu
   expect(session.sent.filter((packet) => parsePortalHeader(packet)!.commandId === 1700)).toHaveLength(0);
 });
 
+it("keeps a slow correlated EOF capture alive beyond duration plus fifteen seconds", async () => {
+  const { router, session } = await fixture();
+  session.tableRows = [
+    { device_sn: camera, record_id: 40, start_time: "2026-01-15 12:00:00", end_time: "2026-01-15 12:00:12" },
+  ];
+  session.eof = false;
+  const clip = sealedClip(router, session);
+  const pending = router.readEventPlaybackCandidate(station, { ...options(), clip });
+  await vi.advanceTimersByTimeAsync(1);
+  const body = Buffer.alloc(29);
+  body.writeUInt32LE(7);
+  body[5] = 1;
+  Buffer.from([0, 0, 0, 1, 0x26, 1, 0x80]).copy(body, 22);
+  for (let i = 1; i <= 120; i++) {
+    await vi.advanceTimersByTimeAsync(i === 40 || i === 80 ? 1500 : 70);
+    session.input(1300, body, 4, 101, 6);
+  }
+  await vi.advanceTimersByTimeAsync(19000);
+  const start = session.sent.find((packet) => parsePortalHeader(packet)!.commandId === 1700)!;
+  session.input(1351, { cmd: 6001, payload: { state: 2, code: 14, segmen: parsePortalHeader(start)!.segment } });
+  await vi.advanceTimersByTimeAsync(16001);
+  expect(await pending).toMatchObject({
+    captureOutcome: "eof",
+    boundedMediaObserved: true,
+    completenessFailure: "none",
+    maxVideoGapMs: 1500,
+  });
+});
+
 it("duration-complete capture reconnects and re-admits the replacement after observation and a live view", async () => {
   const { router, session, sessions } = await fixture();
   session.eof = false;

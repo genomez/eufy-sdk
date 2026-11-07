@@ -855,11 +855,46 @@ it("releases concurrent reservations while bounding cumulative decoder work", ()
 });
 
 it.each([
+  ["night bursts", 2500, 12000, true, "none"],
+  ["night smaller bursts", 1200, 12000, true, "none"],
+  ["truncated EOF", 2500, 60000, false, "span"],
+  ["excessive EOF gap", 3100, 12000, false, "gap"],
+] as const)("retained EOF diagnostics: %s", async (_, gap, expectedMs, accepted, completenessFailure) => {
+  const s = candidateSetup({ streaming: true, streamingFrames: 0, release: false });
+  Reflect.get(s.candidate, "opts").expectedMs = expectedMs;
+  const capture = s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  const arrivals = Array.from({ length: 121 }, (_, i) => i * 60 + (i >= 40 ? gap : 0) + (i >= 80 ? gap : 0));
+  let previous = 0;
+  for (const at of arrivals) {
+    await vi.advanceTimersByTimeAsync(at - previous);
+    for (const packet of wrapped(video())) s.candidate.ingress.native(packet);
+    previous = at;
+  }
+  const segment = parsePortalHeader(s.sent[0]!)!.segment;
+  s.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 2, code: 14, segmen: segment } }), 3);
+  await capture;
+  const observing = s.candidate.observe();
+  await vi.advanceTimersByTimeAsync(16001);
+  const retained = arrivals.filter((at) => at <= expectedMs);
+  expect(await observing).toMatchObject({
+    captureOutcome: "eof",
+    boundedMediaObserved: accepted,
+    retainedVideoFrames: retained.length,
+    retainedVideoSpanMs: retained.at(-1),
+    maxVideoGapMs: gap + 60,
+    completenessFailure,
+    latchCleared: false,
+    latchRetained: true,
+    releaseOutcome: "stop_unconfirmed",
+  });
+});
+
+it.each([
   ["short low-fps", [0, 750, 1500, 2250, 3000], 7000, true, false],
   ["dense EOF", Array.from({ length: 51 }, (_, i) => i * 86), 7000, true, true],
   ["density boundary", Array.from({ length: 16 }, (_, i) => i * 200), 7000, true, true],
   ["below density boundary", Array.from({ length: 15 }, (_, i) => i * 210), 7000, true, false],
-  ["large gap", [0, 500, 2000, 2500, 3000], 7000, true, false],
+  ["large gap sparse", [0, 500, 2000, 2500, 3000], 7000, true, false],
   ["absolute floor", [0, 400, 800], 1500, true, false],
   ["relative floor", [0, 750, 1500, 2250], 7000, true, false],
   ["non-EOF short", [0, 750, 1500, 2250, 3000], 7000, false, false],

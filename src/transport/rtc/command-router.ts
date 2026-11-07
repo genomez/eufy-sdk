@@ -1663,7 +1663,7 @@ export class RtcCommandRouter {
       recordingAdmission = this.recordingGate(opts.clip.scope, false, false, true);
     }
     this.preemptRecordingReads(stationSn);
-    const captureMs = opts.clip ? opts.clip.selector.expectedMs + 15000 : 8000;
+    const captureMs = opts.clip ? Math.min(2147452647, opts.clip.selector.expectedMs * 3 + 15000) : 8000;
     const timeout = opts.timeoutMs ?? (opts.clip ? captureMs + 16000 : 24000);
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > (opts.clip ? 2147483647 : 24000))
       throw new RangeError("Playback deadline invalid");

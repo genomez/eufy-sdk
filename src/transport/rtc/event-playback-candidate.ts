@@ -61,6 +61,7 @@ export const PLAYBACK_ADMISSION_GATES = [
   "inventory_conflict",
 ] as const;
 export type PlaybackAdmissionGate = (typeof PLAYBACK_ADMISSION_GATES)[number];
+export type PlaybackCompletenessFailure = "none" | "random_access" | "frames" | "span" | "gap" | "density";
 export interface PlaybackReceipt extends PlaybackIngressEvidence {
   reconnectOutcome?: "not_needed" | "connected" | "failed" | "timed_out";
   reconnectDurationMs?: number;
@@ -100,6 +101,10 @@ export interface PlaybackReceipt extends PlaybackIngressEvidence {
   latchPersistenceFailed: boolean;
   latchRetained: boolean;
   latchCleared: boolean;
+  retainedVideoSpanMs: number;
+  maxVideoGapMs: number;
+  retainedVideoFrames: number;
+  completenessFailure: PlaybackCompletenessFailure;
   videoFrames: number;
   audioFrames: number;
   randomAccess: boolean;
@@ -298,6 +303,10 @@ export class EventPlaybackCandidate {
       latchPersistenceFailed: false,
       latchRetained: false,
       latchCleared: false,
+      retainedVideoSpanMs: 0,
+      maxVideoGapMs: 0,
+      retainedVideoFrames: 0,
+      completenessFailure: "none",
       videoFrames: 0,
       audioFrames: 0,
       randomAccess: false,
@@ -522,6 +531,10 @@ export class EventPlaybackCandidate {
       const span = (this.lastVideoAt ?? 0) - (this.firstVideoAt ?? 0);
       if (this.fullClip && this.receipt.videoFrames >= 2 && span > 0)
         this.receipt.mediaDurationMs = Math.round(span + span / (this.receipt.videoFrames - 1));
+      this.receipt.retainedVideoSpanMs = Math.max(0, Math.round(span));
+      this.receipt.maxVideoGapMs = Math.max(0, Math.round(this.maxVideoGapMs));
+      this.receipt.retainedVideoFrames = this.receipt.videoFrames;
+      this.receipt.completenessFailure = this.retainedMediaFailure();
       this.receipt.boundedMediaObserved =
         ["eof", "complete", "capped"].includes(this.receipt.captureOutcome) &&
         this.retainedMediaComplete() &&
@@ -570,32 +583,29 @@ export class EventPlaybackCandidate {
     );
   }
 
+  /** The first failed retained-media check; framed ingress has no validated media timestamp. */
+  private retainedMediaFailure(): PlaybackCompletenessFailure {
+    if (this.opts.expectedMs === undefined) return "none";
+    const span = (this.lastVideoAt ?? 0) - (this.firstVideoAt ?? 0);
+    const eof = this.eofSeen && this.receipt.captureOutcome === "eof";
+    if (eof && !this.receipt.randomAccess) return "random_access";
+    if (this.receipt.videoFrames < 2) return "frames";
+    if (eof ? span < Math.max(1000, this.opts.expectedMs * 0.4) : span <= 0 || span < this.opts.expectedMs - 250)
+      return "span";
+    if (this.maxVideoGapMs > (eof ? 3000 : 1000)) return "gap";
+    if ((this.receipt.videoFrames - 1) * 1000 < span * 5) return "density";
+    return "none";
+  }
+
   /**
-   * Duration captures require retained arrival coverage within 250 ms of the requested end,
-   * no retained video gap above 1000 ms, and at least five frame intervals per second.
-   * Arrival timing is the available clock; completion-margin frames are excluded from this proof.
-   * EOF instead requires a keyframe start, two frames, the same gap ceiling, and a retained
-   * span of at least 1000 ms and 40% of the requested duration, with the same density threshold.
-   * Probes without a requested duration keep their bounded observation contract.
+   * Duration completion requires retained arrival coverage within 250 ms of the requested end,
+   * no gap above 1000 ms, and at least five frame intervals per second.
+   * Correlated EOF permits bursty arrival gaps up to 3000 ms, retaining the keyframe start,
+   * two-frame minimum, 1000 ms/40% span floor and five-interval density floor.
+   * Completion-margin frames are excluded; probes without a duration retain their observation contract.
    */
   private retainedMediaComplete(): boolean {
-    if (this.opts.expectedMs === undefined) return true;
-    const span = (this.lastVideoAt ?? 0) - (this.firstVideoAt ?? 0);
-    if (this.eofSeen && this.receipt.captureOutcome === "eof")
-      return (
-        this.receipt.randomAccess &&
-        this.receipt.videoFrames >= 2 &&
-        span >= Math.max(1000, this.opts.expectedMs * 0.4) &&
-        this.maxVideoGapMs <= 1000 &&
-        (this.receipt.videoFrames - 1) * 1000 >= span * 5
-      );
-    return (
-      this.receipt.videoFrames >= 2 &&
-      span > 0 &&
-      span >= this.opts.expectedMs - 250 &&
-      this.maxVideoGapMs <= 1000 &&
-      (this.receipt.videoFrames - 1) * 1000 >= span * 5
-    );
+    return this.retainedMediaFailure() === "none";
   }
 
   private media(frame: Buffer): void {

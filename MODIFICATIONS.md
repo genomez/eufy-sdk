@@ -1104,3 +1104,9 @@ Offline synthetic validation only; installation acceptance remains false.
 ### Offline playback refusal latch retention, 2026-11-06
 
 - Refusal evidence that later becomes invalid (for example, media after a refusal) never permits release confirmation; the late latch and reconnect protection remain. Applies to both 0/7 and 2/18 refusals.
+
+### Playback 3p7 EOF coverage, 2026-11-06
+
+- Correlated EOF accepts bursty retained video gaps up to 3000 ms; existing random-access, span and density floors remain. Non-EOF completeness and all refusal, latch and reconnect checks remain unchanged.
+- Receipts include retained video span, maximum gap, frame count and the first failed completeness check. Framed media has no validated media timestamp.
+- Duration-bound capture allows three times the requested duration plus 15 seconds, with the existing cleanup reserve and timer ceiling. Synthetic night bursts and truncated EOF regressions run locally only.
