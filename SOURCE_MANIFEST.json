@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "version": "0.2.1-s1.experimental.12",
   "status": "local-build-unpublished",
-  "exactInputCommit": "8a7d6bc03c00212b8ced3405f2551563e7923ed7",
+  "exactInputCommit": "f4f0e0f7c0239020fbe202e16b9062295ae28e1e",
   "files": {
     ".editorconfig": {
       "bytes": 505,
@@ -1997,8 +1997,8 @@
       "sha256": "9a6dd8d3df0b365d40c86e7653df05b056692662052b2924a4e1c48462d126f8"
     },
     "src/transport/rtc/__tests__/event-playback-candidate.spec.ts": {
-      "bytes": 53502,
-      "sha256": "d232676437cf8edb41c8799dcf3a2d6f17169262d9d34f40eb0498e50f9502bb"
+      "bytes": 57991,
+      "sha256": "744caca96b8d0afef2e7e876d81caef97b58db143dec651d6fefc02e77f83a8d"
     },
     "src/transport/rtc/__tests__/event-playback-router.spec.ts": {
       "bytes": 52127,
@@ -2073,12 +2073,12 @@
       "sha256": "8408efc5f601808bb6f456eb2846c4e938351989c389c2a76c13564c2193e400"
     },
     "src/transport/rtc/__tests__/playback-telemetry.spec.ts": {
-      "bytes": 3559,
-      "sha256": "c60514b7f5b7e824e94ee39af4a8260b75c203945d3e92ff36e3fbe1bc65ae0a"
+      "bytes": 5506,
+      "sha256": "4b300355b4dd1de7eb1a1b810b1785a82aa43af4367d08897c25f35a567b4bf2"
     },
     "src/transport/rtc/__tests__/playback-transfer-speed.spec.ts": {
-      "bytes": 6885,
-      "sha256": "24dc2c7eeeafc8c19bcbc4c194051dac8185d23981c5a571af53ae14983ff84e"
+      "bytes": 7257,
+      "sha256": "278896a68bbcd47535370321871b4869790a0603fea8713a6ca8c79c898b3689"
     },
     "src/transport/rtc/__tests__/portal-packet.spec.ts": {
       "bytes": 5465,
@@ -2201,8 +2201,8 @@
       "sha256": "47a744d4ff8093542cdbde52e5b47ef8b0be800af61938bc0f4961f4599d587a"
     },
     "src/transport/rtc/event-playback-candidate.ts": {
-      "bytes": 37604,
-      "sha256": "2d9ca76459effdc51b766c521b6321218f1ab71660bcf5c96c06e2e88c01df1c"
+      "bytes": 38010,
+      "sha256": "4e8908d93c85fe6c39c2ca1500767241244fb1f20c7e4307b36f96d211895461"
     },
     "src/transport/rtc/event-table-candidate.ts": {
       "bytes": 7898,
@@ -2237,8 +2237,8 @@
       "sha256": "0a332c2a5c839e60436020360e0650fa85f64cff12ff17fc8f09151947594f76"
     },
     "src/transport/rtc/playback-telemetry.ts": {
-      "bytes": 6953,
-      "sha256": "16ed0d97a55d309da63be3dc846aa7d8500cca069e4f2ea53366e44f8c7d7122"
+      "bytes": 9381,
+      "sha256": "d22a4fa91865bd5bc02a7d3cad9939f133b5f917ad88d54c6f47c6fa3d2daa53"
     },
     "src/transport/rtc/portal-keepalive.ts": {
       "bytes": 334,
