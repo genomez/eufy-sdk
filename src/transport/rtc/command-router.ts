@@ -1764,7 +1764,7 @@ export class RtcCommandRouter {
       () => !continuous(),
       () => opts.signal?.aborted,
       () => !observation,
-      () => performance.now() - observation!.observedSinceMs < 5000,
+      () => performance.now() - observation!.observedSinceMs < (opts.clip ? 5000 : 60000),
       () => !observation!.ordinaryFrames,
       () => !observation!.keepalives,
       () => !observation!.prestartSafe(),

@@ -968,6 +968,15 @@ it.each([4999, 5000])("foreground readiness requires five seconds: %s ms", async
   );
 });
 
+it.each([5000, 59999])("diagnostic probes keep the sixty-second observation window: %s ms", async (age) => {
+  const { router } = await fixture();
+  const owner = Reflect.get(router, "sessions").get(station);
+  owner.playbackObservation.observedSinceMs = performance.now() - age;
+  const pending = router.readEventPlaybackCandidate(station, options());
+  await vi.advanceTimersByTimeAsync(100);
+  expect(await pending).toMatchObject({ admissionGateName: "observation_window", startAttempted: false });
+});
+
 it("a renewal inside the capture window is deferred without aborting the clip", async () => {
   const { router, session } = await fixture();
   session.eof = false;
