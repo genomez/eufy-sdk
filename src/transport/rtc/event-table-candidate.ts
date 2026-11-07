@@ -2,6 +2,8 @@ import type { RtcSession } from "./session.js";
 import { buildPortalPacket, parsePortalPacket, PortalLinkType, type PortalResponse } from "./portal-packet.js";
 
 export const EVENT_TABLE_BYTE_CAP = 256 * 1024;
+/** An array of n empty JSON objects requires at least 3n + 1 bytes within the decoded table budget. */
+export const CATALOG_QUERY_COUNT_MAX = Math.floor((EVENT_TABLE_BYTE_CAP - 1) / 3);
 const TABLE = "history_record_info";
 const TOP_FIELDS = ["cmd", "count", "data", "end_id", "mIntRet", "msg", "start_id", "table", "transaction", "version"];
 const ROW_FIELDS = [
@@ -71,6 +73,7 @@ export function collectEventTableCandidate(
   observation: EventTableObservation,
   onRows?: (rows: unknown[], envelopeValid: boolean) => void,
   beforeRecordId?: number,
+  queryCount = 20,
 ): Promise<EventTableReceipt> {
   const started = performance.now();
   const receipt: EventTableReceipt = {
@@ -157,7 +160,14 @@ export function collectEventTableCandidate(
             : "timeout"
           : "abandoned",
       );
-    if (!valid() || !accountId.trim() || Buffer.byteLength(accountId) > 128) {
+    if (
+      !Number.isInteger(queryCount) ||
+      queryCount < 1 ||
+      queryCount > CATALOG_QUERY_COUNT_MAX ||
+      !valid() ||
+      !accountId.trim() ||
+      Buffer.byteLength(accountId) > 128
+    ) {
       finish("busy/not_admitted");
       return;
     }
@@ -223,7 +233,7 @@ export function collectEventTableCandidate(
           table: TABLE,
           transaction,
           payload: {
-            count: 20,
+            count: queryCount,
             start_date: "",
             end_date: "",
             start_id: beforeRecordId === undefined ? 0 : beforeRecordId - 1,

@@ -386,7 +386,7 @@ describe("catalog continuation metadata", () => {
 });
 
 describe("bounded catalog page admission", () => {
-  it("requires the preceding cursor, completion gap and four-page cycle budget", async () => {
+  it("requires the preceding cursor and completion gap beyond four pages and 60 seconds", async () => {
     const f = await recordingFixture();
     routers.push(f.router);
     expect(await f.router.readRecordingCatalog(scope, { beforeRecordId: 101 })).toEqual({
@@ -401,20 +401,20 @@ describe("bounded catalog page admission", () => {
       f.session.table(rows, { version: "1", count: 20, start_id: start, end_id: start - 19 });
       expect((await read).status).toBe("ok");
     };
-    await page(100);
-    expect(await f.router.readRecordingCatalog(scope, { beforeRecordId: 81 })).toEqual({
+    await page(1000);
+    expect(await f.router.readRecordingCatalog(scope, { beforeRecordId: 981 })).toEqual({
       status: "deferred",
       reason: "quiet_period",
     });
-    for (let i = 1; i <= 4; i++) {
+    for (let i = 1; i <= 14; i++) {
       f.advance(5_000);
       expect(await f.router.readRecordingCatalog(scope, { beforeRecordId: 200 })).toEqual({
         status: "unavailable",
         reason: "invalid_options",
       });
-      await page(100 - i * 20, 101 - i * 20);
+      await page(1000 - i * 20, 1001 - i * 20);
       const packet = JSON.parse(f.session.sent.at(-1)!.subarray(16).toString());
-      expect(packet.payload.payload).toMatchObject({ count: 20, start_id: 100 - i * 20, end_id: 1 });
+      expect(packet.payload.payload).toMatchObject({ count: 20, start_id: 1000 - i * 20, end_id: 1 });
     }
     f.advance(5_000);
     expect(await f.router.readRecordingCatalog(scope, { beforeRecordId: 1 })).toEqual({

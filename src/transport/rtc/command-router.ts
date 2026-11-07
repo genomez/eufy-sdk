@@ -101,6 +101,8 @@ import {
 import { PlaybackIngress } from "./playback-ingress.js";
 import { downloadCaptureMs } from "./event-download-experiment.js";
 import {
+  CATALOG_QUERY_COUNT,
+  CATALOG_QUERY_COUNT_MAX,
   CATALOG_MIN_ATTEMPT_MS,
   CATALOG_TIMEOUT_MS,
   COVER_START_GAP_MS,
@@ -376,7 +378,6 @@ interface RecordingAttemptBudget {
   coverFinished?: number;
   covers: number[];
   nextBefore?: number | null;
-  extraPages?: number;
   tableFinished?: number;
   finished?: number;
   lastWasCover?: boolean;
@@ -1353,7 +1354,7 @@ export class RtcCommandRouter {
     return { ...this.recordingPacing };
   }
 
-  /** One latest-20 station query; never acquires, reconnects or retries an owner. */
+  /** One count-parameterized station query; never acquires, reconnects or retries an owner. */
   readRecordingCatalog(scope: RecordingReadScope, opts: RecordingReadOptions = {}): Promise<CatalogReadResult> {
     return this.readRecording(scope, undefined, opts) as Promise<CatalogReadResult>;
   }
@@ -1379,6 +1380,14 @@ export class RtcCommandRouter {
       status: RecordingReadFailure["status"] = "deferred",
     ): RecordingReadFailure => ({ status, reason });
     const started = performance.now();
+    const queryCount = opts.queryCount ?? CATALOG_QUERY_COUNT;
+    if (
+      !Number.isInteger(queryCount) ||
+      queryCount < 1 ||
+      queryCount > CATALOG_QUERY_COUNT_MAX ||
+      (selector && opts.queryCount !== undefined)
+    )
+      return failure("invalid_options", "unavailable");
     const timeout = opts.timeoutMs ?? CATALOG_TIMEOUT_MS;
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > CATALOG_TIMEOUT_MS)
       return failure("invalid_options", "unavailable");
@@ -1408,13 +1417,7 @@ export class RtcCommandRouter {
       const continuation = opts.beforeRecordId !== undefined;
       if (continuation && started - (budget.tableFinished ?? -Infinity) < COVER_START_GAP_MS)
         return failure("quiet_period");
-      if (
-        continuation &&
-        (budget.catalog === undefined ||
-          started - budget.catalog >= 60_000 ||
-          opts.beforeRecordId !== budget.nextBefore ||
-          (budget.extraPages ?? 0) >= 4)
-      )
+      if (continuation && (budget.catalog === undefined || opts.beforeRecordId !== budget.nextBefore))
         return failure("invalid_options", "unavailable");
       budget.covers = budget.covers.filter((time) => started - time < 60_000);
       if (
@@ -1453,11 +1456,9 @@ export class RtcCommandRouter {
       this.recordingAttempts.set(scope.stationSn, budget);
       if (selected) budget.covers.push(started);
       else if (continuation) {
-        budget.extraPages = (budget.extraPages ?? 0) + 1;
         budget.nextBefore = null;
       } else {
         budget.catalog = started;
-        budget.extraPages = 0;
         budget.nextBefore = null;
       }
       this.recordingReads.set(scope.stationSn, controller);
@@ -1544,6 +1545,7 @@ export class RtcCommandRouter {
                       scope.identityKey,
                       Date.now(),
                       this.deps.recordingTimeZone,
+                      queryCount,
                     );
                     if (normalized.status === "ok") {
                       normalized.page.consistent &&= envelopeValid;
@@ -1557,6 +1559,7 @@ export class RtcCommandRouter {
                     }
                   },
                   opts.beforeRecordId,
+                  queryCount,
                 );
                 result =
                   (table.outcome === "success" || table.outcome === "empty") && normalized

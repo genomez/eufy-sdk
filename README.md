@@ -177,3 +177,17 @@ This local package is rebuilt from implementation `02afeda1846e01e07ba154c48fd84
 ## Experimental.6 package refresh, 2026-10-17
 
 This replaces the earlier review.7 candidate with review.9 input `681efd9` (implementation `d4335b9`, on review.8 `f6a59d9`). Runtime source is unchanged. Includes bounded pending acceptance for eligible correlated floodlight late replies with authoritative correction, supported S1 camera sirens, standard doorbell ring events and faster demand-only live-view admission, alongside the battery stream fix and native relay. The add-on relay option defaults to false; command keepalive remains 29000 independently. Package versions are SDK `0.2.1-s1.experimental.6` and bridge `0.3.1-s1.experimental.6`. Earlier candidate status statements above are historical. Original licenses and attribution remain. This is local packaging; publication and final device/soak qualification are pending.
+
+## Recording catalog query sizing
+
+`readRecordingCatalog(scope, { queryCount: 50 })` requests that many station rows;
+`queryCount` defaults to 20 and accepts integers 1 through `CATALOG_QUERY_COUNT_MAX`
+(87381). This is a packet-derived bound, not a firmware capacity claim:
+`EVENT_TABLE_BYTE_CAP` in `src/transport/rtc/event-table-candidate.ts` is 256 KiB;
+an array of n empty JSON objects alone requires at least 3n + 1 bytes. The reply
+envelope and actual rows also consume that unchanged byte budget. Larger replies
+still obey the existing decoded-byte checks, and normalization rejects more rows
+than requested. A short reply retains its actual `page.count`; station errors use
+the existing failure result. Continuations keep exact cursor matching, owner
+arbitration and the five-second completion gap, with no SDK page-count or cycle-age
+stop rule. The caller owns continuation policy and any query-count fallback.

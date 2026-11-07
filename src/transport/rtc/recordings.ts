@@ -3,6 +3,8 @@ import { parseRecordingTime, type RecordingTimeStatus } from "./event-time.js";
 
 export type { RecordingTimeStatus } from "./event-time.js";
 export const CATALOG_QUERY_COUNT = 20;
+export { CATALOG_QUERY_COUNT_MAX } from "./event-table-candidate.js";
+import { CATALOG_QUERY_COUNT_MAX } from "./event-table-candidate.js";
 export const CATALOG_MIN_ATTEMPT_MS = 120_000;
 export const CATALOG_TIMEOUT_MS = 8_000;
 export const COVER_TIMEOUT_MS = 8_000;
@@ -70,6 +72,8 @@ export interface RecordingReadOptions {
   timeoutMs?: number;
   /** Private exclusive upper record bound for a continuation of the current catalog cycle. */
   beforeRecordId?: number;
+  /** Requested row count, from 1 through CATALOG_QUERY_COUNT_MAX; default 20. */
+  queryCount?: number;
 }
 
 /** Fixed refusal codes contain no transport exception, identifier, vendor value or path. */
@@ -311,9 +315,12 @@ export function normalizeRecordingRows(
   identityKey = scope.identityKey,
   nowMs = Date.now(),
   timeZone = "America/Chicago",
+  queryCount = CATALOG_QUERY_COUNT,
 ): CatalogReadResult {
   if (identityKey?.length !== 32) return { status: "unavailable", reason: "store_unavailable" };
-  if (rows.length > CATALOG_QUERY_COUNT) return { status: "unavailable", reason: "invalid_reply" };
+  if (!Number.isInteger(queryCount) || queryCount < 1 || queryCount > CATALOG_QUERY_COUNT_MAX)
+    return { status: "unavailable", reason: "invalid_options" };
+  if (rows.length > queryCount) return { status: "unavailable", reason: "invalid_reply" };
   const keyed = { ...scope, identityKey };
   const scopeFull = mac(identityKey, "recordings.scope.v1", scope.accountNamespace, scope.stationSn);
   const scopeId = opaque("s_", scopeFull);
