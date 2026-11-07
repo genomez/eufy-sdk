@@ -36,13 +36,13 @@ function fixture(options = {}) {
   return { candidate, capture, sent };
 }
 
-function frame(candidate: EventPlaybackCandidate, index: number, intervalMs = 100) {
+function frame(candidate: EventPlaybackCandidate, index: number, intervalMs = 100, timestampMs = index * intervalMs) {
   const data = Buffer.from([0, 0, 0, 1, 0x26, 1, 9]);
   const body = Buffer.alloc(22);
   body.writeUInt32LE(data.length);
   body[5] = 1;
   body.writeUInt16LE(index, 6);
-  body.writeUInt32LE(Math.round(index * intervalMs), 14);
+  body.writeUInt32LE(Math.round(timestampMs), 14);
   for (const p of packetize(
     Buffer.concat([buildPortalHeader(1300, body.length + data.length, 101, 1, 6), body, data]),
     { channel: 4, frameId: index + 1 },
@@ -105,6 +105,7 @@ it.each([
   ["sparse 2x EOF at full span", 2, 2, 18500, 0, false, "arrival", 74000],
   ["partial 2x EOF with short native clock", 2, 100, 1000, 250, false, "arrival", 2020],
   ["full native coverage despite short 2x arrival", 2, 100, 1000, 370, true, "native_header", 37000],
+  ["uniform slow clock lacks millisecond evidence", 2, 100, 1000, 370, false, "arrival", 2020],
   ["full 2x native clock", 2, 552, 18356.685, 36780 / 552, true, "native_header", 36780],
   ["full 1x with delivery pauses", 1, 555, 48250, 0, true, "catalog", 37000],
   ["full 1x native clock with delivery pauses", 1, 555, 48250, 36780 / 555, true, "native_header", 36780],
@@ -128,7 +129,12 @@ it.each([
         ? (i * 18450) / (frames - 1) + (i >= 123 ? 3500 : 0) + (i >= 246 ? 3500 : 0)
         : (i * span) / (frames - 1);
       await vi.advanceTimersByTimeAsync(at - previous);
-      frame(s.candidate, i, interval);
+      frame(
+        s.candidate,
+        i,
+        interval,
+        name.startsWith("full native coverage") ? (i === 0 ? 0 : 100 + ((i - 1) * (36630 - 100)) / 98) : i * interval,
+      );
       previous = at;
     }
     s.candidate.ingress.decoded(

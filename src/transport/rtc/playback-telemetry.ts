@@ -114,6 +114,9 @@ export class PlaybackNativeFrameTiming {
   private lastTimestamp?: number;
   private lastSequence?: number;
   private readonly prefixDeltas: number[] = [];
+  private positiveDeltas = 0;
+  private deltasWithinSecond = 0;
+  private millisecondStep = false;
   private monotonic = true;
   private contiguous = true;
   private positionMs = 0;
@@ -127,6 +130,11 @@ export class PlaybackNativeFrameTiming {
         if (gap === 0 || gap > 1000) this.continuous = false;
         const delta = (header.timestamp - this.lastTimestamp) | 0;
         if (this.prefixDeltas.length < 3) this.prefixDeltas.push(delta);
+        if (delta > 0) {
+          this.positiveDeltas++;
+          if (delta <= 1000) this.deltasWithinSecond++;
+          if (delta >= 10 && delta <= 250) this.millisecondStep = true;
+        }
         if (delta < -10) this.monotonic = false;
         if (((header.sequence - this.lastSequence!) & 0xffff) !== 1) this.contiguous = false;
         this.positionMs += delta;
@@ -139,7 +147,8 @@ export class PlaybackNativeFrameTiming {
   }
   /**
    * Millisecond qualification matches timestamped media: four headers, two advancing steps,
-   * one step of at least 10 ms, no regression over 10 ms, and a catalog-bounded span.
+   * a 10..250 ms step anywhere in the clip, an upper median positive step at most 1000 ms,
+   * no regression over 10 ms, and a catalog-bounded span.
    * The final presentation interval is one 15 fps output period, independent of recording cadence.
    */
   private qualifiedDurationMs(expectedMs: number): number | undefined {
@@ -147,7 +156,8 @@ export class PlaybackNativeFrameTiming {
       !this.monotonic ||
       this.prefixDeltas.length < 3 ||
       this.prefixDeltas.filter((delta) => delta > 0).length < 2 ||
-      !this.prefixDeltas.some((delta) => delta >= 10) ||
+      !this.millisecondStep ||
+      this.deltasWithinSecond * 2 <= this.positiveDeltas ||
       !Number.isSafeInteger(expectedMs) ||
       expectedMs <= 0 ||
       this.spanMs > expectedMs + 1000
@@ -179,7 +189,7 @@ export class PlaybackNativeFrameTiming {
    */
   shortOf(expectedMs: number): boolean {
     const nativeDuration = this.qualifiedDurationMs(expectedMs);
-    if (nativeDuration !== undefined && nativeDuration < expectedMs - 1000) return true;
+    if (!this.continuous && nativeDuration !== undefined && nativeDuration < expectedMs - 1000) return true;
     const value = this.timing.snapshot().frameTiming;
     if (!this.continuous || value.frames < 3 || !Number.isSafeInteger(expectedMs) || expectedMs <= 0) return false;
     const step = value.timestampDeltaMs / (value.frames - 1);

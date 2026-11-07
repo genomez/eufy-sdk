@@ -992,10 +992,10 @@ it.each([
       const timestamp =
         expectedMs === 12000
           ? Math.round((i * 1000) / 15)
-          : i < 4
-            ? [0, 400, 1000, 2500][i]!
-            : 2500 +
-              Math.round(((i - 3 - (i >= 80 ? 1 : 0)) * (span - gap - 2500)) / (frames - 5)) +
+          : i < 6
+            ? [0, 400, 1000, 2500, 2900, 3500][i]!
+            : 3500 +
+              Math.round(((i - 5 - (i >= 80 ? 1 : 0)) * (span - gap - 3500)) / (frames - 7)) +
               (i >= 80 ? gap : 0);
       await vi.advanceTimersByTimeAsync(at - previous);
       for (const packet of wrapped(video(7, timestamp, 65500 + i))) s.candidate.ingress.native(packet);
@@ -1029,7 +1029,10 @@ it.each(["short", "overlong", "skipped", "repeated", "constant", "regression", "
     });
     const timing = Reflect.get(s.candidate, "nativeFrameTiming");
     for (let i = 0; i < 231; i++) {
-      let timestamp = Math.round((i * (mode === "short" ? 40000 : mode === "overlong" ? 62000 : 59815)) / 230);
+      let timestamp =
+        i === 0
+          ? 0
+          : 67 + Math.round(((i - 1) * ((mode === "short" ? 40000 : mode === "overlong" ? 62000 : 59815) - 67)) / 229);
       if (mode === "regression" && i === 100) timestamp -= 1000;
       if (mode === "non-ms") timestamp = i;
       const sequence =
@@ -1424,4 +1427,15 @@ it("delivers each native header timestamp beside the unchanged HEVC access unit"
   expect(delivered.mock.calls.every(([bytes]) => bytes.length === 256 * 1024 && bytes.readUInt32BE(0) === 1)).toBe(
     true,
   );
+});
+
+it("90 kHz early EOF cannot bypass arrival coverage and density", () => {
+  const s = candidateSetup({});
+  Reflect.get(s.candidate, "opts").expectedMs = 60000;
+  Object.assign(s.candidate, { eofSeen: true, firstVideoAt: 0, lastVideoAt: 670 });
+  Object.assign(s.candidate.receipt, { captureOutcome: "eof", randomAccess: true, videoFrames: 11 });
+  const timing = Reflect.get(s.candidate, "nativeFrameTiming");
+  for (let i = 0; i < 11; i++) timing.add(video(7, i * 6000, i).subarray(16), i * 67);
+  expect(timing.completeDurationMs(60000)).toBeUndefined();
+  expect(Reflect.apply(Reflect.get(s.candidate, "retainedMediaFailure"), s.candidate, [])).toBe("span");
 });

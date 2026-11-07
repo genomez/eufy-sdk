@@ -119,7 +119,7 @@ it.each([
   [7001, false],
 ] as const)("native coverage honors the catalog window at span %s ms", (span, accepted) => {
   const timing = new PlaybackNativeFrameTiming();
-  for (const [i, timestamp] of [0, 400, 1000, span].entries()) {
+  for (const [i, timestamp] of [0, 67, 133, span].entries()) {
     const body = Buffer.alloc(22);
     body.writeUInt32LE(timestamp, 14);
     body.writeUInt16LE(i, 6);
@@ -130,11 +130,37 @@ it.each([
 
 it.each([10, 11])("native coverage unwraps timestamps and tolerates at most %s ms regression", (regression) => {
   const timing = new PlaybackNativeFrameTiming();
-  for (const [i, timestamp] of [0, 400, 1000, 1000 - regression, 59815].entries()) {
+  for (const [i, timestamp] of [0, 67, 133, 133 - regression, 59815].entries()) {
     const body = Buffer.alloc(22);
     body.writeUInt32LE((0xfffff000 + timestamp) >>> 0, 14);
     body.writeUInt16LE((65534 + i) & 0xffff, 6);
     timing.add(body, i);
   }
   expect(timing.completeDurationMs(60000)).toBe(regression === 10 ? 59882 : undefined);
+});
+
+it.each([false, true])(
+  "90 kHz early EOF cannot prove completeness, including an isolated ms-sized delta: %s",
+  (smallStep) => {
+    const timing = new PlaybackNativeFrameTiming();
+    for (let i = 0; i < 11; i++) {
+      const body = Buffer.alloc(22);
+      body.writeUInt32LE(smallStep && i > 0 ? 67 + Math.round(((i - 1) * (60000 - 67)) / 9) : i * 6000, 14);
+      body.writeUInt16LE(i, 6);
+      timing.add(body, i * 67);
+    }
+    expect(timing.completeDurationMs(60000)).toBeUndefined();
+    expect(timing.shortOf(60000)).toBe(false);
+  },
+);
+
+it("steady 15fps retains the legacy short-duration tolerance", () => {
+  const timing = new PlaybackNativeFrameTiming();
+  for (let i = 0; i < 870; i++) {
+    const body = Buffer.alloc(22);
+    body.writeUInt32LE(Math.round((i * 1000) / 15), 14);
+    body.writeUInt16LE(i, 6);
+    timing.add(body, i * 67);
+  }
+  expect(timing.shortOf(60000)).toBe(false);
 });
