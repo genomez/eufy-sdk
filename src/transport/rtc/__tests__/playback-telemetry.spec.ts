@@ -50,11 +50,20 @@ it.each([1, 2, 4, 8])("validates bounded speed %s", (playSpeed) => {
   const v = { playSpeed, playType: 1, clientType: "WEB", maxClips: 5, icePolicy: "all" };
   expect(playbackExperiment(v)).toEqual(v);
 });
+it.each([6, 100, Number.MAX_SAFE_INTEGER])("accepts a positive safe clip budget %s", (maxClips) => {
+  const value = { playSpeed: 1, playType: 1, clientType: "WEB", maxClips };
+  expect(playbackExperiment(value)).toEqual(value);
+});
+it.each([0, -1, 1.5, NaN, Infinity, "6", null, Number.MAX_SAFE_INTEGER + 1])(
+  "rejects invalid clip budget %s",
+  (maxClips) => {
+    expect(() => playbackExperiment({ playSpeed: 1, playType: 1, clientType: "WEB", maxClips })).toThrow(RangeError);
+  },
+);
 it.each([
   null,
   {},
   { playSpeed: 3 },
-  { playSpeed: 1, playType: 1, clientType: "WEB", maxClips: 6 },
   { playSpeed: 1, playType: 1, clientType: "WEB", maxClips: 1, icePolicy: "host-only" },
 ])("rejects malformed transport overrides %j", (value) => {
   expect(() => playbackExperiment(value)).toThrow(RangeError);

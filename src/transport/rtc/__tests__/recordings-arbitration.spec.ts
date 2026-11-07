@@ -30,6 +30,42 @@ const selector = (id = 1) => {
 };
 
 describe("recording admission without station side effects", () => {
+  it.each([false, true])("admits metadata two seconds after a cover, continuation %s", async (continuation) => {
+    const f = await fixture();
+    if (continuation) {
+      const read = f.router.readRecordingCatalog(scope);
+      await sent(f.session);
+      f.session.table(
+        Array.from({ length: 20 }, (_, i) => row({ record_id: 100 - i })),
+        {
+          version: "1",
+          count: 20,
+          start_id: 100,
+          end_id: 81,
+        },
+      );
+      expect((await read).status).toBe("ok");
+      f.advance(5_000);
+    }
+    const selected = selector();
+    const cover = f.router.readRecordingCover(scope, selected);
+    await sent(f.session, continuation ? 2 : 1);
+    f.session.notify({ file: selected.thumbPath, content: "/9j/2Q==" }, 1308);
+    expect((await cover).status).toBe("ok");
+    const opts = continuation ? { beforeRecordId: 81 } : {};
+    f.advance(1_999);
+    expect(await f.router.readRecordingCatalog(scope, opts)).toEqual({ status: "deferred", reason: "quiet_period" });
+    f.advance(1);
+    expect(await f.router.readRecordingCover(scope, selector(2))).toEqual({
+      status: "deferred",
+      reason: "quiet_period",
+    });
+    const catalog = f.router.readRecordingCatalog(scope, opts);
+    await sent(f.session, continuation ? 3 : 2);
+    f.session.table([row({ record_id: 80 })]);
+    expect((await catalog).status).toBe("ok");
+  });
+
   it("updates cover pacing atomically without weakening foreground or catalog quiet", async () => {
     const f = await fixture();
     expect(f.router.setRecordingPacing({ coverGapMs: 0, coverRatePerMinute: null, coverQuietMs: 0 })).toEqual({
@@ -214,13 +250,28 @@ describe("recording admission without station side effects", () => {
     expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "deferred", reason: "busy" });
     expect(f.session.sent).toHaveLength(0);
   });
-  it("enforces two-minute attempt spacing on failed attempts as well as success", async () => {
+  it("enforces sixty-second attempt spacing on failed attempts", async () => {
     const f = await fixture();
     f.session.accept = false;
     expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "unavailable", reason: "send_refused" });
     f.advance(2_000);
     expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "deferred", reason: "rate_limited" });
-    f.advance(120_000);
+    f.advance(57_999);
+    expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "deferred", reason: "rate_limited" });
+    f.advance(1);
+    expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "unavailable", reason: "send_refused" });
+    expect(f.session.sent).toHaveLength(2);
+  });
+  it("admits a fresh catalog sixty seconds after a successful attempt", async () => {
+    const f = await fixture();
+    const read = f.router.readRecordingCatalog(scope);
+    await sent(f.session);
+    f.session.table([row()]);
+    expect((await read).status).toBe("ok");
+    f.advance(59_999);
+    expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "deferred", reason: "rate_limited" });
+    f.advance(1);
+    f.session.accept = false;
     expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "unavailable", reason: "send_refused" });
     expect(f.session.sent).toHaveLength(2);
   });

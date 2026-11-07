@@ -1342,7 +1342,7 @@ export class RtcCommandRouter {
     const budget = this.recordingAttempts.get(scope.stationSn);
     const coverToCover = cover && budget?.lastWasCover;
     const quiet = coverToCover ? this.recordingPacing.coverQuietMs : READ_QUIET_MS;
-    const gap = coverToCover ? this.recordingPacing.coverGapMs : COVER_START_GAP_MS;
+    const gap = coverToCover ? this.recordingPacing.coverGapMs : READ_QUIET_MS;
     if (performance.now() - (budget?.finished ?? -Infinity) < quiet) return "quiet_period";
     if (performance.now() - (budget?.coverFinished ?? -Infinity) < gap) return "quiet_period";
     return;

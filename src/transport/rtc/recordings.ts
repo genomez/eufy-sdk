@@ -5,7 +5,7 @@ export type { RecordingTimeStatus } from "./event-time.js";
 export const CATALOG_QUERY_COUNT = 20;
 export { CATALOG_QUERY_COUNT_MAX } from "./event-table-candidate.js";
 import { CATALOG_QUERY_COUNT_MAX } from "./event-table-candidate.js";
-export const CATALOG_MIN_ATTEMPT_MS = 120_000;
+export const CATALOG_MIN_ATTEMPT_MS = 60_000;
 export const CATALOG_TIMEOUT_MS = 8_000;
 export const COVER_TIMEOUT_MS = 8_000;
 export const RENEWAL_RESERVE_MS = 5_000;

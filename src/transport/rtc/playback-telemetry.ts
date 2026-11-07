@@ -21,8 +21,7 @@ export function playbackExperiment(value: unknown): PlaybackExperiment | undefin
     v.playType !== 1 ||
     v.clientType !== "WEB" ||
     (v.icePolicy !== undefined && v.icePolicy !== "relay" && v.icePolicy !== "all") ||
-    (v.maxClips !== undefined &&
-      (!Number.isSafeInteger(v.maxClips) || (v.maxClips as number) < 1 || (v.maxClips as number) > 5))
+    (v.maxClips !== undefined && (!Number.isSafeInteger(v.maxClips) || (v.maxClips as number) < 1))
   )
     throw new RangeError("Playback experiment invalid");
   return {

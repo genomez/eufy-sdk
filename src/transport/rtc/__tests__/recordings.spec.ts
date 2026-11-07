@@ -406,8 +406,13 @@ describe("bounded catalog page admission", () => {
       status: "deferred",
       reason: "quiet_period",
     });
+    f.advance(4_999);
+    expect(await f.router.readRecordingCatalog(scope, { beforeRecordId: 981 })).toEqual({
+      status: "deferred",
+      reason: "quiet_period",
+    });
     for (let i = 1; i <= 14; i++) {
-      f.advance(5_000);
+      f.advance(i === 1 ? 1 : 5_000);
       expect(await f.router.readRecordingCatalog(scope, { beforeRecordId: 200 })).toEqual({
         status: "unavailable",
         reason: "invalid_options",
@@ -421,6 +426,7 @@ describe("bounded catalog page admission", () => {
       status: "unavailable",
       reason: "invalid_options",
     });
-    expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "deferred", reason: "rate_limited" });
+    f.session.accept = false;
+    expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "unavailable", reason: "send_refused" });
   });
 });
