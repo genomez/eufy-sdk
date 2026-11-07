@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { RtcPeer, TurnConfig } from "../peer.js";
 import { scallJsonToSdp } from "../scall-sdp.js";
-import { RtcSession } from "../session.js";
+import { RtcSession, type RtcSessionOptions } from "../session.js";
 import type { RtcInnerMessage, RtcSignalingClient } from "../signaling.js";
 import { TransportEvidenceRecorder, type RtcTransportDiagnostics } from "../transport-diagnostics.js";
 
@@ -47,7 +47,7 @@ const HUB_SDP = {
   candidate: ["1 1 udp 1 192.168.1.10 1 typ host"],
 };
 
-function setup(overrides: { maxCallRetries?: number } = {}) {
+function setup(overrides: Partial<RtcSessionOptions> = {}) {
   const sig = new FakeSignaling();
   const peer = new FakePeer();
   const sleeps: number[] = [];
@@ -82,6 +82,59 @@ async function authenticated(s: ReturnType<typeof setup>) {
 const flush = () => new Promise((r) => setImmediate(r));
 
 describe("RtcSession", () => {
+  describe("ICE safety", () => {
+    it.each(["all", "relay"] as const)("defers an offer until TURN is granted for %s", async (icePolicy) => {
+      const s = await authenticated(setup({ peer: { icePolicy } }));
+      s.sig.hub({ action: 3, dataType: "info", data: { sdp: JSON.stringify(HUB_SDP) } });
+      await flush();
+      expect(s.peer.init).not.toHaveBeenCalled();
+      expect(s.peer.handleRemoteOffer).not.toHaveBeenCalled();
+      s.sig.hub({ action: 3, dataType: "scall", data: { status: 100, turn: TURN } });
+      await flush();
+      expect(s.peer.init).toHaveBeenCalledExactlyOnceWith(TURN);
+      expect(s.peer.handleRemoteOffer).toHaveBeenCalledOnce();
+      expect(s.sig.sendInfoSdp).toHaveBeenCalledOnce();
+      expect(s.session.getConnectionDiagnostics().establishment).toMatchObject({
+        policy: icePolicy,
+        grantOfferOrder: "offer_first",
+      });
+      expect(JSON.stringify(s.session.getConnectionDiagnostics())).not.toContain(TURN.turn_addr);
+      s.session.close();
+    });
+
+    it("records grant-first order and ends a failed peer before establishment", async () => {
+      const s = await authenticated(setup({ peer: { icePolicy: "all" } }));
+      s.sig.hub({ action: 3, dataType: "scall", data: { status: 100, turn: TURN } });
+      s.sig.hub({ action: 3, dataType: "info", data: { sdp: JSON.stringify(HUB_SDP) } });
+      await flush();
+      expect(s.session.getConnectionDiagnostics().establishment?.grantOfferOrder).toBe("grant_first");
+      const close = vi.fn();
+      s.session.on("close", close);
+      s.peer.emit("connectionState", "failed");
+      expect(close).toHaveBeenCalledOnce();
+      expect(s.session.closeOrigin).toBe("peer_failed");
+    });
+
+    it("records the authentication deadline", async () => {
+      const s = setup({ authTimeoutMs: 1 });
+      await expect(s.session.connect()).rejects.toThrow(/auth timeout/);
+      expect(s.session.getConnectionDiagnostics().establishment?.deadlines).toEqual([
+        { kind: "signaling_auth", atMs: expect.any(Number) },
+      ]);
+      s.session.close();
+    });
+
+    it("discards a deferred offer on close without building a peer", async () => {
+      const s = await authenticated(setup({ peer: { icePolicy: "all" } }));
+      s.sig.hub({ action: 3, dataType: "info", data: { sdp: JSON.stringify(HUB_SDP) } });
+      await flush();
+      s.session.close();
+      s.sig.hub({ action: 3, dataType: "scall", data: { status: 100, turn: TURN } });
+      await flush();
+      expect(s.peer.init).not.toHaveBeenCalled();
+      expect(s.sig.sendInfoSdp).not.toHaveBeenCalled();
+    });
+  });
   it("forwards keepalive echoes separately from frames until the session closes", () => {
     const s = setup();
     const echo = vi.fn();

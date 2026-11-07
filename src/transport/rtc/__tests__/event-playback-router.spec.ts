@@ -863,7 +863,7 @@ it("no-media unconfirmed clip replaces the session, holds reads and live, then r
 });
 
 it.each(["failed", "timed_out"] as const)(
-  "real live acquisition resumes on a fresh owner after %s playback recovery",
+  "failed %s playback recovery preserves the owner and blocks unsafe live acquisition",
   async (outcome) => {
     const { router, session, sessions } = await fixture();
     const retired = Reflect.get(router, "sessions").get(station);
@@ -882,9 +882,11 @@ it.each(["failed", "timed_out"] as const)(
     }
     const recovering = Reflect.get(router, "reconnectPlayback").call(router, station, retired);
     let liveSettled = false;
-    const live = router.mediaProviderFor(camera).live!().finally(() => {
-      liveSettled = true;
-    });
+    const live = router.mediaProviderFor(camera).live!()
+      .catch((error: Error) => error)
+      .finally(() => {
+        liveSettled = true;
+      });
     await vi.advanceTimersByTimeAsync(outcome === "timed_out" ? 59999 : 100);
     expect(liveSettled).toBe(false);
     expect(Reflect.get(router, "lives").has(station)).toBe(false);
@@ -893,27 +895,15 @@ it.each(["failed", "timed_out"] as const)(
     await vi.advanceTimersByTimeAsync(1);
     expect(await recovering).toMatchObject({ reconnectOutcome: outcome });
     expect(liveSettled).toBe(true);
-    const consumer = await live;
-    const current = Reflect.get(router, "sessions").get(station);
-    const entry = Reflect.get(router, "lives").get(station);
-    expect(current).not.toBe(retired);
-    expect(current.session).toBe(sessions.at(-1));
-    expect(current.session.isConnected).toBe(true);
-    expect(Reflect.get(entry.live, "opts").session).toBe(current.session);
+    expect(await live).toMatchObject({ message: "playback_slot_uncertain" });
+    expect(Reflect.get(router, "sessions").get(station)).toBe(retired);
+    expect(session.isConnected).toBe(true);
     expect(retired.leases).toBe(0);
-    expect(current.leases).toBe(1);
-    expect(session.isConnected).toBe(false);
-    expect(session.sent.filter((p) => parsePortalHeader(p)!.commandId === 1350)).toHaveLength(0);
-    const starts = (current.session as Session).sent.filter((p) => parsePortalHeader(p)!.commandId === 1350);
-    expect(starts).toHaveLength(1);
-    expect(JSON.parse(starts[0]!.subarray(16).toString())).toMatchObject({ cmd: 1003 });
-    expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(false);
-    consumer.stop();
-    expect(current.leases).toBe(0);
+    expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(true);
   },
 );
 
-it("uncertain clip bypasses exhausted proactive renewal eligibility and retires on replacement failure", async () => {
+it("uncertain clip retains its owner and safety latch on replacement failure", async () => {
   const { router, session } = await fixture();
   session.releaseStatus = false;
   const owner = Reflect.get(router, "sessions").get(station);
@@ -924,11 +914,12 @@ it("uncertain clip bypasses exhausted proactive renewal eligibility and retires 
   const pending = router.readEventPlaybackCandidate(station, { ...options(), clip: sealedClip(router, session) });
   await vi.advanceTimersByTimeAsync(16100);
   expect(await pending).toMatchObject({ reconnectOutcome: "failed" });
-  expect(session.isConnected).toBe(false);
-  expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(false);
+  expect(session.isConnected).toBe(true);
+  expect(router.getPlaybackSafetyDiagnostics().unresolved).toBe(true);
+  expect(Reflect.get(router, "sessions").get(station)).toBe(owner);
 });
 
-it("reconnect hard cap releases waiters and retires uncertain ownership even if renewal never settles", async () => {
+it("reconnect hard cap releases waiters and preserves ownership when renewal never settles", async () => {
   const { router, session } = await fixture();
   const owner = Reflect.get(router, "sessions").get(station);
   vi.spyOn(router as unknown as { replaceSession: () => Promise<void> }, "replaceSession").mockImplementation(
@@ -946,8 +937,8 @@ it("reconnect hard cap releases waiters and retires uncertain ownership even if 
   await vi.advanceTimersByTimeAsync(1);
   expect(await recovering).toEqual({ reconnectOutcome: "timed_out", reconnectDurationMs: 60000 });
   await waiter;
-  expect(session.isConnected).toBe(false);
-  expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: false, reconnect: { timedOut: 1 } });
+  expect(session.isConnected).toBe(true);
+  expect(router.getPlaybackSafetyDiagnostics()).toMatchObject({ unresolved: true, reconnect: { timedOut: 1 } });
 });
 
 it("admits playback after sequential live stops and trailing LIVE media on the same owner", async () => {

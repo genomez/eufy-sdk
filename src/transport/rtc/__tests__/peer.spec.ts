@@ -99,6 +99,12 @@ class FakePc implements NativePeerConnection {
   onStateChange(cb: (state: string) => void): void {
     this.cbs.state = cb as never;
   }
+  onIceStateChange(cb: (state: string) => void): void {
+    this.cbs.ice = cb as never;
+  }
+  fireIce(state: string): void {
+    (this.cbs.ice as ((s: string) => void) | undefined)?.(state);
+  }
   onGatheringStateChange(cb: (state: string) => void): void {
     this.cbs.gather = cb as never;
   }
@@ -133,7 +139,7 @@ const ANSWER =
   "v=0\r\na=setup:passive\r\na=ice-ufrag:x\r\na=ice-pwd:y\r\na=fingerprint:sha-256 aa:bb\r\na=max-message-size:65536\r\n";
 
 function setup(
-  icePolicy: "host-only" | "all" = "host-only",
+  icePolicy: "host-only" | "all" | "relay" = "host-only",
   createFramer = (): PortalFramer => new PassthroughFramer(),
   opts: Pick<RtcPeerOptions, "receiveTimingNow" | "logger"> = {},
 ) {
@@ -154,6 +160,106 @@ function setup(
 }
 
 describe("RtcPeer", () => {
+  describe("ICE safety", () => {
+    const turn = {
+      turn_addr: "synthetic-turn",
+      turn_port: 3478,
+      turn_user: "synthetic-user",
+      turn_password: "synthetic-password",
+    };
+
+    it.each(["all", "relay"] as const)(
+      "refuses TURN-less %s initialization and accepts the later grant",
+      async (policy) => {
+        const s = setup(policy);
+        await expect(s.peer.init()).rejects.toThrow(/TURN grant required/);
+        await s.peer.init(turn);
+        expect(s.config().iceServers).toHaveLength(2);
+        expect(s.peer.getIceDiagnostics().peerInitializations).toEqual([
+          { atMs: expect.any(Number), turnConfigured: true },
+        ]);
+        s.peer.close();
+      },
+    );
+
+    it("counts pre-grant and SDP candidates, preserves pending trickle, and sanitizes lifecycle evidence", async () => {
+      vi.useFakeTimers();
+      try {
+        const s = setup("all");
+        s.peer.addRemoteCandidate(HOST);
+        await s.peer.init(turn);
+        s.pc().local = { type: "answer", sdp: ANSWER };
+        await s.peer.handleRemoteOffer(OFFER);
+        expect(s.pc().candidates).toEqual([[HOST, "2"]]);
+        s.pc().fireLocalCandidate(HOST);
+        s.pc().fireLocalCandidate(SRFLX);
+        Object.assign(s.pc(), {
+          getSelectedCandidatePair: () => ({
+            local: { type: "host", address: "secret-address", port: 999 },
+            remote: { type: "relay", fingerprint: "secret-fingerprint" },
+          }),
+        });
+        await vi.advanceTimersByTimeAsync(25);
+        s.pc().fireIce("connected");
+        await vi.advanceTimersByTimeAsync(50);
+        s.pc().fireState("connected");
+        s.pc().fireState("secret-serial-state");
+        s.peer.close();
+        const d = s.peer.getIceDiagnostics();
+        expect(d.candidates.local).toEqual({ host: 1, srflx: 1, prflx: 0, relay: 0, unknown: 0 });
+        expect(d.candidates.remote).toEqual({ host: 2, srflx: 1, prflx: 0, relay: 0, unknown: 0 });
+        expect(d.selectedPair).toEqual({ local: "host", remote: "relay" });
+        expect(d.transitions).toEqual([
+          { layer: "ice", state: "connected", atMs: 25 },
+          { layer: "connection", state: "connected", atMs: 75 },
+        ]);
+        expect(d.dtls).toMatchObject({
+          source: "connection_state_proxy",
+          nativeStateAvailable: false,
+          iceConnectedAtMs: 25,
+          connectionConnectedAtMs: 75,
+        });
+        const text = JSON.stringify(d);
+        for (const secret of [
+          "secret",
+          turn.turn_addr,
+          turn.turn_user,
+          turn.turn_password,
+          "192.168",
+          "203.0.113",
+          "ufrag",
+          "fingerprint",
+        ])
+          expect(text).not.toContain(secret);
+        d.transitions.length = 0;
+        d.candidates.local.host = 99;
+        expect(s.peer.getIceDiagnostics().transitions).toHaveLength(2);
+        expect(s.peer.getIceDiagnostics().candidates.local.host).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("records the local-answer deadline and bounds transition evidence", async () => {
+      vi.useFakeTimers();
+      try {
+        const s = setup("all");
+        await s.peer.init(turn);
+        const pending = expect(s.peer.handleRemoteOffer(OFFER)).rejects.toThrow(/local SDP answer/);
+        await vi.advanceTimersByTimeAsync(200);
+        await pending;
+        for (let i = 0; i < 100; i++) s.pc().fireState("connecting");
+        const d = s.peer.getIceDiagnostics();
+        expect(d.deadlines).toEqual([{ kind: "local_answer", atMs: 200 }]);
+        expect(d.transitions).toHaveLength(32);
+        expect(d.dtls.transitions).toHaveLength(32);
+        expect(d.evicted).toBe(136);
+        s.peer.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
   it("native callbacks deliver real framer rejection and unknown outcomes to the ingress ledger", async () => {
     const framer = new PtcsFramer();
     const { peer, pc } = setup("host-only", () => framer);
@@ -1073,7 +1179,7 @@ describe("RTC native transport evidence", () => {
 
 it.each(["relay", "srflx", "host", "prflx"])("reports only the selected %s ICE pair types", async (type) => {
   const f = setup("all");
-  await f.peer.init();
+  await f.peer.init({ turn_addr: "synthetic", turn_port: 3478, turn_user: "u", turn_password: "p" });
   Object.assign(f.pc(), {
     getSelectedCandidatePair: () => ({
       local: { type, address: "private", port: 123 },

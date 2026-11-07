@@ -18,6 +18,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import { IceEstablishmentRecorder } from "./ice-diagnostics.js";
 import {
   ConnectionStageRecorder,
   type RtcConnectionStage,
@@ -88,6 +89,8 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     this.peer.attachIngressGuard(guard);
   }
   private connectionEvidence = new ConnectionStageRecorder();
+  private readonly establishment: IceEstablishmentRecorder;
+  private pendingOffer?: InfoPayload;
   private readonly signaling: RtcSignalingClient;
   /** Selected ICE types only, when the native peer exposes a selected pair. */
   getSelectedIceCandidateTypes() {
@@ -115,6 +118,9 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     this.sleep = opts.sleep ?? defaultSleep;
     this.signaling = (opts.createSignaling ?? ((o) => new RtcSignalingClient(o)))(opts);
     this.peer = (opts.createPeer ?? ((o) => new RtcPeer(o)))({ logger: this.logger, ...opts.peer });
+    this.establishment = new IceEstablishmentRecorder(opts.peer?.icePolicy ?? "host-only");
+    this.connectionEvidence.establishment = this.establishment;
+    this.peer.attachEstablishmentEvidence?.(this.establishment);
 
     this.signaling.on("message", (inner) => {
       if (this.closed) return;
@@ -168,7 +174,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
       this.closeWithOrigin("command_channel_closed");
     });
     this.peer.on("connectionState", (state) => {
-      if ((state === "failed" || state === "closed") && this.connected && !this.closed) {
+      if ((state === "failed" || state === "closed") && !this.closed) {
         this.closeWithOrigin(state === "failed" ? "peer_failed" : "peer_closed");
       }
     });
@@ -191,6 +197,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
   /** @internal Share finite storage without adding operational callbacks or events. */
   attachConnectionEvidence(recorder: ConnectionStageRecorder): void {
     this.connectionEvidence = recorder;
+    recorder.establishment = this.establishment;
   }
 
   /** Detached actual session execution evidence, without inspecting the peer or signaling client. */
@@ -288,6 +295,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     const failure = this.peerInitFailure;
     this.closure = failure ? "peer_failed" : origin;
     this.closed = true;
+    this.pendingOffer = undefined;
     this.connected = false;
     try {
       if (this.signaling.isOpen) this.signaling.sendHangup(this.channelId);
@@ -316,6 +324,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     const timeoutMs = this.opts.authTimeoutMs ?? 15_000;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        this.establishment.deadline("signaling_auth");
         cleanup();
         reject(new Error("RTC signalling auth timeout"));
       }, timeoutMs);
@@ -370,6 +379,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     if (this.closed) return;
     const status = payload.status;
     if (status === 100 && payload.turn) {
+      this.establishment.order("grant");
       this.note("grant", "observed");
       this.callRetries = 0;
       this.turn = payload.turn;
@@ -394,6 +404,11 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
         return;
       }
       if (this.closed) this.peer.close();
+      else if (this.pendingOffer) {
+        const offer = this.pendingOffer;
+        this.pendingOffer = undefined;
+        await this.onInfo(offer);
+      }
       return;
     }
     if (status === 200) {
@@ -411,6 +426,7 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
       }
       this.peer.close();
       this.sdpHandled = false;
+      this.pendingOffer = undefined;
       this.turn = undefined;
       this.connected = false;
       if (this.callRetries > (this.opts.maxCallRetries ?? 3)) {
@@ -446,6 +462,11 @@ export class RtcSession extends EventEmitter<RtcSessionEvents> {
     const sdpText = payload.value ?? payload.sdp;
     if (!sdpText || (payload.format !== "SDP" && !payload.sdp)) return;
     if (this.sdpHandled) return;
+    this.establishment.order("offer");
+    if (!this.turn && (this.opts.peer?.icePolicy === "all" || this.opts.peer?.icePolicy === "relay")) {
+      this.pendingOffer ??= payload;
+      return;
+    }
     this.note("offer", "observed");
     this.sdpHandled = true;
     if (!this.turn) {

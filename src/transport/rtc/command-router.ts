@@ -224,6 +224,9 @@ export interface RtcCommandRouterDeps {
 }
 
 interface StationSession {
+  playbackRecoveryBlocked?: boolean;
+  icePolicy: "relay" | "all";
+  relayFallback?: StationSession;
   playbackSelectors: Set<number>;
   playbackObservation?: PlaybackIngress;
   storageCandidateOwner: { identity: RtcIdentity; accountId: string; model: string | undefined };
@@ -1626,7 +1629,10 @@ export class RtcCommandRouter {
   getPlaybackSafetyDiagnostics() {
     return {
       ...this.playbackHealth,
-      unresolved: this.playbackUnresolved || this.playbackHolds.size > 0,
+      unresolved:
+        this.playbackUnresolved ||
+        this.playbackHolds.size > 0 ||
+        [...this.sessions.values()].some((st) => st.playbackRecoveryBlocked),
       reconnect: { ...this.playbackReconnect },
       active: this.playbackProbes.size > 0,
       reestablishedAgeMs:
@@ -1717,6 +1723,7 @@ export class RtcCommandRouter {
       continuous() &&
       opts.fresh?.() === true &&
       !st!.informationTainted &&
+      !st!.playbackRecoveryBlocked &&
       !st!.replacement &&
       (!st!.refreshPending || (!!opts.clip && candidate.receipt.startAttempted)) &&
       (!this.playbackProbes.has(stationSn) || (st!.leases === 1 && st!.pendingExchanges === 1)) &&
@@ -1990,7 +1997,11 @@ export class RtcCommandRouter {
       if (done) return;
       done = true;
       clearTimeout(cap);
-      if (outcome !== "connected" && this.sessions.get(sn) === original) this.drop(sn, original);
+      if (outcome !== "connected" && this.sessions.get(sn) === original) {
+        this.cancelRefresh(sn, original);
+        original.playbackRecoveryBlocked = true;
+        this.guardUnresolvedPlayback(original);
+      }
       this.playbackHolds.delete(sn);
       this.playbackReconnect[outcome === "timed_out" ? "timedOut" : outcome]++;
       this.deps.logger?.info?.(`[rtc] playback reconnect ${outcome}`);
@@ -2932,14 +2943,16 @@ export class RtcCommandRouter {
     adminUserId: string,
     identity: RtcIdentity,
     signal?: AbortSignal,
+    selected?: StationSession,
   ): Promise<StationSession> {
     signal?.throwIfAborted();
-    let st = this.sessions.get(sn);
+    let st = selected ?? this.sessions.get(sn);
     if (!st) {
       st = this.createStationSession(sn, adminUserId, identity);
       this.sessions.set(sn, st);
     }
     st.leases++;
+    const openingEpoch = this.epoch;
     if (st.idle) clearTimeout(st.idle);
     try {
       await untilAborted(st.ready, signal);
@@ -2959,6 +2972,21 @@ export class RtcCommandRouter {
       this.armKeepalive(sn, st);
     } catch (e) {
       this.release(sn, st);
+      const current = this.sessions.get(sn);
+      if (
+        st.icePolicy !== "relay" &&
+        !signal?.aborted &&
+        openingEpoch === this.epoch &&
+        this.deps.identity()?.userId === identity.userId &&
+        (!current || current === st || current === st.relayFallback) &&
+        st.connectionRecord.outcome !== "connected"
+      ) {
+        if (!st.relayFallback) {
+          st.relayFallback = this.createStationSession(sn, adminUserId, identity, false, "relay");
+          this.sessions.set(sn, st.relayFallback);
+        }
+        return this.stationSession(sn, adminUserId, identity, signal, st.relayFallback);
+      }
       if (st.leases === 0 && st.scheduler.snapshot().queued === 0) this.drop(sn, st);
       throw e;
     }
@@ -2971,6 +2999,7 @@ export class RtcCommandRouter {
     adminUserId: string,
     identity: RtcIdentity,
     replacement = false,
+    icePolicy = this.sessionIcePolicy(),
   ): StationSession {
     const maxCallRetries = replacement ? 0 : this.deps.maxCallRetries;
     if (
@@ -2990,12 +3019,13 @@ export class RtcCommandRouter {
       channelId: 0,
       maxCallRetries,
       logger: this.deps.logger,
-      peer: { logger: this.deps.logger, icePolicy: this.sessionIcePolicy() },
+      peer: { logger: this.deps.logger, icePolicy },
     });
     const stages = session instanceof RtcSession ? new ConnectionStageRecorder() : null;
     if (stages) session.attachConnectionEvidence(stages);
     const connectTimeoutMs = this.deps.connectTimeoutMs ?? 12_000;
     const created: StationSession = {
+      icePolicy,
       playbackSelectors: new Set([1]),
       storageCandidateOwner: {
         identity: { ...identity },
@@ -3041,7 +3071,7 @@ export class RtcCommandRouter {
       created.lastSessionError = renewalFailure(error);
       if (created.lastSessionError !== "signaling_486") created.nonBusySessionError = true;
       if (this.sessions.get(sn) === created) {
-        this.drop(sn, created);
+        if (icePolicy === "relay" || created.connectionRecord.outcome !== "opening") this.drop(sn, created);
         this.deps.onError?.(error);
       }
     };
@@ -3071,7 +3101,7 @@ export class RtcCommandRouter {
     session.on("connected", onConnected);
     session.on("error", onError);
     session.on("close", onClose);
-    created.ready = this.bringUp(sn, session, connectTimeoutMs, created.connectionRecord).then(() => {
+    created.ready = this.bringUp(sn, session, connectTimeoutMs, created.connectionRecord, icePolicy).then(() => {
       created.connectedAtMs = Date.now();
       created.connectedAtMonotonicMs = performance.now();
       if (this.sessions.get(sn) === created) this.transportState(sn, "connected");
@@ -3195,9 +3225,13 @@ export class RtcCommandRouter {
     };
     original.replacement = replacement;
     const signal = replacement.controller.signal;
+    const icePolicy = this.sessionIcePolicy();
     const timeout = setTimeout(
-      () => replacement.controller.abort(new Error("RTC session replacement timed out")),
-      15_000,
+      () => {
+        replacement.candidate?.connectionRecord.stages?.establishment?.deadline("replacement");
+        replacement.controller.abort(new Error("RTC session replacement timed out"));
+      },
+      icePolicy === "relay" ? 15_000 : 30_000,
     );
     this.refreshStats.attempts++;
     this.refreshStats.lastStartedAtMs = started;
@@ -3215,9 +3249,19 @@ export class RtcCommandRouter {
       replacementUserId = identity.userId;
       const member = ((this.deps.findDevice(sn)?.raw ?? {}) as { member?: { admin_user_id?: unknown } }).member;
       const accountId = (typeof member?.admin_user_id === "string" && member.admin_user_id) || identity.userId;
-      const candidate = this.createStationSession(sn, accountId, identity, true);
-      replacement.candidate = candidate;
-      await untilAborted(candidate.ready, signal);
+      let candidate: StationSession;
+      try {
+        candidate = this.createStationSession(sn, accountId, identity, true, icePolicy);
+        replacement.candidate = candidate;
+        await untilAborted(candidate.ready, signal);
+      } catch (error) {
+        signal.throwIfAborted();
+        if (icePolicy === "relay" || epoch !== this.epoch || this.sessions.get(sn) !== original) throw error;
+        if (replacement.candidate) this.drop(sn, replacement.candidate);
+        candidate = this.createStationSession(sn, accountId, identity, true, "relay");
+        replacement.candidate = candidate;
+        await untilAborted(candidate.ready, signal);
+      }
       signal.throwIfAborted();
       phase = "information";
       await this.readInformation(candidate, accountId, candidate.seg.next(), signal, "replacement");
@@ -3374,7 +3418,13 @@ export class RtcCommandRouter {
    * session closed and every listener gone — when `connect()` throws, the session closes first, or the
    * deadline passes. A single promise, so an early failure cannot leave a second one rejecting unheard.
    */
-  private bringUp(sn: string, session: RtcSession, connectTimeoutMs: number, record: ConnectionRecord): Promise<void> {
+  private bringUp(
+    sn: string,
+    session: RtcSession,
+    connectTimeoutMs: number,
+    record: ConnectionRecord,
+    icePolicy: "relay" | "all",
+  ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       const finish = (err?: Error, outcome: ConnectionRecord["outcome"] = err ? "connect_failed" : "connected") => {
@@ -3384,6 +3434,7 @@ export class RtcCommandRouter {
         clearTimeout(timer);
         session.off("connected", onConnected);
         session.off("close", onClose);
+        session.off("error", onError);
         if (err) {
           try {
             session.close();
@@ -3392,19 +3443,21 @@ export class RtcCommandRouter {
           }
           reject(err);
         } else {
-          this.deps.logger?.info?.(`[rtc] ${sn} command channel up (${this.deps.icePolicy ?? "relay"})`);
+          this.deps.logger?.info?.(`[rtc] command channel up (${icePolicy})`);
           resolve();
         }
       };
       const onConnected = () => finish();
+      const onError = (error: Error) => finish(error);
       const onClose = (error?: Error) =>
         finish(error ?? new Error(`rtc: ${sn} session closed before the command channel opened`), "closed_before_open");
-      const timer = setTimeout(
-        () => finish(connectionDeadline(sn, connectTimeoutMs), "connect_timeout"),
-        connectTimeoutMs,
-      );
+      const timer = setTimeout(() => {
+        record.stages?.establishment?.deadline("connection");
+        finish(connectionDeadline(sn, connectTimeoutMs), "connect_timeout");
+      }, connectTimeoutMs);
       session.once("connected", onConnected);
       session.once("close", onClose);
+      if (icePolicy !== "relay") session.once("error", onError);
       Promise.resolve()
         .then(() => {
           if (!settled) return session.connect();
@@ -3481,7 +3534,8 @@ export class RtcCommandRouter {
     if (playback?.candidate.fullClip) await playback.finished;
     signal?.throwIfAborted();
     if (this.playbackHolds.has(stationSn)) await this.waitForPlaybackReconnect(stationSn, signal);
-    if (this.playbackUnresolved) throw new Error("playback_slot_uncertain");
+    if (this.playbackUnresolved || this.sessions.get(stationSn)?.playbackRecoveryBlocked)
+      throw new Error("playback_slot_uncertain");
     let entry = this.lives.get(stationSn);
     if (entry && entry.sn !== sn) throw new Error("rtc live: station play slot already in use by another camera");
     if (!entry) {

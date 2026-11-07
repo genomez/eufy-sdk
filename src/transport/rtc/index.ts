@@ -11,6 +11,7 @@ export * from "./framer.js";
 export * from "./ptcs-framer.js";
 export * from "./peer.js";
 export * from "./session.js";
+export type { IceEstablishmentDiagnostics, EstablishmentDeadline } from "./ice-diagnostics.js";
 export * from "./command-router.js";
 export * from "./live.js";
 export type {

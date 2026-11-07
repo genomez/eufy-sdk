@@ -19,6 +19,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import { IceEstablishmentRecorder } from "./ice-diagnostics.js";
 import { noopLogger, type Logger } from "../../core/logger.js";
 import {
   copyFramingDiagnostics,
@@ -79,6 +80,7 @@ export interface NativePeerConnection {
   onLocalDescription(cb: (sdp: string, type: string) => void): void;
   onLocalCandidate(cb: (candidate: string, mid: string) => void): void;
   onStateChange(cb: (state: string) => void): void;
+  onIceStateChange?(cb: (state: string) => void): void;
   onGatheringStateChange(cb: (state: string) => void): void;
   onDataChannel(cb: (dc: NativeDataChannel) => void): void;
 }
@@ -207,6 +209,16 @@ async function loadNativePeerFactory(): Promise<NativePeerFactory> {
 }
 
 export class RtcPeer extends EventEmitter<RtcPeerEvents> {
+  private establishment: IceEstablishmentRecorder;
+
+  /** Share only sanitized evidence with the owning session. */
+  attachEstablishmentEvidence(recorder: IceEstablishmentRecorder): void {
+    this.establishment = recorder;
+  }
+
+  getIceDiagnostics() {
+    return this.establishment.snapshot();
+  }
   private ingressGuard?: RtcIngressGuard;
 
   /** Install native admission and post-decode classification before any session consumer. */
@@ -254,6 +266,7 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
   constructor(private readonly opts: RtcPeerOptions = {}) {
     super();
     this.icePolicy = opts.icePolicy ?? "host-only";
+    this.establishment = new IceEstablishmentRecorder(this.icePolicy);
     this.logger = opts.logger ?? noopLogger;
     this.createFramer = opts.createFramer ?? (() => new PtcsFramer());
     this.transportEvidence = new TransportEvidenceRecorder(opts.receiveTimingNow);
@@ -262,7 +275,9 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
   /** Create the native peer. `turn` is what the hub granted in `scall 100`; unused under `host-only`. */
   async init(turn?: TurnConfig): Promise<void> {
     if (this.pc) return;
+    if (this.icePolicy !== "host-only" && !turn) throw new Error("RTC TURN grant required before peer initialization");
     const createPeer = this.opts.createPeer ?? (await loadNativePeerFactory());
+    if (this.pc) return;
     const config: NativePeerConfig = {
       iceServers: this.icePolicy === "host-only" || !turn ? [] : turnServers(turn),
       iceTransportPolicy: this.icePolicy === "relay" ? "relay" : "all",
@@ -272,6 +287,7 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
     if (this.opts.bindAddress) config.bindAddress = this.opts.bindAddress;
     const pc = createPeer("eufy-sdk", config);
     this.pc = pc;
+    this.establishment.initialized(config.iceServers.length > 0);
     this.transportClosed = false;
     this.transportEvidence.init();
     pc.onLocalDescription((sdp, type) => {
@@ -282,7 +298,9 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
       }
     });
     pc.onLocalCandidate((candidate) => {
+      if (this.pc !== pc) return;
       if (!candidate) return;
+      this.establishment.candidate("local", candidate);
       if (!this.acceptsCandidate(candidate)) return;
       this.emit("iceCandidate", candidate);
     });
@@ -293,8 +311,16 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
       }
     });
     pc.onStateChange((state) => {
+      if (this.pc !== pc) return;
+      this.establishment.transition("connection", state);
+      this.establishment.selected(this.getSelectedIceCandidateTypes());
       this.logger.debug(`[rtc] peer state ${state}`);
       this.emit("connectionState", state);
+    });
+    pc.onIceStateChange?.((state) => {
+      if (this.pc !== pc) return;
+      this.establishment.transition("ice", state);
+      this.establishment.selected(this.getSelectedIceCandidateTypes());
     });
     pc.onDataChannel((dc) => this.wireChannel(dc.getLabel(), dc));
   }
@@ -305,6 +331,9 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
     if (!pc) throw new Error("RTC peer not initialised");
     if (this.handlingOffer) throw new Error("RTC peer already handling an offer");
     this.handlingOffer = true;
+    for (const line of offerSdp.split(/\r?\n/)) {
+      if (line.startsWith("a=candidate:")) this.establishment.candidate("remote", line);
+    }
     try {
       let offer = this.icePolicy === "host-only" ? keepHostCandidates(offerSdp) : offerSdp;
       // Choosing our DTLS role means editing the role in the HUB's offer, not in our answer. The hub
@@ -316,6 +345,7 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
       if (dtlsRole) offer = forceDtlsRole(offer, dtlsRole === "passive" ? "active" : "passive");
       const answerWait = new Promise<string>((resolve, reject) => {
         const timer = setTimeout(() => {
+          this.establishment.deadline("local_answer");
           this.localAnswer = undefined;
           reject(new Error("timed out waiting for the local SDP answer"));
         }, this.opts.answerTimeoutMs ?? 15_000);
@@ -355,9 +385,10 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
   }
 
   addRemoteCandidate(candidate: string): void {
-    if (!this.pc) return;
+    this.establishment.candidate("remote", candidate);
     if (!this.acceptsCandidate(candidate)) return;
-    if (!this.remoteSet || this.handlingOffer) {
+    if (!this.pc || !this.remoteSet || this.handlingOffer) {
+      if (this.pending.length >= 256) throw new Error("RTC remote candidate queue limit exceeded");
       this.pending.push(candidate);
       return;
     }
@@ -407,6 +438,7 @@ export class RtcPeer extends EventEmitter<RtcPeerEvents> {
   }
 
   close(): void {
+    this.establishment.selected(this.getSelectedIceCandidateTypes());
     this.transportClosed = true;
     const framer = this.framer;
     framer?.destroy();

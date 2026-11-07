@@ -1,4 +1,5 @@
 import type { RtcSessionCloseOrigin } from "./session.js";
+import type { IceEstablishmentDiagnostics, IceEstablishmentRecorder } from "./ice-diagnostics.js";
 
 /** Finite execution phases; no protocol payload or exception is retained. */
 export type RtcConnectionStage =
@@ -20,6 +21,7 @@ export interface RtcConnectionStageEvent {
   atMs: number | null;
 }
 export interface RtcConnectionStageEvidence {
+  establishment?: IceEstablishmentDiagnostics;
   events: RtcConnectionStageEvent[];
   evicted: number;
   lastFailure: RtcConnectionStageEvent | null;
@@ -94,6 +96,7 @@ export function connectionDiagnosticTime(): number | null {
 
 /** Fixed-storage stage evidence shared privately by a session and its router row. */
 export class ConnectionStageRecorder {
+  establishment?: IceEstablishmentRecorder;
   private readonly evidence: RtcConnectionStageEvidence = { events: [], evicted: 0, lastFailure: null };
 
   record(stage: RtcConnectionStage, status: RtcConnectionStageEvent["status"]): void {
@@ -111,6 +114,7 @@ export class ConnectionStageRecorder {
 
   snapshot(): RtcConnectionStageEvidence {
     return {
+      ...(this.establishment ? { establishment: this.establishment.snapshot() } : {}),
       events: this.evidence.events.map((event) => ({ ...event })),
       evicted: this.evidence.evicted,
       lastFailure: this.evidence.lastFailure ? { ...this.evidence.lastFailure } : null,
