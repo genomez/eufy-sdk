@@ -131,10 +131,16 @@ export class PlaybackNativeFrameTiming {
     const duration = Math.round((value.timestampDeltaMs * value.frames) / (value.frames - 1));
     return duration > 0 && Math.abs(duration - expectedMs) <= Math.max(250, expectedMs * 0.1) ? duration : undefined;
   }
-  /** A continuous native clock clearly shorter than the catalog duration exposes missing media hidden by delivery pauses. */
+  /**
+   * A continuous native clock clearly shorter than the catalog duration exposes missing media hidden by
+   * delivery pauses. Only judged when the mean step reads as milliseconds at a camera frame rate (4–50 fps);
+   * any other clock unit is not evidence of truncation.
+   */
   shortOf(expectedMs: number): boolean {
     const value = this.timing.snapshot().frameTiming;
     if (!this.continuous || value.frames < 3 || !Number.isSafeInteger(expectedMs) || expectedMs <= 0) return false;
+    const step = value.timestampDeltaMs / (value.frames - 1);
+    if (!(step >= 20 && step <= 250)) return false;
     const duration = Math.round((value.timestampDeltaMs * value.frames) / (value.frames - 1));
     return duration > 0 && duration < expectedMs - Math.max(1000, expectedMs * 0.15);
   }

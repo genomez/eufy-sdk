@@ -158,6 +158,7 @@ it.each([
   ["1x truncated media hidden by a delivery pause", 1, 301, 33500, 100, "truncated", false],
   ["1x complete native clock with a delivery pause", 1, 370, 40500, 100, "none", true],
   ["2x truncated media hidden by delivery pauses", 2, 301, 16750, 100, "truncated", false],
+  ["1x complete clip on a 100 Hz native clock", 1, 555, 40500, 37000 / 555 / 10, "none", true],
 ] as const)("native clock shortfall: %s", async (_name, speed, frames, span, interval, failure, complete) => {
   const s = fixture({ transferSpeed: speed, expectedMs: 37000, captureMs: 60000, deadlineMs: 91000 });
   const status = (state: number, code: number) =>
