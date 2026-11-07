@@ -1110,3 +1110,8 @@ Offline synthetic validation only; installation acceptance remains false.
 - Correlated EOF accepts bursty retained video gaps up to 3000 ms; existing random-access, span and density floors remain. Non-EOF completeness and all refusal, latch and reconnect checks remain unchanged.
 - Receipts include retained video span, maximum gap, frame count and the first failed completeness check. Framed media has no validated media timestamp.
 - Duration-bound capture allows three times the requested duration plus 15 seconds, with the existing cleanup reserve and timer ceiling. Synthetic night bursts and truncated EOF regressions run locally only.
+
+### Playback 3p7r discarded-tail completeness, 2026-11-06
+
+- Count post-cutoff video frames in a receipt bounded at 65535. Correlated EOF fails as truncated when discarded frames exceed the larger of 15 frames or 10 percent of retained video frames, after existing completeness checks.
+- Small tail overruns remain admissible. Non-EOF completeness, the expected-duration plus 750 ms trigger, latch, reconnect and refusal behavior are unchanged. Synthetic regressions cover slow-prefix truncation, night bursts and threshold boundaries; no runtime acceptance is claimed.

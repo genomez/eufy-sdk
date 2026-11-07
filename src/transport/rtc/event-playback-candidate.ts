@@ -61,7 +61,8 @@ export const PLAYBACK_ADMISSION_GATES = [
   "inventory_conflict",
 ] as const;
 export type PlaybackAdmissionGate = (typeof PLAYBACK_ADMISSION_GATES)[number];
-export type PlaybackCompletenessFailure = "none" | "random_access" | "frames" | "span" | "gap" | "density";
+export type PlaybackCompletenessFailure =
+  "none" | "random_access" | "frames" | "span" | "gap" | "density" | "truncated";
 export interface PlaybackReceipt extends PlaybackIngressEvidence {
   reconnectOutcome?: "not_needed" | "connected" | "failed" | "timed_out";
   reconnectDurationMs?: number;
@@ -104,6 +105,7 @@ export interface PlaybackReceipt extends PlaybackIngressEvidence {
   retainedVideoSpanMs: number;
   maxVideoGapMs: number;
   retainedVideoFrames: number;
+  droppedAfterCutoff: number;
   completenessFailure: PlaybackCompletenessFailure;
   videoFrames: number;
   audioFrames: number;
@@ -306,6 +308,7 @@ export class EventPlaybackCandidate {
       retainedVideoSpanMs: 0,
       maxVideoGapMs: 0,
       retainedVideoFrames: 0,
+      droppedAfterCutoff: 0,
       completenessFailure: "none",
       videoFrames: 0,
       audioFrames: 0,
@@ -594,6 +597,7 @@ export class EventPlaybackCandidate {
       return "span";
     if (this.maxVideoGapMs > (eof ? 3000 : 1000)) return "gap";
     if ((this.receipt.videoFrames - 1) * 1000 < span * 5) return "density";
+    if (eof && this.receipt.droppedAfterCutoff > Math.max(15, this.receipt.videoFrames * 0.1)) return "truncated";
     return "none";
   }
 
@@ -602,6 +606,7 @@ export class EventPlaybackCandidate {
    * no gap above 1000 ms, and at least five frame intervals per second.
    * Correlated EOF permits bursty arrival gaps up to 3000 ms, retaining the keyframe start,
    * two-frame minimum, 1000 ms/40% span floor and five-interval density floor.
+   * EOF rejects discarded tails above the larger of 15 frames or 10% of retained frames.
    * Completion-margin frames are excluded; probes without a duration retain their observation contract.
    */
   private retainedMediaComplete(): boolean {
@@ -636,6 +641,7 @@ export class EventPlaybackCandidate {
     this.firstVideoAt ??= now;
     const coverageMs = now - this.firstVideoAt;
     if (this.opts.expectedMs !== undefined && coverageMs > this.opts.expectedMs) {
+      this.receipt.droppedAfterCutoff = Math.min(65535, this.receipt.droppedAfterCutoff + 1);
       if (coverageMs >= this.opts.expectedMs + 750 && this.retainedMediaComplete() && this.receipt.randomAccess)
         this.end("complete");
       return;

@@ -890,6 +890,49 @@ it.each([
 });
 
 it.each([
+  ["slow prefix", 70, 2000, 230, "eof", false],
+  ["night small gaps", 120, 1200, 15, "eof", true],
+  ["night large gaps", 120, 2500, 15, "eof", true],
+  ["absolute tail limit", 120, 2000, 16, "eof", false],
+  ["relative tail limit", 200, 2000, 20, "eof", true],
+  ["relative tail exceeded", 200, 2000, 21, "eof", false],
+  ["non-EOF tail", 120, 0, 20, "capped", true],
+] as const)("post-cutoff video: %s", async (_, frames, gap, dropped, outcome, accepted) => {
+  const s = candidateSetup({ streaming: true, streamingFrames: 0 });
+  Reflect.get(s.candidate, "opts").expectedMs = 12000;
+  const capture = s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+  const arrivals = Array.from(
+    { length: frames },
+    (_, i) =>
+      Math.round((i * (11900 - gap * 2)) / (frames - 1)) +
+      (i >= Math.floor(frames / 3) ? gap : 0) +
+      (i >= Math.floor((frames * 2) / 3) ? gap : 0),
+  );
+  arrivals.push(...Array.from({ length: dropped }, (_, i) => 12001 + i * (dropped > 100 ? 100 : 20)));
+  let previous = 0;
+  for (const at of arrivals) {
+    await vi.advanceTimersByTimeAsync(at - previous);
+    for (const packet of wrapped(video())) s.candidate.ingress.native(packet);
+    previous = at;
+  }
+  if (outcome === "eof") {
+    const segment = parsePortalHeader(s.sent[0]!)!.segment;
+    s.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 2, code: 14, segmen: segment } }), 3);
+  } else s.candidate.end(outcome);
+  await capture;
+  const observing = s.candidate.observe();
+  await vi.advanceTimersByTimeAsync(5010);
+  expect(await observing).toMatchObject({
+    captureOutcome: outcome,
+    retainedVideoFrames: frames,
+    retainedVideoSpanMs: 11900,
+    droppedAfterCutoff: dropped,
+    boundedMediaObserved: accepted,
+    completenessFailure: accepted ? "none" : "truncated",
+  });
+});
+
+it.each([
   ["short low-fps", [0, 750, 1500, 2250, 3000], 7000, true, false],
   ["dense EOF", Array.from({ length: 51 }, (_, i) => i * 86), 7000, true, true],
   ["density boundary", Array.from({ length: 16 }, (_, i) => i * 200), 7000, true, true],
