@@ -112,6 +112,12 @@ export class PlaybackFrameTiming {
 export class PlaybackNativeFrameTiming {
   private readonly timing = new PlaybackFrameTiming();
   private lastTimestamp?: number;
+  private lastSequence?: number;
+  private readonly prefixDeltas: number[] = [];
+  private monotonic = true;
+  private contiguous = true;
+  private positionMs = 0;
+  private spanMs = 0;
   private continuous = true;
   add(body: Buffer, arrivalMs: number): void {
     const header = parseVideoFrameHeader(body);
@@ -119,10 +125,45 @@ export class PlaybackNativeFrameTiming {
       if (this.lastTimestamp !== undefined) {
         const gap = (header.timestamp - this.lastTimestamp) >>> 0;
         if (gap === 0 || gap > 1000) this.continuous = false;
+        const delta = (header.timestamp - this.lastTimestamp) | 0;
+        if (this.prefixDeltas.length < 3) this.prefixDeltas.push(delta);
+        if (delta < -10) this.monotonic = false;
+        if (((header.sequence - this.lastSequence!) & 0xffff) !== 1) this.contiguous = false;
+        this.positionMs += delta;
+        this.spanMs = Math.max(this.spanMs + 1, this.positionMs);
       }
       this.lastTimestamp = header.timestamp;
+      this.lastSequence = header.sequence;
       this.timing.add(arrivalMs, { frameId: header.timestamp, sequence: header.sequence });
-    }
+    } else this.monotonic = false;
+  }
+  /**
+   * Millisecond qualification matches timestamped media: four headers, two advancing steps,
+   * one step of at least 10 ms, no regression over 10 ms, and a catalog-bounded span.
+   * The final presentation interval is one 15 fps output period, independent of recording cadence.
+   */
+  private qualifiedDurationMs(expectedMs: number): number | undefined {
+    if (
+      !this.monotonic ||
+      this.prefixDeltas.length < 3 ||
+      this.prefixDeltas.filter((delta) => delta > 0).length < 2 ||
+      !this.prefixDeltas.some((delta) => delta >= 10) ||
+      !Number.isSafeInteger(expectedMs) ||
+      expectedMs <= 0 ||
+      this.spanMs > expectedMs + 1000
+    )
+      return undefined;
+    return this.spanMs + 1000 / 15;
+  }
+  /**
+   * EOF coverage requires catalog agreement and every u16 header sequence step to equal one.
+   * Constant sequences and repeated access-unit chunks cannot establish this proof; rollover can.
+   */
+  completeDurationMs(expectedMs: number): number | undefined {
+    const duration = this.qualifiedDurationMs(expectedMs);
+    return this.contiguous && duration !== undefined && duration >= expectedMs - 1000
+      ? Math.round(duration)
+      : undefined;
   }
   /** Experimental millisecond interpretation requires advancing bounded words and catalog agreement. */
   durationMs(expectedMs: number): number | undefined {
@@ -133,10 +174,12 @@ export class PlaybackNativeFrameTiming {
   }
   /**
    * A continuous native clock clearly shorter than the catalog duration exposes missing media hidden by
-   * delivery pauses. Only judged when the mean step reads as milliseconds at a camera frame rate (4–50 fps);
-   * any other clock unit is not evidence of truncation.
+   * delivery pauses. Qualified variable cadence uses the one-second catalog window; legacy continuous
+   * clocks retain the mean-step (4–50 fps) and arrival-coverage tolerance checks.
    */
   shortOf(expectedMs: number): boolean {
+    const nativeDuration = this.qualifiedDurationMs(expectedMs);
+    if (nativeDuration !== undefined && nativeDuration < expectedMs - 1000) return true;
     const value = this.timing.snapshot().frameTiming;
     if (!this.continuous || value.frames < 3 || !Number.isSafeInteger(expectedMs) || expectedMs <= 0) return false;
     const step = value.timestampDeltaMs / (value.frames - 1);

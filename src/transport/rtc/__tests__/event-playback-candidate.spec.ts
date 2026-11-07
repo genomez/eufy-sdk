@@ -976,6 +976,88 @@ it.each([
   expect(Reflect.apply(Reflect.get(s.candidate, "retainedMediaFailure"), s.candidate, [])).toBe(failure);
 });
 
+it.each([
+  [60000, 231, 59815, 12908, 14312],
+  [22000, 106, 21900, 3000, 4297],
+  [12000, 180, 11933, 67, 5967],
+] as const)(
+  "complete variable cadence EOF uses native headers: %s ms",
+  async (expectedMs, frames, span, gap, arrivalSpan) => {
+    const s = candidateSetup({ streaming: true, streamingFrames: 0, release: false });
+    Object.assign(Reflect.get(s.candidate, "opts"), { expectedMs, transferSpeed: 2 });
+    const capture = s.candidate.capture({ record: 1, begin: 1 }, [6, 7]);
+    let previous = 0;
+    for (let i = 0; i < frames; i++) {
+      const at = Math.round((i * arrivalSpan) / (frames - 1));
+      const timestamp =
+        expectedMs === 12000
+          ? Math.round((i * 1000) / 15)
+          : i < 4
+            ? [0, 400, 1000, 2500][i]!
+            : 2500 +
+              Math.round(((i - 3 - (i >= 80 ? 1 : 0)) * (span - gap - 2500)) / (frames - 5)) +
+              (i >= 80 ? gap : 0);
+      await vi.advanceTimersByTimeAsync(at - previous);
+      for (const packet of wrapped(video(7, timestamp, 65500 + i))) s.candidate.ingress.native(packet);
+      previous = at;
+    }
+    s.candidate.ingress.decoded(json({ cmd: 6001, payload: { state: 2, code: 14 } }), 3);
+    await capture;
+    expect(await s.candidate.observe(true)).toMatchObject({
+      captureOutcome: "eof",
+      completenessFailure: "none",
+      boundedMediaObserved: true,
+      durationBasis: "native_header",
+      mediaDurationMs: Math.round(span + 1000 / 15),
+      retainedVideoFrames: frames,
+      retainedVideoSpanMs: arrivalSpan,
+      nativeFrameTiming: { timestampDeltaTicks: span, sequenceDelta: frames - 1 },
+    });
+  },
+);
+
+it.each(["short", "overlong", "skipped", "repeated", "constant", "regression", "non-ms", "no-random-access", "no-eof"])(
+  "native EOF proof fails closed: %s",
+  (mode) => {
+    const s = candidateSetup({});
+    Reflect.get(s.candidate, "opts").expectedMs = 60000;
+    Object.assign(s.candidate, { eofSeen: mode !== "no-eof", firstVideoAt: 0, lastVideoAt: 14312 });
+    Object.assign(s.candidate.receipt, {
+      captureOutcome: "eof",
+      randomAccess: mode !== "no-random-access",
+      videoFrames: 231,
+    });
+    const timing = Reflect.get(s.candidate, "nativeFrameTiming");
+    for (let i = 0; i < 231; i++) {
+      let timestamp = Math.round((i * (mode === "short" ? 40000 : mode === "overlong" ? 62000 : 59815)) / 230);
+      if (mode === "regression" && i === 100) timestamp -= 1000;
+      if (mode === "non-ms") timestamp = i;
+      const sequence =
+        mode === "constant"
+          ? 0
+          : i + (mode === "skipped" && i >= 100 ? 1 : 0) - (mode === "repeated" && i === 100 ? 1 : 0);
+      timing.add(video(7, timestamp, sequence).subarray(16), i);
+    }
+    expect(Reflect.apply(Reflect.get(s.candidate, "retainedMediaFailure"), s.candidate, [])).toBe(
+      mode === "no-random-access" ? "random_access" : "span",
+    );
+    expect(timing.completeDurationMs(60000)).toBe(mode === "no-random-access" || mode === "no-eof" ? 59882 : undefined);
+  },
+);
+
+it("short variable cadence native span rejects EOF even when delivery coverage and density pass", () => {
+  const s = candidateSetup({});
+  Reflect.get(s.candidate, "opts").expectedMs = 22000;
+  Object.assign(s.candidate, { eofSeen: true, firstVideoAt: 0, lastVideoAt: 22000 });
+  Object.assign(s.candidate.receipt, { captureOutcome: "eof", randomAccess: true, videoFrames: 120 });
+  const timing = Reflect.get(s.candidate, "nativeFrameTiming");
+  for (let i = 0; i < 120; i++) {
+    const timestamp = Math.round((i * 10000) / 119) + (i >= 60 ? 3000 : 0);
+    timing.add(video(7, timestamp, i).subarray(16), i);
+  }
+  expect(Reflect.apply(Reflect.get(s.candidate, "retainedMediaFailure"), s.candidate, [])).toBe("truncated");
+});
+
 it("non-EOF keeps the strict pause limit at full coverage", () => {
   const s = candidateSetup({});
   const c = s.candidate as unknown as Record<string, unknown>;

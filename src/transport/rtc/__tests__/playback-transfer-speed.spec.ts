@@ -103,7 +103,8 @@ it.each([
 it.each([
   ["premature 2x EOF", 2, 2, 1, 0, false, "arrival", 4],
   ["sparse 2x EOF at full span", 2, 2, 18500, 0, false, "arrival", 74000],
-  ["partial 2x EOF with consistent native clock", 2, 100, 1000, 370, false, "arrival", 2020],
+  ["partial 2x EOF with short native clock", 2, 100, 1000, 250, false, "arrival", 2020],
+  ["full native coverage despite short 2x arrival", 2, 100, 1000, 370, true, "native_header", 37000],
   ["full 2x native clock", 2, 552, 18356.685, 36780 / 552, true, "native_header", 36780],
   ["full 1x with delivery pauses", 1, 555, 48250, 0, true, "catalog", 37000],
   ["full 1x native clock with delivery pauses", 1, 555, 48250, 36780 / 555, true, "native_header", 36780],

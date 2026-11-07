@@ -111,3 +111,30 @@ it.each(["constant", "backwards", "large-gap", "catalog-mismatch"])(
     expect(timing.durationMs(10000)).toBeUndefined();
   },
 );
+
+it.each([
+  [4933, false],
+  [4934, true],
+  [7000, true],
+  [7001, false],
+] as const)("native coverage honors the catalog window at span %s ms", (span, accepted) => {
+  const timing = new PlaybackNativeFrameTiming();
+  for (const [i, timestamp] of [0, 400, 1000, span].entries()) {
+    const body = Buffer.alloc(22);
+    body.writeUInt32LE(timestamp, 14);
+    body.writeUInt16LE(i, 6);
+    timing.add(body, i);
+  }
+  expect(timing.completeDurationMs(6000)).toBe(accepted ? Math.round(span + 1000 / 15) : undefined);
+});
+
+it.each([10, 11])("native coverage unwraps timestamps and tolerates at most %s ms regression", (regression) => {
+  const timing = new PlaybackNativeFrameTiming();
+  for (const [i, timestamp] of [0, 400, 1000, 1000 - regression, 59815].entries()) {
+    const body = Buffer.alloc(22);
+    body.writeUInt32LE((0xfffff000 + timestamp) >>> 0, 14);
+    body.writeUInt16LE((65534 + i) & 0xffff, 6);
+    timing.add(body, i);
+  }
+  expect(timing.completeDurationMs(60000)).toBe(regression === 10 ? 59882 : undefined);
+});

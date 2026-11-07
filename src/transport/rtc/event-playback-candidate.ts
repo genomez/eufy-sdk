@@ -701,7 +701,11 @@ export class EventPlaybackCandidate {
         this.opts.expectedMs &&
         this.receipt.videoFrames >= 2
       ) {
-        const nativeDuration = this.nativeFrameTiming.durationMs(this.opts.expectedMs);
+        const nativeDuration =
+          this.nativeFrameTiming.durationMs(this.opts.expectedMs) ??
+          (this.eofSeen && this.receipt.captureOutcome === "eof" && !this.receipt.experiment
+            ? this.nativeFrameTiming.completeDurationMs(this.opts.expectedMs)
+            : undefined);
         this.receipt.mediaDurationMs = nativeDuration ?? this.opts.expectedMs;
         this.receipt.durationBasis = this.receipt.experiment
           ? nativeDuration === undefined
@@ -766,7 +770,8 @@ export class EventPlaybackCandidate {
   /**
    * EOF coverage allows 15% missing arrival span (at least 1 s tolerance), but
    * requires five frame intervals per second of both catalog and scaled arrival
-   * time. Individual delivery gaps have no EOF limit. Experiments keep their
+   * time unless contiguous native headers prove coverage within the catalog window.
+   * Individual delivery gaps have no EOF limit. Experiments keep their
    * independent timing policy; non-EOF captures require strict span and gaps.
    */
   private retainedMediaFailure(): PlaybackCompletenessFailure {
@@ -778,6 +783,7 @@ export class EventPlaybackCandidate {
     if (this.receipt.videoFrames < 2) return "frames";
     if (eof) {
       if (this.receipt.experiment) return "none";
+      if (this.nativeFrameTiming.completeDurationMs(this.opts.expectedMs) !== undefined) return "none";
       if (span <= 0 || span < this.opts.expectedMs - Math.max(1000, this.opts.expectedMs * 0.15)) return "span";
       if ((this.receipt.videoFrames - 1) * 1000 < Math.max(span, this.opts.expectedMs) * 5) return "density";
       if (this.nativeFrameTiming.shortOf(this.opts.expectedMs)) return "truncated";
@@ -789,7 +795,7 @@ export class EventPlaybackCandidate {
     return "none";
   }
 
-  /** Completeness requires retained duration coverage and frame density, with random access at EOF. */
+  /** Completeness requires arrival coverage and density or contiguous native coverage, with random access at EOF. */
   private retainedMediaComplete(): boolean {
     return this.retainedMediaFailure() === "none";
   }
