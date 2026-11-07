@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "version": "0.2.1-s1.experimental.12",
   "status": "local-build-unpublished",
-  "exactInputCommit": "f4f0e0f7c0239020fbe202e16b9062295ae28e1e",
+  "exactInputCommit": "2d5dfd2934a5cfc9ae4eccb451176da90d884f62",
   "files": {
     ".editorconfig": {
       "bytes": 505,
@@ -57,8 +57,8 @@
       "sha256": "9ce5f1b22d16a29e9a195820889a320137d5912ae07f7f27125d590dad5ed032"
     },
     "README.md": {
-      "bytes": 17670,
-      "sha256": "fb225651bcc6b5a62c741a81ce47ca01fef6f687f570e57fc621b46055c76961"
+      "bytes": 18785,
+      "sha256": "aa6583e6e4294b4b8f5809e07462cb1f65a0ac0632ef010b3834567e63b4c378"
     },
     "docs/architecture.md": {
       "bytes": 7091,
@@ -2121,8 +2121,8 @@
       "sha256": "7949ba73517e30acd41e15f361bafa24d6bc3665ec0ba80ca981fc21597b7f74"
     },
     "src/transport/rtc/__tests__/recordings.spec.ts": {
-      "bytes": 19343,
-      "sha256": "b87f57e27778ce9cdac74d7311fafcd64b5c1ccfffd5d0759f6d1b5c434fbf49"
+      "bytes": 19358,
+      "sha256": "c54a34bc14672b8eecc723850c38cba9c8d0ebf187ab51b73a9191c7ae3a9de7"
     },
     "src/transport/rtc/__tests__/renewal-diagnostics.spec.ts": {
       "bytes": 1362,
@@ -2177,8 +2177,8 @@
       "sha256": "c52c4c0076830f3f671dd1fb2d383933bf254751b8cba6c5a8a0bee48fd71e73"
     },
     "src/transport/rtc/command-router.ts": {
-      "bytes": 156998,
-      "sha256": "1c148d81fc63f93c6b2123726cd387297cbfa9ec734993cd3b6cdfa4516c1f39"
+      "bytes": 157178,
+      "sha256": "54625a532c3d5c9b24d8929c31f3d05103f73173c0d0ac6fff996bf37995b38c"
     },
     "src/transport/rtc/command-transport-evidence.ts": {
       "bytes": 4845,
@@ -2205,8 +2205,8 @@
       "sha256": "4e8908d93c85fe6c39c2ca1500767241244fb1f20c7e4307b36f96d211895461"
     },
     "src/transport/rtc/event-table-candidate.ts": {
-      "bytes": 7898,
-      "sha256": "c55fefb87eca001b0f923189a75008af4324c5837bc28d974ef67113e0d8aed3"
+      "bytes": 8245,
+      "sha256": "0d2ec136367ca01a835ceb7d61f0a42f19182d55d2288b4f209ffa60720645a1"
     },
     "src/transport/rtc/event-thumb-candidate.ts": {
       "bytes": 14188,
@@ -2261,8 +2261,8 @@
       "sha256": "5615eac801b325e4d068ceeaac814930000d386a9abb2a25ea1e625cab917c8d"
     },
     "src/transport/rtc/recordings.ts": {
-      "bytes": 19073,
-      "sha256": "fbdb96db199f30cd1d1cf3630901858741c8ab6be102b807e7733744fdd3145f"
+      "bytes": 19505,
+      "sha256": "f889cb9674c024338b0f717e8bf548a33174bf50046e50265d95001c3d7f7e37"
     },
     "src/transport/rtc/renewal-diagnostics.ts": {
       "bytes": 5579,
@@ -2387,6 +2387,10 @@
     "src/transport/rtc/ice-diagnostics.ts": {
       "bytes": 4666,
       "sha256": "82feea3cefcc027bb04f5e98f0c5785965926c10cf5b9885f37bd8316370d957"
+    },
+    "src/transport/rtc/__tests__/recordings-query-count.spec.ts": {
+      "bytes": 2705,
+      "sha256": "2fba10ea73e9fc485ffa61a122f253fb2af324cec37e085593ee9d427903e8f6"
     }
   }
 }
