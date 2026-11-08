@@ -237,14 +237,14 @@ describe("recording admission without station side effects", () => {
     expect(await f.router.readRecordingCatalog(scope)).toEqual({ status: "deferred", reason: "reply_capacity" });
     expect(i.eventTableReplies.size + i.eventThumbReplies.size).toBe(16);
   });
-  it.each(["parent", "excluded", "station", "account", "key", "expanded"])(
+  it.each(["parent", "unenrolled", "station", "account", "key", "expanded"])(
     "refuses invalid %s scope with zero send",
     async (kind) => {
       const f = await fixture();
       f.router.setRecordingPacing({ coverGapMs: 0, coverQuietMs: 0, coverRatePerMinute: 0 });
       let input = scope;
       if (kind === "parent") f.devices.get(cameras[0]!)!.stationSn = "unbound";
-      if (kind === "excluded") f.devices.get(cameras[0]!)!.name = "J Safe";
+      if (kind === "unenrolled") input = { ...scope, cameraSns: new Set(cameras.slice(1)) };
       if (kind === "station") f.devices.get(cameras[0]!)!.stationSn = "other";
       if (kind === "account") f.changeAccount();
       if (kind === "key") input = { ...scope, identityKey: new Uint8Array(31) };
@@ -253,6 +253,14 @@ describe("recording admission without station side effects", () => {
       expect(f.session.sent).toHaveLength(0);
     },
   );
+  it.each(["Fixture camera", "Other camera", "", undefined])("admits an enrolled camera named %s", async (name) => {
+    const f = await fixture();
+    f.devices.get(cameras[0]!)!.name = name;
+    const read = f.router.readRecordingCatalog(scope);
+    await sent(f.session);
+    f.session.table([row()]);
+    expect((await read).status).toBe("ok");
+  });
   it.each([0, -1, 8001, 0.5, NaN, Infinity])("bounds the whole operation timeout %s", async (timeoutMs) => {
     const f = await fixture();
     expect(await f.router.readRecordingCatalog(scope, { timeoutMs })).toEqual({

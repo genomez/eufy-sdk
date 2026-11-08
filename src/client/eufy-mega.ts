@@ -1203,7 +1203,6 @@ export class EufyMega extends EventEmitter {
           category: device.category,
           params: device.params ?? {},
         }).codec !== "camera" ||
-        device.name?.trim().toLowerCase() === "j safe" ||
         typeof channel !== "number" ||
         this.registry.serialForFrame(scope.stationSn, channel) !== sn
       )

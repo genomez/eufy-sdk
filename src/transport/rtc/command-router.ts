@@ -1301,8 +1301,7 @@ export class RtcCommandRouter {
     if (!station || !RtcCommandRouter.claimsDevice(station)) return "scope_invalid";
     for (const sn of allowed) {
       const camera = this.deps.findDevice(sn);
-      if (!camera || camera.stationSn !== station.sn || camera.name?.trim().toLowerCase() === "j safe")
-        return "scope_invalid";
+      if (!camera || camera.stationSn !== station.sn) return "scope_invalid";
     }
     if (this.deps.recordingsAllowed?.(scope) === false) return "busy";
     const st = this.sessions.get(scope.stationSn);
