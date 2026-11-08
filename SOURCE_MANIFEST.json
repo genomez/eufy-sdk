@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "version": "0.2.1-s1.experimental.12",
   "status": "local-build-unpublished",
-  "exactInputCommit": "5e83c95ed8bc2fc3b84f04e1c7df053a82883818",
+  "exactInputCommit": "07f7e15a5b17da7a3a6c03aa8af1d20214691742",
   "files": {
     ".editorconfig": {
       "bytes": 505,
@@ -525,8 +525,8 @@
       "sha256": "5f15db7ef632ca01a1481a8c2fd0178674828633c39e0c0a5b6d3ea4f059ba31"
     },
     "src/client/eufy-mega.ts": {
-      "bytes": 205887,
-      "sha256": "9b6eb9ee192b22b4e838760a13e4951f8e1ea076b11fd2c22c5d386436d71236"
+      "bytes": 205829,
+      "sha256": "cb0ddcb4a49b37cb4326f5f7145213cfd2f873dd9c985f8d73611804d5370ed2"
     },
     "src/client/event-routing-diagnostics.ts": {
       "bytes": 4448,
@@ -2113,8 +2113,8 @@
       "sha256": "c34ea4097f61d0b3f200ec06dafc60a2d218b1ab2ebad93483fae147d0e3c355"
     },
     "src/transport/rtc/__tests__/recordings-arbitration.spec.ts": {
-      "bytes": 18246,
-      "sha256": "120a75df1a4785efa21b5b59f368cd136cb61eed86119669f2d4a38fc5f05f23"
+      "bytes": 18620,
+      "sha256": "425a5d753d7cb15269633a78f6218c9c2f4f61f934a3692ca24ad99e7f6a9daa"
     },
     "src/transport/rtc/__tests__/recordings-fixture.ts": {
       "bytes": 5203,
@@ -2177,8 +2177,8 @@
       "sha256": "c52c4c0076830f3f671dd1fb2d383933bf254751b8cba6c5a8a0bee48fd71e73"
     },
     "src/transport/rtc/command-router.ts": {
-      "bytes": 157202,
-      "sha256": "6bdf9c20436ecbd10dc1681b97ebcfc3363c6717f43d8dabb7fc90d408e91746"
+      "bytes": 157144,
+      "sha256": "e9410cd437c4f23bbb0daaa88cb7e589a34b5f5e1d7aeb760667fd5b3011a08d"
     },
     "src/transport/rtc/command-transport-evidence.ts": {
       "bytes": 4845,
