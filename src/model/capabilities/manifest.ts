@@ -22,7 +22,7 @@
  */
 import type { Capability, Codec, PropertyValueType, ResolvedDevice, ValueKind } from "../types.js";
 import { actionNamespaceOf, actionSpecOf, camelCase } from "./access.js";
-import { resolvedEnum, type ValueMember } from "./members.js";
+import { numericRange, resolvedEnum, type ValueMember } from "./members.js";
 import type { ActionSpec, AvailabilityContext, CapabilityModule, EventClaim } from "./types.js";
 
 /** One read installed on a bound capability object — a value the device reports, and what it means. */
@@ -51,6 +51,9 @@ export interface ReadDescriptor {
    * CapabilityDescriptor.actions} instead, which is where its signature is described.
    */
   writable: boolean;
+  min?: number;
+  max?: number;
+  step?: number;
   description?: string;
 }
 
@@ -184,6 +187,7 @@ function readDescriptor(
     type: m.type,
     kind: m.decodedKind ?? (dynamic ? "enum" : m.kind),
     unit: m.unit,
+    ...numericRange(m, ctx),
     values: m.decodedValues ?? (enumValues && Object.keys(enumValues).map(Number)),
     labels: enumValues && Object.fromEntries(Object.entries(enumValues)),
     writable: typeof descriptors[setter]?.value === "function",

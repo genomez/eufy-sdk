@@ -207,6 +207,10 @@ export interface PropertySpec {
   writable: boolean;
   /** A verified absolute state with bounded execution and replaceable unsent intent. */
   boundedStateWrites?: true;
+  /** Numeric write domain, resolved for this device when known. */
+  min?: number;
+  max?: number;
+  step?: number;
   /** Allowed values for `type: "enum"` (raw → label). */
   enumValues?: Record<number, string>;
   /**

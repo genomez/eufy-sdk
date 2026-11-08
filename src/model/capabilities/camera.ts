@@ -618,6 +618,9 @@ export const CAMERA_MEMBERS = {
     type: "number",
     kind: "scalar",
     provenance: "verified",
+    min: 1,
+    max: 5,
+    step: 1,
     description:
       "Sound-detection sensitivity: 1 = lowest, 3 = mid, 5 = highest (SOUND_DETECTION_SENSITIVITY " +
       "6044). ✅ Write confirmed live on a T8410: 1 and 5 sent consecutively through this member and " +

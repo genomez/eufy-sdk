@@ -276,6 +276,9 @@ export const DOORBELL_MEMBERS = {
     kind: "percent",
     provenance: "mega",
     writtenElsewhere: true,
+    min: 0,
+    max: 100,
+    step: 1,
     description:
       "Ringtone volume (1708; confirmed on T8214, observed value 80). The WRITE is `audio`'s " +
       "setRingtoneVolume — that capability owns every volume wire.",

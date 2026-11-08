@@ -182,6 +182,10 @@ export interface ValueMember {
   /** Numeric bounds the value must fall within — the same constants `write` clamps with. */
   min?: number;
   max?: number;
+  /** Numeric increment, measured from the minimum or zero. */
+  step?: number;
+  /** Per-device numeric domain; absent metadata preserves the static domain. */
+  numericRangeFor?: (ctx: AvailabilityContext) => Pick<PropertySpec, "min" | "max" | "step"> | undefined;
   /**
    * Install the getter on capability alone, not on having seen the param — for state that only ever
    * arrives over realtime, where "has reported already" is the wrong evidence.
@@ -637,6 +641,7 @@ export function propertiesOf(members: Members, ctx?: AvailabilityContext): Prope
         kind: dynamic ? "enum" : m.kind,
         unit: m.unit,
         enumValues,
+        ...numericRange(m, ctx),
         provenance: m.provenance,
         invert: promoted?.invert ?? m.invert,
         decode: m.coerce,
@@ -651,6 +656,19 @@ export function propertiesOf(members: Members, ctx?: AvailabilityContext): Prope
       },
     ];
   });
+}
+
+/** Resolve a member's numeric domain without widening its static write bounds. @internal */
+export function numericRange(m: ValueMember, ctx?: AvailabilityContext): Pick<PropertySpec, "min" | "max" | "step"> {
+  const resolved = ctx && m.numericRangeFor?.(ctx);
+  const min = resolved?.min === undefined ? m.min : Math.max(m.min ?? -Infinity, resolved.min);
+  const max = resolved?.max === undefined ? m.max : Math.min(m.max ?? Infinity, resolved.max);
+  const step = resolved?.step ?? m.step;
+  return {
+    ...(min === undefined ? {} : { min }),
+    ...(max === undefined ? {} : { max }),
+    ...(step === undefined ? {} : { step }),
+  };
 }
 
 /** What `asBool` gives meaning to — every other value would silently read as `false`. */
@@ -671,6 +689,7 @@ export function memberWrite(
   value: boolean | number | string,
   ctx: CommandContext,
 ): Command {
+  m = { ...m, ...numericRange(m, ctx) };
   if (!inDomain(m, value)) throw new Error(rejection(name, m, value));
   const cmd = m.write?.(value, ctx);
   if (!cmd) throw new Error(rejection(name, m, value));
@@ -729,8 +748,13 @@ function writeDomain(m: ValueMember): readonly (string | number)[] | undefined {
 function inDomain(m: ValueMember, value: unknown): boolean {
   if (m.type === "bool") return BOOL_VALUES.has(typeof value === "string" ? value.toLowerCase() : value);
   if (typeof value === "number") {
+    if (!Number.isFinite(value)) return false;
     if (m.min !== undefined && value < m.min) return false;
     if (m.max !== undefined && value > m.max) return false;
+    if (m.step !== undefined) {
+      const steps = (value - (m.min ?? 0)) / m.step;
+      if (Math.abs(steps - Math.round(steps)) > 1e-8) return false;
+    }
   }
   const domain = writeDomain(m)?.filter((v) => typeof v === typeof value);
   return !domain?.length || domain.includes(value as string | number);
@@ -775,13 +799,12 @@ function rejection(name: string, m: ValueMember, value: unknown): string {
  * stands where it has one and the read's otherwise — the same precedence {@link writeDomain} enforces
  * with, which is what makes a stated `values` a NARROWING of the read rather than an unrelated second list.
  */
-function describeWrite(name: string, m: ValueMember, reported: boolean): ActionSpec {
+function describeWrite(name: string, m: ValueMember, reported: boolean, ctx: AvailabilityContext): ActionSpec {
   const stateful = !m.writeOnly && reported;
   const derived: ActionArgSpec = {
     name,
     kind: m.decodedKind ?? m.kind ?? "text",
-    ...(m.min === undefined ? {} : { min: m.min }),
-    ...(m.max === undefined ? {} : { max: m.max }),
+    ...numericRange(m, ctx),
     ...(m.decodedValues ? { values: m.decodedValues } : {}),
   };
   return {
@@ -950,7 +973,7 @@ export function bindMembers<M extends Members>(members: M, deps: MemberDeps): Su
     if (m.writeOnly) unobservable.push(name);
     else if (m.readReflectsWrite && !m.readReflectsWrite(ctx)) unreflected.push(name);
     const setter = m.writeAs ?? `set${name[0].toUpperCase()}${name.slice(1)}`;
-    out[setter] = describedAction(describeWrite(name, m, reported), (value: boolean | number | string) => {
+    out[setter] = describedAction(describeWrite(name, m, reported, ctx), (value: boolean | number | string) => {
       try {
         return sink.dispatch(memberWrite(name, m, value, ctx));
       } catch (e) {

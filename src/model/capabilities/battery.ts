@@ -238,6 +238,23 @@ function cellGated<T extends Members>(members: T): T {
 }
 
 /**
+ * Recording customization domains from eufy-security-client's DeviceProperties declarations at
+ * 4cbfbe35daadc88407b490367f76a4ccfe46c27c. T8170 uses OutdoorPT clip length, T8214 the
+ * battery-doorbell retrigger interval, and T8171/T8134 the Solo defaults. These are model metadata,
+ * not firmware acceptance evidence. Other models, including T8425/T8426, have no domain here.
+ */
+function recordingRange(
+  ctx: AvailabilityContext,
+  interval: boolean,
+): { min: number; max: number; step: number } | undefined {
+  const model = ctx.model?.toUpperCase();
+  if (!model || !["T8170", "T8171", "T8134", "T8214"].includes(model)) return undefined;
+  return interval
+    ? { min: model === "T8214" ? 2 : 5, max: 60, step: 1 }
+    : { min: model === "T8170" ? 10 : 5, max: 120, step: 1 };
+}
+
+/**
  * Every `battery` feature, declared once — the property schema, the evidence-gated getters, the derived
  * setters, the intent routes and the descriptions all come out of this table. Order is schema order.
  *
@@ -373,6 +390,7 @@ export const BATTERY_MEMBERS = cellGated({
     provenance: "verified",
     requires: [BATTERY_PARAM.RECORD_DURATION],
     min: 0,
+    numericRangeFor: (ctx: AvailabilityContext) => recordingRange(ctx, false),
     description:
       "How long each motion-triggered recording runs, in seconds (1249 SET_RECORD_DURATION). Applies in the " +
       "device's Customize-Recording working mode. Write verified live on T8170, which reports it back (read live: 60).",
@@ -392,6 +410,7 @@ export const BATTERY_MEMBERS = cellGated({
     provenance: "verified",
     requires: [BATTERY_PARAM.RECORD_INTERVAL],
     min: 0,
+    numericRangeFor: (ctx: AvailabilityContext) => recordingRange(ctx, true),
     description:
       "Minimum seconds the device waits after one recording before it will start another (1250 " +
       "SET_RECORD_INTERVAL) — the motion re-arm gap. Applies in the Customize-Recording working mode. " +

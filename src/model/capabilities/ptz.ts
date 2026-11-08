@@ -366,6 +366,9 @@ export const PTZ_MEMBERS = {
     type: "number",
     kind: "scalar",
     provenance: "verified",
+    min: 1,
+    max: 5,
+    step: 1,
     description:
       "Pan/tilt rotate speed: 1 = slow, 3 = mid, 5 = fast (PTZ_ROTATE_SPEED 6015). ✅ Write confirmed " +
       "live on a T8410 (mains, standalone): the app's Slow/Mid/Fast control identified 1/3/5, then 1 " +
