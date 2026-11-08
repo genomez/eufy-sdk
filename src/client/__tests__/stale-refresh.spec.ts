@@ -403,6 +403,37 @@ describe("model construction revision ownership", () => {
     const property = guard ? "armingMode" : "light";
     const confirmed = guard ? 0 : true;
     for (const stage of ["record", "context"] as const) {
+      it(`preserves converged ${property} without a live model across a held ${stage}`, async () => {
+        const f = await fixture(false, guard);
+        const param = guard ? 1224 : 1400;
+        const raw = guard ? "0" : "1";
+        f.client.liveDevices.delete(CAMERA);
+        const held = stage === "record" ? holdResult(f.client.registry, "record") : holdContext(f.client);
+        const pending = f.eufy.getDevice(CAMERA);
+        await held.captured;
+        f.cloud.params[param] = raw;
+        f.client.registry.listFetchedAtMs = 0;
+        vi.spyOn(f.client, "rtcDevice").mockReturnValue(false);
+        expect(
+          await f.client.refreshEventState(CAMERA, {
+            event: "propertyChanged",
+            property,
+            param,
+            expected: Number(raw),
+            observed: confirmed,
+            timeoutMs: 1000,
+          }),
+        ).toBe(true);
+        expect(f.client.registry.knownParam(CAMERA, param)).toBe(raw);
+        held.release();
+        const dev = await pending;
+        expect(dev.getProperty(property)?.value).toBe(confirmed);
+        expect(f.client.liveDevices.get(CAMERA).deref()).toBe(dev);
+        expect(f.client.realtimeParamIds.get(dev).get(param)).toBeGreaterThan(0);
+        expect((await f.eufy.getDevice(CAMERA)).getProperty(property)?.value).toBe(confirmed);
+        if (!guard) expect(dev.light!()!.isOn).toBe(true);
+      });
+
       it(`preserves newer ${property} across a held ${stage}`, async () => {
         const f = await fixture(false, guard);
         const held = stage === "record" ? holdResult(f.client.registry, "record") : holdContext(f.client);

@@ -1602,10 +1602,10 @@ export class EufyMega extends EventEmitter {
               : rawValue !== rawBefore
             : String(rawValue) === String(refresh.expected);
         if (!converged) return false;
-        if (!device) return true;
         if (rawValue === undefined) return false;
         const revision = ++this.realtimeReportRevision;
         this.deviceRevisions(sn).set(refresh.param, revision);
+        if (!device) return true;
         const revisions = this.realtimeParamIds.get(device) ?? new Map<number, number>();
         revisions.set(refresh.param, revision);
         this.realtimeParamIds.set(device, revisions);
