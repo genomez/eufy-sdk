@@ -47,7 +47,7 @@ function assertInventory(rows: InventoryRow[]) {
   for (const { model, properties } of rows) {
     expect(properties.length, model).toBeGreaterThan(0);
     const byName = Object.fromEntries(properties.map((p) => [p.name, p]));
-    if (model === "T8171") expect(byName.brightness).toBeUndefined();
+    if (model === "T8171" || model === "T8416") expect(byName.brightness).toBeUndefined();
     else
       expect(byName.brightness, model).toEqual({
         name: "brightness",

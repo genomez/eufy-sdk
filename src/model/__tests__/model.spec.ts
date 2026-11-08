@@ -167,6 +167,16 @@ describe("resolveDevice — 3-tier composition", () => {
     expect(resolveDevice({ model: "T8030", parentSn: "T8030P0" }).capabilities).toContain("arming");
   });
 
+  it("does not advertise a spotlight from the params reported by an Indoor Cam S350 (T8416)", () => {
+    const params = { 1400: "0", 1401: "70", 1403: "1", 1410: "100" };
+    const s350 = resolveDevice({ model: "T8416", deviceType: DeviceType.INDOOR_PT_CAMERA_S350, params });
+    expect(s350.capabilities).not.toContain("light");
+    const properties = s350.properties.map((p) => p.name);
+    for (const name of ["light", "brightness", "spotlightEnabled", "colorTemp"]) {
+      expect(properties).not.toContain(name);
+    }
+  });
+
   it("'light' is a capability, not a class — a floodlight cam is just camera + light", () => {
     const plain = resolveDevice({ deviceType: 9 });
     const flood = resolveDevice({ model: "T8423", deviceType: 37 });

@@ -171,6 +171,34 @@ describe("light capability module", () => {
     );
   });
 
+  it.each([
+    ["T8425", DeviceType.FLOODLIGHT_CAMERA_8425, "json"],
+    ["T8426", DeviceType.FLOODLIGHT_CAMERA_8426, "json"],
+    ["T8170", DeviceType.OUTDOOR_PT_CAMERA, "int-string"],
+  ] as const)("preserves resolved %s light on/off commands", async (model, deviceType, wire) => {
+    const dev = Device.fromRecord("T8000P0000000000", {
+      model,
+      deviceType,
+      params: { 1400: "0", 1401: "50", 1403: "1" },
+    });
+    const sent: Command[] = [];
+    dev.bindActions(
+      { channel: 3, codec: "camera", model, deviceType, paramIds: new Set([1400, 1401, 1403]) },
+      { dispatch: async (command) => void sent.push(command) },
+    );
+    expect(dev.capabilities).toContain("light");
+    const light = dev.light!()!;
+    await light.on();
+    await light.off();
+    expect(sent).toEqual(
+      [1, 0].map((value) =>
+        wire === "json"
+          ? { kind: "set-json", param: 1400, data: { time: 0, type: 2, value }, channel: 3 }
+          : { kind: "set-param", param: 1400, form: "int-string", value, channel: 3 },
+      ),
+    );
+  });
+
   it("excludes T8171 despite reported spotlight parameters", () => {
     const dev = Device.fromRecord("T8000P0000000000", {
       model: "T8171",

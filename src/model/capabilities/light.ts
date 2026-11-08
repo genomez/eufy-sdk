@@ -371,6 +371,9 @@ export const LIGHT_MEMBERS = {
   },
 } as const satisfies Members;
 
+/** Models that report spotlight parameters without having a spotlight; the status LED is not light evidence. */
+const NO_SPOTLIGHT_MODELS: ReadonlySet<string> = new Set(["T8171", "T8416"]);
+
 export const LIGHT: CapabilityModule = {
   capability: "light",
   description: "Floodlight / spotlight manual switch and brightness.",
@@ -395,7 +398,7 @@ export const LIGHT: CapabilityModule = {
   // brightness/enable 1401/1403, indoor-spot enable/bright 6080/6082. Plus explicit light model names.
   detection: {
     detect: (record) =>
-      record.model !== "T8171" &&
+      !NO_SPOTLIGHT_MODELS.has(record.model ?? "") &&
       [1400, 1401, 1403, 6080, 6082, 1413].some((param) => Object.hasOwn(record.params ?? {}, param)),
     modelHints: [/floodlight|wall.?light|spot.?light|search.?light/i],
   },
