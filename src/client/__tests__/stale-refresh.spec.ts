@@ -216,8 +216,7 @@ describe("snapshots captured before newer light reports", () => {
       if (poll) await poll;
       else await drainRefresh(f.dev);
       expect(f.dev.getProperty("light")?.value).toBe(true);
-      expect(f.values).not.toContain(true);
-      expect(f.values).toEqual([false]);
+      expect(f.values).toEqual([false, true]);
       expect(f.errors).toEqual([]);
     });
   }

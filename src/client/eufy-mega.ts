@@ -1590,7 +1590,7 @@ export class EufyMega extends EventEmitter {
         const revisions = this.realtimeParamIds.get(device) ?? new Map<number, number>();
         revisions.set(refresh.param, ++this.realtimeReportRevision);
         this.realtimeParamIds.set(device, revisions);
-        device.applyParams({ [refresh.param]: rawValue });
+        this.applyAndAnnounce(device, { [refresh.param]: rawValue });
         return this.matchesObservation(device.getProperty(refresh.property)?.value, refresh, before);
       };
       if (refresh.expected !== undefined && settled()) return true;

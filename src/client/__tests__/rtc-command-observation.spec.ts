@@ -47,6 +47,29 @@ function fixture(commandTimeoutMs?: number) {
 afterEach(() => vi.useRealTimers());
 
 describe("bounded RTC command observation", () => {
+  it("journals a confirmed guard value over a held older list while retaining the semantic event", async () => {
+    const { eufy, client, device, cloud, send } = fixture();
+    const heldList = { armingMode: device.getProperty("armingMode")?.value };
+    const journal: Record<string, unknown> = {};
+    const semantic: unknown[] = [];
+    eufy.on("propertyChanged", (event) => {
+      journal[event.property] = event.value;
+    });
+    eufy.on("armingModeChanged", (event) => semantic.push(event));
+    vi.spyOn(client.rtc, "refreshInformation").mockRejectedValue(new Error("synthetic read unavailable"));
+    cloud.mockImplementation(async () => {
+      client.registry.devices[0].params[1224] = "3";
+      return client.registry.devices;
+    });
+    await send();
+    await vi.waitFor(() => expect(semantic).toHaveLength(1));
+    expect(heldList.armingMode).toBe(1);
+    expect(journal.armingMode).toBe(3);
+    expect({ ...heldList, ...journal }.armingMode).toBe(3);
+    expect(semantic[0]).not.toHaveProperty("mode");
+    await eufy.disconnect();
+  });
+
   it("expires behind a state transaction without sending after that predecessor finishes", async () => {
     vi.useFakeTimers();
     const { eufy, client, route, send } = fixture(100);

@@ -12,6 +12,7 @@ function fixture(mode = 3) {
   const cloud = { params: { 1224: "1", 1101: "20" } };
   const values: Record<number, string> = { 1224: String(mode), 1101: "80" };
   const device = {
+    announcements: () => [],
     getProperty: () => ({ value: Number(values[1224]) }),
     applyParams: vi.fn((params: Record<number, string>) => Object.assign(values, params)),
   };
