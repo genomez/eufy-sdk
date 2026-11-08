@@ -1,3 +1,80 @@
+Modified for genomez experimental.13, 2026-11-07
+
+Release packaging, current recordings/playback runtime and extra-model support.
+Modified paths since published experimental.12:
+
+- `BUILD_PROVENANCE.json`
+- `EXPERIMENTAL.md`
+- `ICE_DIAGNOSTICS.md`
+- `MODIFICATIONS.md`
+- `PUBLICATION.json`
+- `README.md`
+- `SOURCE_MANIFEST.json`
+- `docs/recordings-sdk.md`
+- `docs/recordings-validation.md`
+- `package-lock.json`
+- `package.json`
+- `scripts/replay-playback-capture.mjs`
+- `src/client/__tests__/device-registry.spec.ts`
+- `src/client/__tests__/poll.spec.ts`
+- `src/client/__tests__/rtc-effect-confirmation.spec.ts`
+- `src/client/__tests__/rtc-last-seen.spec.ts`
+- `src/client/__tests__/rtc-state.spec.ts`
+- `src/client/__tests__/state-refresh-renewal.spec.ts`
+- `src/client/device-registry.ts`
+- `src/client/eufy-mega.ts`
+- `src/client/index.ts`
+- `src/client/state-refresh-diagnostics.ts`
+- `src/client/types.ts`
+- `src/transport/http/__tests__/key-persistence-file-faults.spec.ts`
+- `src/transport/http/__tests__/key-persistence-qualification.spec.ts`
+- `src/transport/http/mega-client.ts`
+- `src/transport/rtc/__tests__/command-keepalive.spec.ts`
+- `src/transport/rtc/__tests__/event-download-experiment.spec.ts`
+- `src/transport/rtc/__tests__/event-playback-candidate.spec.ts`
+- `src/transport/rtc/__tests__/event-playback-router.spec.ts`
+- `src/transport/rtc/__tests__/event-table-candidate.spec.ts`
+- `src/transport/rtc/__tests__/event-thumb-candidate.spec.ts`
+- `src/transport/rtc/__tests__/framing-diagnostics.spec.ts`
+- `src/transport/rtc/__tests__/ice-safety.spec.ts`
+- `src/transport/rtc/__tests__/information-refresh.spec.ts`
+- `src/transport/rtc/__tests__/peer.spec.ts`
+- `src/transport/rtc/__tests__/playback-expiry.spec.ts`
+- `src/transport/rtc/__tests__/playback-qualification.spec.ts`
+- `src/transport/rtc/__tests__/playback-quarantine.spec.ts`
+- `src/transport/rtc/__tests__/playback-replay.spec.ts`
+- `src/transport/rtc/__tests__/playback-station-flags.spec.ts`
+- `src/transport/rtc/__tests__/playback-telemetry.spec.ts`
+- `src/transport/rtc/__tests__/playback-transfer-speed.spec.ts`
+- `src/transport/rtc/__tests__/ptcs-compression.spec.ts`
+- `src/transport/rtc/__tests__/ptcs-reassembler.spec.ts`
+- `src/transport/rtc/__tests__/recording-clip.spec.ts`
+- `src/transport/rtc/__tests__/recordings-arbitration.spec.ts`
+- `src/transport/rtc/__tests__/recordings-fixture.ts`
+- `src/transport/rtc/__tests__/recordings-query-count.spec.ts`
+- `src/transport/rtc/__tests__/recordings.spec.ts`
+- `src/transport/rtc/__tests__/session.spec.ts`
+- `src/transport/rtc/command-router.ts`
+- `src/transport/rtc/connection-diagnostics.ts`
+- `src/transport/rtc/event-download-experiment.ts`
+- `src/transport/rtc/event-playback-candidate.ts`
+- `src/transport/rtc/event-table-candidate.ts`
+- `src/transport/rtc/event-thumb-candidate.ts`
+- `src/transport/rtc/event-time.ts`
+- `src/transport/rtc/framer.ts`
+- `src/transport/rtc/ice-diagnostics.ts`
+- `src/transport/rtc/index.ts`
+- `src/transport/rtc/peer.ts`
+- `src/transport/rtc/playback-ingress.ts`
+- `src/transport/rtc/playback-telemetry.ts`
+- `src/transport/rtc/ptcs-framer.ts`
+- `src/transport/rtc/recordings.ts`
+- `src/transport/rtc/renewal-diagnostics.ts`
+- `src/transport/rtc/retired-information-read.ts`
+- `src/transport/rtc/session.ts`
+
+## Previous notices
+
 # S1 experimental.12
 
 Update the add-on and integration together: add-on `0.4.1-s1.experimental.12`, integration and bridge `0.3.1-s1.experimental.12`, SDK `0.2.1-s1.experimental.12`.
