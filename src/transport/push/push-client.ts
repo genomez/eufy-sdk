@@ -27,6 +27,7 @@ const HOST = "mtalk.google.com";
 const PORT = 5228;
 const MCS_VERSION = 41;
 const HEARTBEAT_MS = 5 * 60 * 1000;
+const SILENCE_MS = HEARTBEAT_MS + 60 * 1000;
 
 function readNullTerminated(buf: Buffer): string {
   const i = buf.indexOf(0);
@@ -98,6 +99,8 @@ export class PushClient extends EventEmitter {
   private persistentIds: string[] = [];
   private loggedIn = false;
   private closing = false;
+  /** Last decoded inbound MCS frame, including heartbeat pings and acknowledgments. */
+  private lastRxMs = 0;
   /** Consecutive MCS login rejections — transient ones self-heal via reconnect (see {@link onMessage}). */
   private loginFailures = 0;
   /**
@@ -134,6 +137,7 @@ export class PushClient extends EventEmitter {
    */
   connect(): void {
     this.closing = false;
+    this.stopHeartbeat();
     this.parser.reset();
     this.loggedIn = false;
     const attempt = this.lifecycle.beginAttempt();
@@ -148,12 +152,13 @@ export class PushClient extends EventEmitter {
         closing: this.closing,
         staleSocket: this.socket !== undefined && socket !== this.socket,
       });
+      if (this.closing || socket !== this.socket || socket.destroyed) return;
       this.logger.debug("[push] TLS connected, sending login");
       socket.write(this.buildLoginRequest());
     });
     let frameFailed = false;
     socket.on("data", (d: Buffer) => {
-      if (socket !== this.socket || frameFailed) return;
+      if (this.closing || socket !== this.socket || socket.destroyed || frameFailed) return;
       this.parser.handleData(d, () => {
         frameFailed = true;
         this.lifecycle.record("frame_parse_failed", attempt, {
@@ -163,6 +168,7 @@ export class PushClient extends EventEmitter {
         socket.destroy();
       });
     });
+    let closed = false;
     socket.on("close", (hadError: boolean) => {
       this.lifecycle.record(
         "socket_closed",
@@ -174,6 +180,9 @@ export class PushClient extends EventEmitter {
         },
         { hadError },
       );
+      if (closed) return;
+      closed = true;
+      if (this.socket !== undefined && socket !== this.socket) return;
       this.onClose();
     });
     socket.on("error", (e: NodeJS.ErrnoException) => {
@@ -228,6 +237,8 @@ export class PushClient extends EventEmitter {
   }
 
   private onMessage(m: McsMessage): void {
+    if (this.closing) return;
+    this.lastRxMs = Date.now();
     switch (m.tag) {
       case MessageTag.LoginResponse:
         if (m.object?.error) {
@@ -317,10 +328,19 @@ export class PushClient extends EventEmitter {
     if (event) this.emit("push", event);
   }
 
+  /** Ping periodically; inbound silence tears down the socket for the existing close/backoff path. */
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.heartbeatTimer = setInterval(() => {
-      if (this.socket && this.loggedIn) this.socket.write(this.buildHeartbeatPing());
+      if (this.closing || !this.socket || !this.loggedIn) return;
+      if (Date.now() - this.lastRxMs >= SILENCE_MS) {
+        this.stopHeartbeat();
+        this.lifecycle.record("inbound_silence", this.attempt, { loggedIn: this.loggedIn, closing: this.closing });
+        this.logger.debug("[push] no inbound within a heartbeat window — reconnecting");
+        this.socket?.destroy();
+        return;
+      }
+      this.socket.write(this.buildHeartbeatPing());
     }, HEARTBEAT_MS);
   }
   private stopHeartbeat(): void {
@@ -336,10 +356,10 @@ export class PushClient extends EventEmitter {
   }
 
   private scheduleReconnect(): void {
+    if (this.closing || this.reconnectTimer) return;
     const delay = this.currentDelay === 0 ? 5000 : this.currentDelay;
     if (this.currentDelay < 60000) this.currentDelay += 10000;
     else if (this.currentDelay < 600000) this.currentDelay += 60000;
-    if (this.reconnectTimer) return;
     this.lifecycle.record(
       "reconnect_scheduled",
       this.attempt,

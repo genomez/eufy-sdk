@@ -300,6 +300,169 @@ describe("the MCS connection", () => {
     client.close();
   });
 
+  it("reconnects a silent socket exactly once through the existing close path", () => {
+    const recorder = new PushLifecycleRecorder();
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const client = new PushClient({ androidId: "1", securityToken: "2" } as never, logger, recorder);
+    const first = login(client);
+    first.receive(MessageTag.LoginResponse, { id: "synthetic" });
+    first.socket.write.mockClear();
+    vi.advanceTimersByTime(5 * 60 * 1000);
+    expect(first.socket.write).toHaveBeenCalledTimes(1);
+    expect(first.socket.destroy).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(5 * 60 * 1000);
+    expect(first.socket.destroy).toHaveBeenCalledExactlyOnceWith();
+    expect(first.socket.write).toHaveBeenCalledTimes(1);
+    expect(logger.debug).toHaveBeenLastCalledWith("[push] no inbound within a heartbeat window — reconnecting");
+    expect(
+      recorder
+        .diagnostics()
+        .recent.slice(-3)
+        .map((row) => row.event),
+    ).toEqual(["inbound_silence", "socket_closed", "reconnect_scheduled"]);
+    expect(recorder.diagnostics().recent.at(-3)).toEqual({
+      atMs: Date.now(),
+      attempt: 1,
+      event: "inbound_silence",
+      errorCode: null,
+      hadError: null,
+      loggedIn: true,
+      closing: false,
+      staleSocket: false,
+      retryDelayMs: null,
+    });
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(4999);
+    expect(sockets).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(sockets).toHaveLength(2);
+    first.socket.emit("close", false);
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(sockets).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+    client.close();
+  });
+
+  it.each([MessageTag.DataMessageStanza, MessageTag.HeartbeatAck, MessageTag.HeartbeatPing])(
+    "keeps the socket alive with regular inbound frames of tag %s",
+    (tag) => {
+      const recorder = new PushLifecycleRecorder();
+      const client = new PushClient({ androidId: "1", securityToken: "2" } as never, undefined, recorder);
+      const connection = login(client);
+      connection.receive(MessageTag.LoginResponse, { id: "synthetic" });
+      for (let i = 0; i < 6; i++) {
+        vi.advanceTimersByTime(4 * 60 * 1000);
+        connection.receive(tag, { id: "synthetic", from: "synthetic", category: "synthetic" });
+      }
+      expect(connection.socket.destroy).not.toHaveBeenCalled();
+      expect(sockets).toHaveLength(1);
+      expect(recorder.diagnostics().recent.some((row) => row.event === "inbound_silence")).toBe(false);
+      client.close();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("accepts a heartbeat acknowledgment as liveness but expires a later silent window", () => {
+    const client = new PushClient({ androidId: "1", securityToken: "2" } as never);
+    const connection = login(client);
+    connection.receive(MessageTag.LoginResponse, { id: "synthetic" });
+    connection.socket.write.mockClear();
+    vi.advanceTimersByTime(5 * 60 * 1000);
+    connection.receive(MessageTag.HeartbeatAck);
+    vi.advanceTimersByTime(5 * 60 * 1000);
+    expect(connection.socket.write).toHaveBeenCalledTimes(2);
+    expect(connection.socket.destroy).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(5 * 60 * 1000);
+    expect(connection.socket.destroy).toHaveBeenCalledExactlyOnceWith();
+    expect(connection.socket.write).toHaveBeenCalledTimes(2);
+    client.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([5, 10])("shutdown after %s minutes cancels heartbeat and pending reconnect", (minutes) => {
+    const client = new PushClient({ androidId: "1", securityToken: "2" } as never);
+    const connection = login(client);
+    connection.receive(MessageTag.LoginResponse, { id: "synthetic" });
+    vi.advanceTimersByTime(minutes * 60 * 1000);
+    client.close();
+    connection.socket.emit("secureConnect");
+    connection.receive(MessageTag.LoginResponse, { id: "synthetic" });
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(sockets).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("tears down only once while socket close is delayed and lets shutdown win", () => {
+    const recorder = new PushLifecycleRecorder();
+    const client = new PushClient({ androidId: "1", securityToken: "2" } as never, undefined, recorder);
+    const connection = login(client);
+    connection.receive(MessageTag.LoginResponse, { id: "synthetic" });
+    connection.socket.destroy.mockImplementationOnce(() => {});
+    vi.advanceTimersByTime(30 * 60 * 1000);
+    expect(connection.socket.destroy).toHaveBeenCalledExactlyOnceWith();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(recorder.diagnostics().recent.at(-1)?.event).toBe("inbound_silence");
+    client.close();
+    connection.socket.emit("close", false);
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(sockets).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("lets shutdown from a disconnect listener cancel the silence retry", () => {
+    const client = new PushClient({ androidId: "1", securityToken: "2" } as never);
+    const connection = login(client);
+    connection.receive(MessageTag.LoginResponse, { id: "synthetic" });
+    client.once("disconnect", () => client.close());
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(sockets).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps the active heartbeat when a retired socket closes late", () => {
+    const client = new PushClient({ androidId: "1", securityToken: "2" } as never);
+    const first = login(client);
+    first.receive(MessageTag.LoginResponse, { id: "synthetic" });
+    const second = login(client);
+    second.receive(MessageTag.LoginResponse, { id: "synthetic" });
+    first.socket.emit("close", false);
+    vi.advanceTimersByTime(5 * 60 * 1000);
+    expect(sockets).toHaveLength(2);
+    expect(second.socket.write).toHaveBeenCalledTimes(2);
+    expect(second.socket.destroy).not.toHaveBeenCalled();
+    client.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves backoff after silence, ignores duplicate closes and resets delay on login", () => {
+    const recorder = new PushLifecycleRecorder();
+    const client = new PushClient({ androidId: "1", securityToken: "2" } as never, undefined, recorder);
+    const first = login(client);
+    first.receive(MessageTag.LoginResponse, { id: "synthetic" });
+    vi.advanceTimersByTime(10 * 60 * 1000);
+    first.socket.emit("close", false);
+    vi.advanceTimersByTime(5000);
+    for (const delay of [10000, 20000, 30000, 40000, 50000, 60000, 120000]) {
+      const socket = sockets.at(-1)!;
+      socket.emit("close", false);
+      socket.emit("close", false);
+      expect(recorder.diagnostics().recent.at(-1)?.event).toBe("socket_closed");
+      const scheduled = recorder.diagnostics().recent.filter((row) => row.event === "reconnect_scheduled");
+      expect(scheduled.at(-1)?.retryDelayMs).toBe(delay);
+      const attempts = sockets.length;
+      vi.advanceTimersByTime(delay - 1);
+      expect(sockets).toHaveLength(attempts);
+      vi.advanceTimersByTime(1);
+      expect(sockets).toHaveLength(attempts + 1);
+    }
+    const socket = sockets.at(-1)!;
+    stream(socket)(MessageTag.LoginResponse, { id: "synthetic" });
+    socket.emit("close", false);
+    expect(recorder.diagnostics().recent.at(-1)?.retryDelayMs).toBe(5000);
+    client.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("keeps lifecycle history finite across successful acknowledged-ID reconnects", () => {
     const recorder = new PushLifecycleRecorder();
     const client = new PushClient({ androidId: "1", securityToken: "2" } as never, undefined, recorder);
