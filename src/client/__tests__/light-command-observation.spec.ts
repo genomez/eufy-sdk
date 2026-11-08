@@ -7,6 +7,7 @@ const cameraSn = "T8425P0000000000";
 
 /** A real bound light member with synthetic cloud state and a controlled RTC information response. */
 function fixture(initial: boolean) {
+  vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Synthetic cloud unavailable"));
   const eufy = new EufyMega({ email: "test@example.com", password: "synthetic", autoRealtime: false, pollMs: 0 });
   const client = eufy as any;
   const params = { 1400: initial ? "1" : "0" };

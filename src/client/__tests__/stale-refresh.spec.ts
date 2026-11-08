@@ -12,8 +12,13 @@ function deferred<T>() {
 }
 
 /** Real registry snapshots and model announcements; only external requests and command delivery are faked. */
-async function fixture(initial: boolean) {
-  const cloud = { params: { 1400: initial ? "1" : "0", 1142: "-70" } as Record<number, string> };
+async function fixture(initial: boolean, guard = false) {
+  const model = guard ? "T9000" : "T8425";
+  const deviceType = guard ? 27 : 47;
+  const param = guard ? 1224 : 1400;
+  const property = guard ? "armingMode" : "light";
+  const raw = (value: boolean) => (guard ? (value ? "0" : "1") : value ? "1" : "0");
+  const cloud = { params: { [param]: raw(initial), 1142: "-70" } as Record<number, string> };
   const post = vi.fn(async (_service: string, path: string) =>
     path.endsWith("get_house_list")
       ? { house_infos: [] }
@@ -21,8 +26,8 @@ async function fixture(initial: boolean) {
           devices: [
             {
               device_sn: CAMERA,
-              device_model: "T8425",
-              device_type: 47,
+              device_model: model,
+              device_type: deviceType,
               station_sn: CAMERA,
               category: "eufy_security",
               params: Object.entries(cloud.params).map(([id, value]) => ({
@@ -50,12 +55,12 @@ async function fixture(initial: boolean) {
     } as never,
   });
   vi.spyOn(client, "commandContext").mockResolvedValue({
-    model: "T8425",
+    model,
     category: "eufy_security",
-    deviceType: 47,
-    codec: "camera",
+    deviceType,
+    codec: guard ? "station" : "camera",
     channel: 0,
-    paramIds: new Set([1400, 1142]),
+    paramIds: new Set([param, 1142]),
   });
   const dispatch = vi.fn(async () => {});
   vi.spyOn(client, "commandSinkFor").mockReturnValue({ dispatch });
@@ -64,13 +69,13 @@ async function fixture(initial: boolean) {
   vi.spyOn(client, "awaitFirstRealtimeState").mockResolvedValue(undefined);
   await client.registry.pollChanges();
   const dev = await eufy.getDevice(CAMERA);
-  const values: unknown[] = [dev.getProperty("light")?.value];
+  const values: unknown[] = [dev.getProperty(property)?.value];
   const errors: unknown[] = [];
   eufy.on("error", (error) => errors.push(error));
   eufy.on("propertyChanged", (event) => {
-    if (event.property === "light") values.push(event.value);
+    if (event.property === property) values.push(event.value);
   });
-  const report = (value: boolean) => client.applyRealtimeState(CAMERA, { 1400: value ? "1" : "0" });
+  const report = (value: boolean) => client.applyRealtimeState(CAMERA, { [param]: raw(value) });
   return { eufy, client, cloud, dev, values, errors, report, dispatch };
 }
 
@@ -364,3 +369,125 @@ describe("freshness supersession recovery", () => {
     expect(f.values).toEqual([true]);
   });
 });
+
+describe("model construction revision ownership", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it("rejects a captured OFF when a newer report no longer has an available registry value", async () => {
+    const f = await fixture(false);
+    const held = holdResult(f.client.registry, "record");
+    const pending = f.eufy.getDevice(CAMERA);
+    const rejection = expect(pending).rejects.toThrow("Device construction superseded by unavailable parameter");
+    await held.captured;
+    f.report(true);
+    vi.spyOn(f.client.registry, "knownParam").mockReturnValue(undefined);
+    held.release();
+    await rejection;
+    expect(f.client.liveDevices.get(CAMERA).deref()).toBe(f.dev);
+    expect(f.dev.getProperty("light")?.value).toBe(true);
+  });
+
+  it("keeps a newer unrecognized light value unknown across a captured OFF", async () => {
+    const f = await fixture(false);
+    const held = holdResult(f.client.registry, "record");
+    const pending = f.eufy.getDevice(CAMERA);
+    await held.captured;
+    f.client.applyRealtimeState(CAMERA, { 1400: "unknown-fixture-value" });
+    held.release();
+    const dev = await pending;
+    expect(dev.getProperty("light")?.value).toBe("unknown-fixture-value");
+    expect(dev.light!()!.isOn).toBeUndefined();
+  });
+
+  for (const guard of [false, true]) {
+    const property = guard ? "armingMode" : "light";
+    const confirmed = guard ? 0 : true;
+    for (const stage of ["record", "context"] as const) {
+      it(`preserves newer ${property} across a held ${stage}`, async () => {
+        const f = await fixture(false, guard);
+        const held = stage === "record" ? holdResult(f.client.registry, "record") : holdContext(f.client);
+        const pending = f.eufy.getDevice(CAMERA);
+        await held.captured;
+        f.report(true);
+        held.release();
+        const dev = await pending;
+        expect(dev.getProperty(property)?.value).toBe(confirmed);
+        expect(f.client.liveDevices.get(CAMERA).deref()).toBe(dev);
+        expect(f.values).toEqual([guard ? 1 : false, confirmed]);
+      });
+    }
+
+    it(`records a same-value newer ${property} report without a live model`, async () => {
+      const f = await fixture(true, guard);
+      f.client.liveDevices.delete(CAMERA);
+      f.cloud.params[guard ? 1224 : 1400] = guard ? "1" : "0";
+      const held = holdResult(f.client.registry, "record");
+      const pending = f.eufy.getDevice(CAMERA);
+      await held.captured;
+      f.report(true);
+      held.release();
+      const dev = await pending;
+      expect(dev.getProperty(property)?.value).toBe(confirmed);
+      expect(f.values).toEqual([confirmed]);
+    });
+
+    it(`preserves a same-value ${property} report even when no valued event is emitted`, async () => {
+      const f = await fixture(true, guard);
+      f.cloud.params[guard ? 1224 : 1400] = guard ? "1" : "0";
+      const held = holdResult(f.client.registry, "record");
+      const pending = f.eufy.getDevice(CAMERA);
+      await held.captured;
+      f.report(true);
+      held.release();
+      const dev = await pending;
+      expect(dev.getProperty(property)?.value).toBe(confirmed);
+      expect(f.values).toEqual([confirmed]);
+    });
+
+    it(`reconciles overlapping ${property} constructions from the registry owner`, async () => {
+      const f = await fixture(false, guard);
+      const held = holdResult(f.client.registry, "record");
+      const earlier = f.eufy.getDevice(CAMERA);
+      await held.captured;
+      const later = await f.eufy.getDevice(CAMERA);
+      f.report(true);
+      held.release();
+      const dev = await earlier;
+      expect(later.getProperty(property)?.value).toBe(confirmed);
+      expect(dev.getProperty(property)?.value).toBe(confirmed);
+      expect(f.client.liveDevices.get(CAMERA).deref()).toBe(dev);
+      expect(f.client.realtimeParamIds.get(dev).get(guard ? 1224 : 1400)).toBeGreaterThan(0);
+    });
+  }
+
+  for (const change of ["account", "runtime"] as const) {
+    for (const stage of ["record", "context"] as const) {
+      it(`rejects ${change} replacement during ${stage} without installing the captured model`, async () => {
+        const f = await fixture(false);
+        const held = stage === "record" ? holdResult(f.client.registry, "record") : holdContext(f.client);
+        const pending = f.eufy.getDevice(CAMERA);
+        const rejection = expect(pending).rejects.toThrow("Device construction superseded");
+        await held.captured;
+        if (change === "runtime") f.client.realtimeEpoch++;
+        else vi.spyOn(f.client.mega, "auth", "get").mockReturnValue({ userId: "replacement-fixture" });
+        held.release();
+        await rejection;
+        expect(f.client.liveDevices.get(CAMERA).deref()).toBe(f.dev);
+      });
+    }
+  }
+});
+
+/** Hold context binding to exercise reports and scope changes after the record await. */
+function holdContext(client: any) {
+  const captured = deferred<void>();
+  const release = deferred<void>();
+  const original = client.commandContext.bind(client);
+  vi.spyOn(client, "commandContext").mockImplementationOnce(async (...args: unknown[]) => {
+    const context = await original(...args);
+    captured.resolve();
+    await release.promise;
+    return context;
+  });
+  return { captured: captured.promise, release: () => release.resolve() };
+}

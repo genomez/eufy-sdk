@@ -419,6 +419,9 @@ export class EufyMega extends EventEmitter {
   /** Cloud presence and report/write-observation precedence are evidence IDs, never retained raw values. */
   private readonly cloudParamIds = new WeakMap<Device, ReadonlySet<number>>();
   private readonly realtimeParamIds = new WeakMap<Device, Map<number, number>>();
+  /** Scoped report revisions survive model replacement without retaining parameter values. */
+  private readonly deviceParamRevisions = new Map<string, Map<number, number>>();
+  private deviceParamRevisionScope?: string;
   private realtimeReportRevision = 0;
   /** A cached reconciliation supersedes the context of an older asynchronous read adoption. */
   private readonly polledReads = new WeakMap<Device, symbol>();
@@ -903,16 +906,30 @@ export class EufyMega extends EventEmitter {
     if (widens && known) this.boundParamIds.set(sn, new Set([...known, ...reported]));
     if (receivedAtMs === undefined) this.registry.applyRealtimeParams(sn, params);
     else this.registry.applyRealtimeParams(sn, params, receivedAtMs);
+    const revisions = this.deviceRevisions(sn);
+    const revision = ++this.realtimeReportRevision;
+    for (const id of reported) revisions.set(id, revision);
     const device = this.liveDeviceToAnnounce(sn);
     if (device) {
       const realtime = this.realtimeParamIds.get(device) ?? new Map<number, number>();
-      const revision = ++this.realtimeReportRevision;
       for (const id of reported) realtime.set(id, revision);
       this.realtimeParamIds.set(device, realtime);
       this.applyAndAnnounce(device, params);
     }
     this.emit("deviceState", this.deviceState(sn));
     if (widens) void this.rebindReads(sn);
+  }
+
+  /** Parameter revision ownership is per device within the current account and connection lifecycle. */
+  private deviceRevisions(sn: string): Map<number, number> {
+    const scope = JSON.stringify([this.realtimeEpoch, this.mega.auth?.userId ?? null]);
+    if (scope !== this.deviceParamRevisionScope) {
+      this.deviceParamRevisions.clear();
+      this.deviceParamRevisionScope = scope;
+    }
+    let revisions = this.deviceParamRevisions.get(sn);
+    if (!revisions) this.deviceParamRevisions.set(sn, (revisions = new Map()));
+    return revisions;
   }
 
   /** Apply qualified RTC information and dispatch scoped notifications through the model event path. */
@@ -1587,8 +1604,10 @@ export class EufyMega extends EventEmitter {
         if (!converged) return false;
         if (!device) return true;
         if (rawValue === undefined) return false;
+        const revision = ++this.realtimeReportRevision;
+        this.deviceRevisions(sn).set(refresh.param, revision);
         const revisions = this.realtimeParamIds.get(device) ?? new Map<number, number>();
-        revisions.set(refresh.param, ++this.realtimeReportRevision);
+        revisions.set(refresh.param, revision);
         this.realtimeParamIds.set(device, revisions);
         this.applyAndAnnounce(device, { [refresh.param]: rawValue });
         return this.matchesObservation(device.getProperty(refresh.property)?.value, refresh, before);
@@ -2495,17 +2514,34 @@ export class EufyMega extends EventEmitter {
    * ```
    */
   async getDevice(sn: string): Promise<Device> {
+    const epoch = this.realtimeEpoch;
+    const account = this.mega.auth?.userId;
+    const current = () => epoch === this.realtimeEpoch && account === this.mega.auth?.userId;
     await this.awaitFirstRealtimeState(sn);
+    if (!current()) throw new Error("Device construction superseded by account or runtime change");
+    const revisions = new Map(this.deviceRevisions(sn));
     const rec = await this.registry.record(sn);
-    const dev = Device.fromRecord(sn, rec, this.opts.logger);
-    if (rec.dpParams) dev.applyParams(rec.dpParams);
-    const held = new WeakRef(dev);
-    this.liveDevices.set(sn, held);
-    this.stationContextDevices.add(held);
+    if (!current()) throw new Error("Device construction superseded by account or runtime change");
+    const context = await this.commandContext(sn, rec);
+    if (!current()) throw new Error("Device construction superseded by account or runtime change");
+    const advanced: RawParams = {};
+    const latestRevisions = this.deviceRevisions(sn);
+    for (const [id, revision] of latestRevisions) {
+      if (revisions.get(id) === revision) continue;
+      const value = this.registry.knownParam(sn, id);
+      if (value === undefined) throw new Error("Device construction superseded by unavailable parameter");
+      advanced[id] = value;
+    }
+    const reconciled = { ...rec, dpParams: { ...rec.dpParams, ...advanced } };
+    const dev = Device.fromRecord(sn, reconciled, this.opts.logger);
+    dev.applyParams(reconciled.dpParams);
     const cloudParams = this.registry.list().find((record) => record.sn === sn)?.params ?? rec.params;
     this.cloudParamIds.set(dev, new Set(Object.keys(cloudParams ?? {}).map(Number)));
-    this.realtimeParamIds.set(dev, new Map(Object.keys(rec.dpParams ?? {}).map((id) => [Number(id), 0])));
-    const ctx = await this.commandContext(sn, rec);
+    this.realtimeParamIds.set(
+      dev,
+      new Map(Object.keys(reconciled.dpParams).map((id) => [Number(id), latestRevisions.get(Number(id)) ?? 0])),
+    );
+    const ctx = { ...context, paramIds: new Set([...context.paramIds, ...Object.keys(advanced).map(Number)]) };
     dev.setStationContext(ctx);
     dev.bindActions(
       ctx,
@@ -2544,6 +2580,9 @@ export class EufyMega extends EventEmitter {
         },
       });
     }
+    const held = new WeakRef(dev);
+    this.liveDevices.set(sn, held);
+    this.stationContextDevices.add(held);
     return dev;
   }
 

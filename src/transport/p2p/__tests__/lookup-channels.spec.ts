@@ -1,6 +1,20 @@
+import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import { P2PSession, type P2PSessionConfig } from "../p2p-session.js";
 import { LIVE_TRACE_MESSAGE } from "../live-trace.js";
+
+vi.mock("node:dgram", () => ({
+  default: {
+    createSocket: () =>
+      Object.assign(new EventEmitter(), {
+        bind: (done: () => void) => done(),
+        setBroadcast: vi.fn(),
+        address: () => ({ port: 2345 }),
+        send: vi.fn(),
+        close: (done: () => void) => done(),
+      }),
+  },
+}));
 
 /**
  * A connect states which lookup channels it can ask on, before it asks.
@@ -17,6 +31,7 @@ const STATION_SN = "T8000P0000000000";
 const P2P_DID = "XXXXXXX-000000-XXXXX";
 
 async function channelsTraced(cfg: Partial<P2PSessionConfig>) {
+  vi.spyOn(P2PSession, "detectLocalIp").mockResolvedValue(undefined);
   const debug = vi.fn();
   const session = new P2PSession({
     stationSn: STATION_SN,
