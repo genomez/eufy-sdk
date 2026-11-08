@@ -737,9 +737,9 @@ function writeDomain(m: ValueMember): readonly (string | number)[] | undefined {
  * some clamping it, some enforcing nothing at all — which on a fire-and-forget wire sends a value the
  * member's own message says is invalid and looks like success.
  *
- * Only a value of the STORED type is judged. A member may {@link ValueMember.accepts} more than its
- * getter answers — a resolution name for a tier stored as an int — and that vocabulary is the `write`'s
- * own, not something the published domain can state.
+ * Numeric strings use the same Number coercion as numeric writes before checking bounds and steps.
+ * A member may {@link ValueMember.accepts} named strings beyond its stored type; nonnumeric names
+ * remain the write's own vocabulary rather than the published numeric domain.
  *
  * A `bool` member declares no set, but it has one: `asBool` maps everything outside it to FALSE, so an
  * unchecked `setProperty("power", 999999)` reads as "turn it off" and, on a fire-and-forget wire, looks
@@ -747,6 +747,10 @@ function writeDomain(m: ValueMember): readonly (string | number)[] | undefined {
  */
 function inDomain(m: ValueMember, value: unknown): boolean {
   if (m.type === "bool") return BOOL_VALUES.has(typeof value === "string" ? value.toLowerCase() : value);
+  if (m.type === "number" && typeof value === "string") {
+    const numeric = Number(value);
+    if (!("accepts" in m) || !Number.isNaN(numeric)) value = numeric;
+  }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) return false;
     if (m.min !== undefined && value < m.min) return false;

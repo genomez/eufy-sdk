@@ -28,6 +28,82 @@ const cases = [
   ["T8214", 5, 120, 2, 60],
 ] as const;
 
+type InventoryRow = {
+  model: string;
+  properties: { name: string; kind?: string; min?: number; max?: number; step?: number }[];
+};
+
+function assertInventory(rows: InventoryRow[]) {
+  expect(rows.map((row) => row.model)).toEqual([
+    "T8425",
+    "T8426",
+    "T8170",
+    "T8171",
+    "T8134",
+    "T8214",
+    "T8416",
+    "T9000",
+  ]);
+  for (const { model, properties } of rows) {
+    expect(properties.length, model).toBeGreaterThan(0);
+    const byName = Object.fromEntries(properties.map((p) => [p.name, p]));
+    if (model === "T8171") expect(byName.brightness).toBeUndefined();
+    else
+      expect(byName.brightness, model).toEqual({
+        name: "brightness",
+        kind: "percent",
+        min: 1,
+        max: 100,
+        step: undefined,
+      });
+    if (model === "T9000") {
+      expect(byName.recordDuration).toBeUndefined();
+      expect(byName.recordInterval).toBeUndefined();
+      expect(byName.speakerVolume).toBeUndefined();
+      continue;
+    }
+    expect(byName.speakerVolume, model).toEqual({
+      name: "speakerVolume",
+      kind: "percent",
+      min: 0,
+      max: 100,
+      step: undefined,
+    });
+    const range = cases.find(([candidate]) => candidate === model);
+    for (const [name, min, max] of [
+      ["recordDuration", range?.[1] ?? 0, range?.[2]],
+      ["recordInterval", range?.[3] ?? 0, range?.[4]],
+    ] as const) {
+      expect(byName[name], model).toEqual({ name, kind: "seconds", min, max, step: range ? 1 : undefined });
+    }
+    expect(byName.workingMode === undefined, model).toBe(["T8170", "T8171", "T8214"].includes(model));
+  }
+}
+
+function inventory(): InventoryRow[] {
+  const params = Object.fromEntries(
+    Object.values(CAPABILITY_MODULES).flatMap((m) => m.properties.map((p) => [p.paramType, "1"])),
+  );
+  return ["T8425", "T8426", "T8170", "T8171", "T8134", "T8214", "T8416", "T9000"].map((model) => {
+    const dev = Device.fromRecord("synthetic-device", { model, params });
+    return {
+      model,
+      properties: dev.properties
+        .filter(
+          (p) =>
+            p.writable &&
+            p.type === "number" &&
+            p.kind &&
+            p.kind !== "bitfield" &&
+            !p.raw &&
+            !p.unexposed &&
+            !p.enumValues,
+        )
+        .map(({ name, kind, min, max, step }) => ({ name, kind, min, max, step })),
+    };
+  });
+}
+
 describe("numeric property domains", () => {
   it.each(cases)(
     "resolves %s ranges consistently for properties, reads and actions",
@@ -75,13 +151,27 @@ describe("numeric property domains", () => {
         ["recordInterval", gapMin, gapMax],
       ] as const) {
         const m = BATTERY_MEMBERS[name];
-        for (const invalid of [low - 1, high + 1, low + 0.5, NaN, Infinity]) {
+        for (const invalid of [
+          low - 1,
+          high + 1,
+          low + 0.5,
+          NaN,
+          Infinity,
+          String(low - 1),
+          String(high + 1),
+          String(low + 0.5),
+          "NaN",
+          "Infinity",
+          "-Infinity",
+        ]) {
           expect(() => memberWrite(name, m, invalid, ctx)).toThrow();
           const setter = name === "recordDuration" ? bound.setRecordDuration : bound.setRecordInterval;
-          await expect(setter!(invalid)).rejects.toThrow();
+          await expect(setter!(invalid as number)).rejects.toThrow();
         }
         expect(() => memberWrite(name, m, low, ctx)).not.toThrow();
         expect(() => memberWrite(name, m, high, ctx)).not.toThrow();
+        expect(memberWrite(name, m, String(low), ctx)).toEqual(memberWrite(name, m, low, ctx));
+        expect(memberWrite(name, m, String(high), ctx)).toEqual(memberWrite(name, m, high, ctx));
       }
       expect(sent).toBe(0);
     },
@@ -113,29 +203,59 @@ describe("numeric property domains", () => {
   });
 
   it("inventories synthetic owner-model number properties without runtime reads", () => {
-    const params = Object.fromEntries(
-      Object.values(CAPABILITY_MODULES).flatMap((m) => m.properties.map((p) => [p.paramType, "1"])),
-    );
-    const rows = ["T8425", "T8426", "T8170", "T8171", "T8134", "T8214", "T8416", "T9000"].map((model) => {
-      const dev = Device.fromRecord("synthetic-device", { model, params });
-      return {
-        model,
-        properties: dev.properties
-          .filter(
-            (p) =>
-              p.writable &&
-              p.type === "number" &&
-              p.kind &&
-              p.kind !== "bitfield" &&
-              !p.raw &&
-              !p.unexposed &&
-              !p.enumValues,
-          )
-          .map(({ name, kind, min, max, step }) => ({ name, kind, min, max, step })),
-      };
-    });
-    expect(rows.length).toBe(8);
+    const rows = inventory();
+    assertInventory(rows);
     if (process.env.I34_INVENTORY_OUTPUT)
       writeFileSync(process.env.I34_INVENTORY_OUTPUT, JSON.stringify(rows, null, 2) + "\n");
   });
+
+  it("rejects an inventory with empty model property lists", () => {
+    for (const model of inventory().map((row) => row.model)) {
+      const rows = inventory();
+      rows.find((row) => row.model === model)!.properties = [];
+      expect(() => assertInventory(rows)).toThrow();
+    }
+  });
+
+  it("rejects missing numeric domains without clamping reported out-of-range state", () => {
+    const rows = inventory();
+    for (const row of rows)
+      for (const p of row.properties) {
+        p.min = undefined;
+        p.max = undefined;
+        p.step = undefined;
+      }
+    expect(() => assertInventory(rows)).toThrow();
+    const dev = Device.fromRecord("synthetic-device", { model: "T8170", params: { 1101: "80", 1249: "1" } });
+    expect(dev.getProperty("recordDuration")?.value).toBe(1);
+    expect(dev.properties.find((p) => p.name === "recordDuration")).toMatchObject({ min: 10, max: 120, step: 1 });
+  });
+
+  it.each(cases)(
+    "accepts %s string endpoints on the fluent path after validation",
+    async (model, min, max, gapMin, gapMax) => {
+      const ctx = context(model);
+      const sent: unknown[] = [];
+      const bound = bindMembers(BATTERY_MEMBERS, {
+        ctx,
+        read: () => undefined,
+        sink: {
+          dispatch: async (command) => {
+            sent.push(command);
+          },
+        },
+      });
+      for (const [name, low, high] of [
+        ["recordDuration", min, max],
+        ["recordInterval", gapMin, gapMax],
+      ] as const) {
+        const setter = name === "recordDuration" ? bound.setRecordDuration : bound.setRecordInterval;
+        for (const endpoint of [low, high]) {
+          await setter!(String(endpoint) as unknown as number);
+          expect(sent.at(-1)).toEqual(memberWrite(name, BATTERY_MEMBERS[name], endpoint, ctx));
+        }
+      }
+      expect(sent).toHaveLength(4);
+    },
+  );
 });
