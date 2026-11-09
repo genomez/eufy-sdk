@@ -44,8 +44,8 @@
       "sha256": "b3e79451e7c4e4006600d8c203218d2cdf90cd3fa8522c5af37f6b82c0336e86"
     },
     "EXPERIMENTAL.md": {
-      "bytes": 32880,
-      "sha256": "27fb394cb83a35f79c2098c702be7e98804bf6acda8c035f9799999dce0c3db3"
+      "bytes": 2420,
+      "sha256": "0d0c4c1cd166572d89f4f64b209f98583c655b5a7f109bffa6015f4813d0910a"
     },
     "ICE_DIAGNOSTICS.md": {
       "bytes": 8274,
@@ -56,16 +56,16 @@
       "sha256": "b208eae7041fb7818ebd636d0778b49e242543be9a980ac9dcbaf98449660a2b"
     },
     "MODIFICATIONS.md": {
-      "bytes": 78412,
-      "sha256": "394bea1720401d8fa7a3547fd0f5b1ff6835b400e6c86a2232efd39bcde6d883"
+      "bytes": 77824,
+      "sha256": "d3d56d8b3a2a48ad8130b70446607f550f3034aa4e5e308596f79334e2632b1b"
     },
     "PUBLICATION.json": {
       "bytes": 378,
       "sha256": "9ce5f1b22d16a29e9a195820889a320137d5912ae07f7f27125d590dad5ed032"
     },
     "README.md": {
-      "bytes": 22819,
-      "sha256": "0bd9b9724668513c7041ae908757194b223cef9e6f2d2604e98b59600909777e"
+      "bytes": 2971,
+      "sha256": "cf80a2ddb44c54ea8b3674720f22ded9855accd5ffa2ac791c66ba15970ba73c"
     },
     "docs/architecture.md": {
       "bytes": 7091,

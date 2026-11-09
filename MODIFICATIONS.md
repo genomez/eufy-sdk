@@ -1,9 +1,8 @@
 Modified for genomez experimental.14, 2026-11-09
 
-Correct T8416 spotlight capability, detect push silence, and preserve parameter revisions across overlapping device construction and convergence.
+S350 spotlight capability, push reconnection and camera-setting update ordering.
 
-DRAFT for owner review. Version and documentation changes only relative to the soaked inputs.
-
+Update the add-on and integration together, then restart Home Assistant after the add-on is running, so removed controls are cleaned up.
 
 Modified paths relative to the pinned input:
 
@@ -13,6 +12,7 @@ Modified paths relative to the pinned input:
 - `SOURCE_MANIFEST.json`
 - `package-lock.json`
 - `package.json`
+
 
 ## Previous notices
 
@@ -114,7 +114,7 @@ Runtime and corresponding source: https://github.com/genomez/ha-eufy-sdk-addon/r
 
 Integration ZIP and checksum: https://github.com/genomez/ha-eufy-sdk/releases/tag/0.3.1-s1.experimental.12
 
-Publication availability is pending. The accepted image is delivered without rebuilding. Earlier release records below are historical.
+The accepted image is delivered without rebuilding. Earlier release records below are historical.
 
 Modified for genomez experimental.11, 2026-10-31
 
@@ -293,7 +293,7 @@ Modified for genomez experimental.9, 2026-10-27.
 
 # Experimental.8 local preparation
 
-Version `0.2.1-s1.experimental.8` is prepared locally and unpublished. Pair add-on `0.4.1-s1.experimental.8`, integration/bridge `0.3.1-s1.experimental.8` and SDK `0.2.1-s1.experimental.8`.
+Version `0.2.1-s1.experimental. Pair add-on `0.4.1-s1.experimental.8`, integration/bridge `0.3.1-s1.experimental.8` and SDK `0.2.1-s1.experimental.8`.
 
 RTC late-viewer keyframe gating; bounded refresh backoff and recovery; isolated slow replies; camera connectivity and hub reply evidence; T8171 detection; opt-in floodlight safety with bounded confirmation and problem notices; observation-only media stall evidence.
 
@@ -681,13 +681,13 @@ Version `0.2.1-s1.experimental.5`: Floodlight write confirmation; complete realt
 
 ## Experimental.6 preparation, 2026-10-16
 
-Version `0.2.1-s1.experimental.6` is prepared locally and has not been published. Packaging-only version update; SDK implementation and tests are unchanged from experimental.5, including token redaction and opt-in command-session keepalive.
+Version `0.2.1-s1.experimental. Packaging-only version update; SDK implementation and tests are unchanged from experimental.5, including token redaction and opt-in command-session keepalive.
 
 The live-view changes are confined to the paired bridge; no SDK implementation or test files changed for this candidate. Existing licenses and attribution are preserved.
 
 ## Experimental.6 release candidate refresh, 2026-10-16
 
-The earlier packaging-only .6 preparation above is historical. This candidate includes two SDK fixes: a slower state refresh cannot overwrite a newer parameter update, and a freshness read can retry when an unchanged background poll supersedes it. The SDK bundle, source inventory and local package are rebuilt from implementation input `980f9a1`, including `a408a51`. Version remains `0.2.1-s1.experimental.6`. Original licenses and attribution are preserved; final runtime qualification and publication remain pending.
+The earlier packaging-only .6 preparation above is historical. This candidate includes two SDK fixes: a slower state refresh cannot overwrite a newer parameter update, and a freshness read can retry when an unchanged background poll supersedes it. The SDK bundle, source inventory and local package are rebuilt from implementation input `980f9a1`, including `a408a51`. Version remains `0.2.1-s1.experimental.6`.
 
 ## Experimental.6 upstream ports, 2026-10-16
 
@@ -755,7 +755,7 @@ retained signed station rejection evidence. Local synthetic verification only.
 
 ## Experimental.6 package refresh, 2026-10-17
 
-This replaces the earlier review.7 candidate with review.9 input `681efd9` (implementation `d4335b9`, on review.8 `f6a59d9`). Runtime source is unchanged. Includes bounded pending acceptance for eligible correlated floodlight late replies with authoritative correction, supported S1 camera sirens, standard doorbell ring events and faster demand-only live-view admission, alongside the battery stream fix and native relay. The add-on relay option defaults to false; command keepalive remains 29000 independently. Package versions are SDK `0.2.1-s1.experimental.6` and bridge `0.3.1-s1.experimental.6`. Earlier candidate status statements above are historical. Original licenses and attribution remain. This is local packaging; publication and final device/soak qualification are pending.
+This replaces the earlier review.7 candidate with review.9 input `681efd9` (implementation `d4335b9`, on review.8 `f6a59d9`). Runtime source is unchanged. Includes bounded pending acceptance for eligible correlated floodlight late replies with authoritative correction, supported S1 camera sirens, standard doorbell ring events and faster demand-only live-view admission, alongside the battery stream fix and native relay. The add-on relay option defaults to false; command keepalive remains 29000 independently. Package versions are SDK `0.2.1-s1.experimental.6` and bridge `0.3.1-s1.experimental.6`. Earlier candidate status statements above are historical. Original licenses and attribution remain.
 
 ## Experimental.7, 2026-10-22
 
@@ -1139,13 +1139,13 @@ Version `0.2.1-s1.experimental.5`: Floodlight write confirmation; complete realt
 
 ## Experimental.6 preparation, 2026-10-16
 
-Version `0.2.1-s1.experimental.6` is prepared locally and has not been published. Packaging-only version update; SDK implementation and tests are unchanged from experimental.5, including token redaction and opt-in command-session keepalive.
+Version `0.2.1-s1.experimental. Packaging-only version update; SDK implementation and tests are unchanged from experimental.5, including token redaction and opt-in command-session keepalive.
 
 The live-view changes are confined to the paired bridge; no SDK implementation or test files changed for this candidate. Existing licenses and attribution are preserved.
 
 ## Experimental.6 release candidate refresh, 2026-10-16
 
-The earlier packaging-only .6 preparation above is historical. This candidate includes two SDK fixes: a slower state refresh cannot overwrite a newer parameter update, and a freshness read can retry when an unchanged background poll supersedes it. The SDK bundle, source inventory and local package are rebuilt from implementation input `980f9a1`, including `a408a51`. Version remains `0.2.1-s1.experimental.6`. Original licenses and attribution are preserved; final runtime qualification and publication remain pending.
+The earlier packaging-only .6 preparation above is historical. This candidate includes two SDK fixes: a slower state refresh cannot overwrite a newer parameter update, and a freshness read can retry when an unchanged background poll supersedes it. The SDK bundle, source inventory and local package are rebuilt from implementation input `980f9a1`, including `a408a51`. Version remains `0.2.1-s1.experimental.6`.
 
 ## Experimental.6 upstream ports, 2026-10-16
 
@@ -1213,7 +1213,7 @@ retained signed station rejection evidence. Local synthetic verification only.
 
 ## Experimental.6 package refresh, 2026-10-17
 
-This replaces the earlier review.7 candidate with review.9 input `681efd9` (implementation `d4335b9`, on review.8 `f6a59d9`). Runtime source is unchanged. Includes bounded pending acceptance for eligible correlated floodlight late replies with authoritative correction, supported S1 camera sirens, standard doorbell ring events and faster demand-only live-view admission, alongside the battery stream fix and native relay. The add-on relay option defaults to false; command keepalive remains 29000 independently. Package versions are SDK `0.2.1-s1.experimental.6` and bridge `0.3.1-s1.experimental.6`. Earlier candidate status statements above are historical. Original licenses and attribution remain. This is local packaging; publication and final device/soak qualification are pending.
+This replaces the earlier review.7 candidate with review.9 input `681efd9` (implementation `d4335b9`, on review.8 `f6a59d9`). Runtime source is unchanged. Includes bounded pending acceptance for eligible correlated floodlight late replies with authoritative correction, supported S1 camera sirens, standard doorbell ring events and faster demand-only live-view admission, alongside the battery stream fix and native relay. The add-on relay option defaults to false; command keepalive remains 29000 independently. Package versions are SDK `0.2.1-s1.experimental.6` and bridge `0.3.1-s1.experimental.6`. Earlier candidate status statements above are historical. Original licenses and attribution remain.
 
 ## Save-first playback review fixes, 2026-11-06
 
