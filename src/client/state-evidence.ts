@@ -33,7 +33,19 @@ type Row = {
   lastKnown?: Sample;
   conflict?: Sample;
   projected?: number;
-  intent?: { generation: number; expected: string; sentAt: number; revision: number; off: boolean; proof: boolean };
+  station?: string;
+  observationFenceMs?: number;
+  intent?: {
+    generation: number;
+    expected: string;
+    sentAtMonotonicMs: number;
+    revision: number;
+    station?: string;
+    sessionGeneration: number | null;
+    off: boolean;
+    proof: boolean;
+    invalidated: boolean;
+  };
   target: number;
 };
 const LIMIT = 2048;
@@ -86,22 +98,27 @@ export class StateEvidenceOwner {
     return row;
   }
 
-  /** Actual dispatch records intent only; an ACK or matching cache never records a sample. */
+  /** Actual dispatch uses a monotonic fence and station ownership; an ACK or matching cache is no sample. */
   dispatched(
     target: string,
     param: number,
     expected: boolean | number | string,
-    sentAt: number,
+    sentAtMonotonicMs: number,
     property?: string,
+    scope?: { station: string; sessionGeneration: number },
   ): void {
     const row = this.row(target, param);
+    const station = scope?.station ?? row.station;
     row.intent = {
       generation: (this.nextIntent = increment(this.nextIntent)),
       expected: this.boundedValue(String(typeof expected === "boolean" ? Number(expected) : expected)),
-      sentAt,
+      sentAtMonotonicMs,
+      station,
+      sessionGeneration: scope?.sessionGeneration ?? (station ? this.sessions.get(station) : undefined) ?? null,
       revision: this.revision,
       off: property === "light" && (expected === false || expected === 0 || expected === "0"),
       proof: false,
+      invalidated: false,
     };
     if (row.intent.off) this.offCommands = increment(this.offCommands);
   }
@@ -143,7 +160,7 @@ export class StateEvidenceOwner {
     value = this.boundedValue(value);
     const row = this.row(target, param);
     const previous = row.accepted ?? row.lastKnown;
-    const intent = row.intent;
+    const ownedIntent = row.intent;
     const session = ordinal(input.sessionGeneration) ? input.sessionGeneration : null;
     const priorSession = input.station ? this.sessions.get(input.station) : undefined;
     if (
@@ -155,7 +172,19 @@ export class StateEvidenceOwner {
       if (this.sessions.size >= SESSION_LIMIT && !this.sessions.has(input.station))
         this.sessions.delete(this.sessions.keys().next().value!);
       this.sessions.set(input.station, session);
+      for (const retained of this.rows.values())
+        if (retained.intent?.station === input.station && retained.intent.sessionGeneration !== session)
+          retained.intent.invalidated = true;
     }
+    const sameIntentScope =
+      !!ownedIntent &&
+      !ownedIntent.invalidated &&
+      ownedIntent.sessionGeneration !== null &&
+      session === ownedIntent.sessionGeneration &&
+      input.station === ownedIntent.station &&
+      (!input.station || this.sessions.get(input.station) === session) &&
+      (!input.runtimeGeneration || input.runtimeGeneration === this.runtimeGeneration);
+    const intent = sameIntentScope ? ownedIntent : undefined;
     const sequence =
       typeof input.producerSequence === "string" && /^(0|[1-9][0-9]{0,39})$/.test(input.producerSequence)
         ? input.producerSequence
@@ -169,10 +198,10 @@ export class StateEvidenceOwner {
     const ordered =
       input.producerOrderQualified === true && domain !== null && (sequence !== null || producerTime !== null);
     const readAfter =
-      !!intent &&
+      !!ownedIntent &&
       ordinal(input.readGeneration) &&
       input.readIssuedAtMonotonicMs !== undefined &&
-      input.readIssuedAtMonotonicMs > intent.sentAt;
+      input.readIssuedAtMonotonicMs > ownedIntent.sentAtMonotonicMs;
     const verified =
       input.source === "rtc_readback" &&
       ordinal(input.readGeneration) &&
@@ -181,9 +210,8 @@ export class StateEvidenceOwner {
       input.readIssuedAtMonotonicMs !== undefined &&
       input.receivedAtMonotonicMs !== undefined &&
       input.receivedAtMonotonicMs >= input.readIssuedAtMonotonicMs &&
-      (previous?.receivedAtMonotonicMs === undefined ||
-        input.readIssuedAtMonotonicMs >= previous.receivedAtMonotonicMs) &&
-      (!intent || readAfter);
+      (row.observationFenceMs === undefined || input.readIssuedAtMonotonicMs >= row.observationFenceMs) &&
+      (!ownedIntent || (sameIntentScope && readAfter));
     const e: StateEvidence = {
       version: 1,
       runtimeGeneration: this.runtimeGeneration,
@@ -272,6 +300,11 @@ export class StateEvidenceOwner {
       ((verified && readAfter) || (ordered && input.producerAfterDispatch === true));
     if (e.confirmationEligible) e.decision = "confirmation-of-command";
     const sample = { value, evidence: e, ordered, receivedAtMonotonicMs: input.receivedAtMonotonicMs };
+    if (e.status !== "stale" && input.source !== "command_echo") {
+      if (input.station && session !== null) row.station = input.station;
+      if (input.receivedAtMonotonicMs !== undefined)
+        row.observationFenceMs = Math.max(row.observationFenceMs ?? 0, input.receivedAtMonotonicMs);
+    }
     row.latest = sample;
     if (e.status === "current") {
       row.accepted = sample;

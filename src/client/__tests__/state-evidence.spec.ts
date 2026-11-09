@@ -65,7 +65,10 @@ describe("shadow evidence policy", () => {
   it("echo and ACK/cache equality are not OFF proof", () => {
     const owner = new StateEvidenceOwner();
     sample(owner, true);
-    owner.dispatched("synthetic-camera", 1400, false, 200);
+    owner.dispatched("synthetic-camera", 1400, false, 200, "light", {
+      station: "synthetic-station",
+      sessionGeneration: 1,
+    });
     const before = owner.diagnostics().total;
     expect(owner.diagnostics().total).toBe(before);
     expect(sample(owner, false, ingress({ source: "command_echo", receiveSequence: 2 }))).toMatchObject({
@@ -75,7 +78,10 @@ describe("shadow evidence policy", () => {
   });
   it("post-dispatch temporal read is associated but never proof", () => {
     const owner = new StateEvidenceOwner();
-    owner.dispatched("synthetic-camera", 1400, false, 50);
+    owner.dispatched("synthetic-camera", 1400, false, 50, "light", {
+      station: "synthetic-station",
+      sessionGeneration: 1,
+    });
     expect(
       sample(owner, false, ingress({ source: "rtc_readback", readGeneration: 7, readIssuedAtMonotonicMs: 60 })),
     ).toMatchObject({
@@ -86,7 +92,10 @@ describe("shadow evidence policy", () => {
   });
   it("qualifying fresh read can confirm only the dispatch it follows", () => {
     const owner = new StateEvidenceOwner();
-    owner.dispatched("synthetic-camera", 1400, false, 50);
+    owner.dispatched("synthetic-camera", 1400, false, 50, "light", {
+      station: "synthetic-station",
+      sessionGeneration: 1,
+    });
     expect(
       sample(
         owner,
@@ -99,7 +108,10 @@ describe("shadow evidence policy", () => {
       confirmationEligible: true,
       offProof: { eligible: true },
     });
-    owner.dispatched("synthetic-camera", 1400, false, 200);
+    owner.dispatched("synthetic-camera", 1400, false, 200, "light", {
+      station: "synthetic-station",
+      sessionGeneration: 1,
+    });
     expect(
       sample(
         owner,
@@ -119,7 +131,10 @@ describe("shadow evidence policy", () => {
     "never promotes %s to post-command proof",
     (source) => {
       const owner = new StateEvidenceOwner();
-      owner.dispatched("synthetic-camera", 1400, false, 50);
+      owner.dispatched("synthetic-camera", 1400, false, 50, "light", {
+        station: "synthetic-station",
+        sessionGeneration: 1,
+      });
       expect(sample(owner, false, ordered(1, { source, producerAfterDispatch: true })).confirmationEligible).toBe(
         false,
       );
@@ -143,9 +158,53 @@ describe("shadow evidence policy", () => {
       ).status,
     ).toBe("uncertain");
   });
+  it("keeps an overlapping OFF read uncertain after an intervening unqualified ON", () => {
+    const owner = new StateEvidenceOwner();
+    sample(owner, false, ingress({ receivedAtMonotonicMs: 10 }));
+    owner.dispatched("synthetic-camera", 1400, false, 15, "light");
+    sample(owner, true, ingress({ receiveSequence: 2, receivedAtMonotonicMs: 30 }));
+    expect(
+      sample(
+        owner,
+        false,
+        ingress({
+          source: "rtc_readback",
+          readGeneration: 1,
+          readIssuedAtMonotonicMs: 20,
+          receivedAtMonotonicMs: 40,
+          receiveSequence: 3,
+          freshSampleContract: true,
+        }),
+      ),
+    ).toMatchObject({ status: "uncertain", confirmationEligible: false, offProof: { eligible: false } });
+    expect(owner.diagnostics().offCommandsWithProof).toBe(0);
+  });
+  it("cannot confirm a dispatched intent from a replacement station session", () => {
+    const owner = new StateEvidenceOwner();
+    sample(owner, false, ingress({ receivedAtMonotonicMs: 10 }));
+    owner.dispatched("synthetic-camera", 1400, false, 15, "light");
+    const result = sample(
+      owner,
+      false,
+      ingress({
+        source: "rtc_readback",
+        sessionGeneration: 2,
+        readGeneration: 1,
+        readIssuedAtMonotonicMs: 20,
+        receivedAtMonotonicMs: 40,
+        receiveSequence: 2,
+        freshSampleContract: true,
+      }),
+    );
+    expect(result).toMatchObject({ confirmationEligible: false, intentGeneration: null, dispatchRevision: null });
+    expect(owner.diagnostics()).toMatchObject({ offCommandsWithoutProof: 1, offCommandsWithProof: 0 });
+  });
   it("ordered external OFF does not confirm an outstanding command without an application anchor", () => {
     const owner = new StateEvidenceOwner();
-    owner.dispatched("synthetic-camera", 1400, false, 50);
+    owner.dispatched("synthetic-camera", 1400, false, 50, "light", {
+      station: "synthetic-station",
+      sessionGeneration: 1,
+    });
     expect(sample(owner, false, ordered(4))).toMatchObject({
       status: "current",
       confirmationEligible: false,
@@ -161,6 +220,46 @@ describe("shadow evidence policy", () => {
     expect(sample(owner, false).reason).toBe("retired_session");
     expect(sample(owner, false, ingress({ runtimeGeneration: "retired-runtime" })).reason).toBe("old_runtime");
     expect(sample(owner, false, ingress({ sessionGeneration: 3 })).status).toBe("uncertain");
+  });
+  it("invalidates all station intents permanently when another property observes replacement", () => {
+    const owner = new StateEvidenceOwner();
+    sample(owner, false, ingress({ receivedAtMonotonicMs: 10 }));
+    owner.dispatched("synthetic-camera", 1400, false, 15, "light");
+    owner.record("synthetic-other", 1, "0", ingress({ sessionGeneration: 2 }));
+    for (let i = 0; i < 256; i++)
+      owner.record("synthetic-other", 1, "0", ingress({ station: `synthetic-station-${i}` }));
+    expect(
+      sample(
+        owner,
+        false,
+        ordered(1, {
+          receiveSequence: 2,
+          receivedAtMonotonicMs: 200,
+          producerAfterDispatch: true,
+        }),
+      ),
+    ).toMatchObject({ confirmationEligible: false, intentGeneration: null });
+    expect(owner.diagnostics().offCommandsWithoutProof).toBe(1);
+  });
+  it("never associates a qualified replacement-runtime read with an old intent", () => {
+    const owner = new StateEvidenceOwner();
+    sample(owner, false, ingress({ receivedAtMonotonicMs: 10 }));
+    owner.dispatched("synthetic-camera", 1400, false, 15, "light");
+    expect(
+      sample(
+        owner,
+        false,
+        ingress({
+          source: "rtc_readback",
+          runtimeGeneration: "retired-runtime",
+          receiveSequence: 2,
+          readGeneration: 1,
+          readIssuedAtMonotonicMs: 20,
+          receivedAtMonotonicMs: 40,
+          freshSampleContract: true,
+        }),
+      ),
+    ).toMatchObject({ reason: "old_runtime", confirmationEligible: false, intentGeneration: null });
   });
   it("detects duplicates, equal-order conflict and counter reset without confirming", () => {
     const owner = new StateEvidenceOwner();
@@ -305,8 +404,117 @@ describe("production shadow wiring preserves legacy outputs", () => {
     expect(eufy.getStateEvidence(camera).light.source).toBe("cloud_poll");
     await eufy.disconnect();
   });
+  it.each(["record", "project", "consumer"])(
+    "finishes every legacy frame handler before failing shadow %s",
+    async (failure) => {
+      const { eufy, client, report } = fixture();
+      const trace: string[] = [];
+      const late = vi.spyOn(client.lateEffects, "observe").mockImplementation(() => {
+        trace.push("lateEffect");
+      });
+      const contrary = vi.spyOn(client.lateContrary, "observe").mockImplementation(() => {
+        trace.push("lateContrary");
+      });
+      eufy.on("deviceState", () => trace.push("deviceState"));
+      eufy.on("propertiesObserved", () => trace.push("propertiesObserved"));
+      const fail = () => {
+        expect(trace).toEqual(["deviceState", "lateEffect", "lateContrary", "propertiesObserved"]);
+        throw new Error("synthetic shadow fault");
+      };
+      if (failure === "consumer") eufy.on("propertyEvidenceChanged", fail);
+      else vi.spyOn(client.evidenceOwner(), failure).mockImplementation(fail);
+      try {
+        expect(() => report(false, 1)).not.toThrow();
+        expect(trace).toEqual(["deviceState", "lateEffect", "lateContrary", "propertiesObserved"]);
+        expect(late).toHaveBeenCalledOnce();
+        expect(contrary).toHaveBeenCalledOnce();
+        expect(eufy.getStateEvidenceDiagnostics().failures).toBeGreaterThan(0);
+      } finally {
+        await eufy.disconnect();
+      }
+    },
+  );
+  it.each(["record", "project", "consumer"])("finishes legacy frame handling before slow shadow %s", async (slow) => {
+    const { eufy, client, report } = fixture();
+    const trace: string[] = [];
+    eufy.on("deviceState", () => trace.push("deviceState"));
+    eufy.on("propertiesObserved", () => trace.push("propertiesObserved"));
+    const delay = () => {
+      expect(trace).toEqual(["deviceState", "propertiesObserved"]);
+      const until = performance.now() + 5;
+      while (performance.now() < until) {}
+    };
+    if (slow === "consumer") eufy.on("propertyEvidenceChanged", delay);
+    else {
+      const owner = client.evidenceOwner();
+      const original = owner[slow].bind(owner);
+      vi.spyOn(owner, slow).mockImplementation((...args: unknown[]) => {
+        delay();
+        return original(...args);
+      });
+    }
+    try {
+      report(false, 1);
+    } finally {
+      await eufy.disconnect();
+    }
+  });
+  it("preserves exceptions from legacy consumers without classifying them as shadow failures", async () => {
+    const { eufy, report } = fixture();
+    const fault = new Error("synthetic legacy fault");
+    eufy.on("deviceState", () => {
+      throw fault;
+    });
+    try {
+      expect(() => report(false, 1)).toThrow(fault);
+      expect(eufy.getStateEvidenceDiagnostics().failures).toBe(0);
+    } finally {
+      await eufy.disconnect();
+    }
+  });
+  it("contains dispatch and cloud capture failures without changing legacy command callbacks", async () => {
+    const { eufy, client, device } = fixture();
+    const owner = client.evidenceOwner();
+    const fault = () => {
+      throw new Error("synthetic shadow fault");
+    };
+    vi.spyOn(owner, "dispatched").mockImplementation(fault);
+    vi.spyOn(owner, "captureCloud").mockImplementation(fault);
+    const late = vi.spyOn(client.lateEffects, "sent");
+    vi.spyOn(client.rtc, "dispatchCommand").mockImplementation(async (_sn, _cmd, opts: any) => {
+      opts.onSent(1_800_000_000_000);
+    });
+    try {
+      await expect(device.light!()!.off()).resolves.toBeUndefined();
+      expect(late).toHaveBeenCalledWith(expect.anything(), 1_800_000_000_000);
+      expect(() => client.registry.onCloudEvidence(camera, { 1400: "0" }, {}, 100_000)).not.toThrow();
+      expect(eufy.getStateEvidenceDiagnostics().failures).toBe(2);
+    } finally {
+      await eufy.disconnect();
+    }
+  });
+  it("uses a monotonic dispatch fence while preserving the wall-clock transport callback", async () => {
+    const { eufy, client, device, report } = fixture();
+    vi.spyOn(performance, "now").mockReturnValue(50);
+    const wall = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+    vi.spyOn(client.rtc, "dispatchCommand").mockImplementation(async (_sn, _cmd, opts: any) => {
+      opts.onSent(Date.now());
+    });
+    try {
+      await device.light!()!.off();
+      wall.mockReturnValue(1_700_000_000_000);
+      report(false, 1, true);
+      expect(eufy.getStateEvidence(camera).light).toMatchObject({
+        readIssuedAfterDispatch: true,
+        confirmationEligible: false,
+      });
+    } finally {
+      await eufy.disconnect();
+    }
+  });
   it("records actual dispatch and temporal-only OFF but adds no reads, retries or proof", async () => {
     const { eufy, client, device, report } = fixture();
+    vi.spyOn(performance, "now").mockReturnValue(50);
     const refresh = vi.spyOn(client.rtc, "refreshInformation");
     const send = vi.spyOn(client.rtc, "dispatchCommand").mockImplementation(async (_sn, _cmd, opts: any) => {
       opts.onSent(50);

@@ -311,6 +311,7 @@ export class DeviceRegistry {
       this.onError(e);
     }
 
+    const shadow: (() => void)[] = [];
     const seen = new Map<string, EufyDevice>();
     const bindings = new Map<string, string>();
     const conflicts = new Set<string>();
@@ -339,7 +340,8 @@ export class DeviceRegistry {
         const params: Record<number, string> = {};
         const paramUpdatedAt: Record<number, number> = {};
         mergeParams(raw.params, params, paramUpdatedAt);
-        this.onCloudEvidence?.(raw.device_sn, params, paramUpdatedAt, Date.now());
+        const receivedAtMs = Date.now();
+        shadow.push(() => this.onCloudEvidence?.(raw.device_sn, params, paramUpdatedAt, receivedAtMs));
         const codec = resolveDevice({
           deviceType: raw.device_type,
           model: raw.device_model,
@@ -379,6 +381,7 @@ export class DeviceRegistry {
     for (const device of this.devices)
       if (bindings.has(device.sn) && Object.keys(device.params ?? {}).length)
         this.onCloudParams?.(device.sn, device.params!);
+    for (const capture of shadow) capture();
     return this.devices;
   }
 
@@ -510,8 +513,9 @@ export class DeviceRegistry {
         const received: Record<number, string> = {};
         mergeParams(live.params, received, {});
         if (Object.keys(received).length) {
-          this.onCloudEvidence?.(sn, received, paramUpdatedAt, Date.now());
+          const receivedAtMs = Date.now();
           this.onCloudParams?.(sn, received);
+          this.onCloudEvidence?.(sn, received, paramUpdatedAt, receivedAtMs);
         }
       } catch (error) {
         if (error instanceof SessionExpiredError) throw error;

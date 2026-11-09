@@ -563,6 +563,13 @@ export class RtcCommandRouter {
     return this.commandEvidence.lookupTarget(sn);
   }
 
+  /** Current station ownership only; lookup creates no session or command work. */
+  getSessionScope(sn: string): { station: string; sessionGeneration: number } | undefined {
+    const station = this.deps.findDevice(sn)?.stationSn || sn;
+    const session = this.sessions.get(station);
+    return session ? { station, sessionGeneration: session.generation } : undefined;
+  }
+
   /** A T9000 station itself. */
   static claimsDevice(dev: EufyDevice): boolean {
     return /^T9000/i.test(dev.model ?? "") && (!dev.stationSn || dev.stationSn === dev.sn);
