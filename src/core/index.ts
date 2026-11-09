@@ -8,3 +8,5 @@ export * from "./store.js";
 export * from "./solix-types.js";
 export * from "./util.js";
 export * from "./lz4-block.js";
+
+export * from "./state-evidence.js";

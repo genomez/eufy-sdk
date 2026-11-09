@@ -140,7 +140,7 @@ async function heldCloudCamera(
   await client.registry.pollChanges();
   const dev = await eufy.getDevice(sn);
   const seen: unknown[] = [];
-  eufy.on("propertyChanged", (event) => seen.push(event));
+  eufy.on("propertyChanged", ({ evidence: _evidence, ...event }) => seen.push(event));
   const poll = async (next: Record<number, string>) => {
     cloud.params = next;
     await client.pollOnce();
@@ -213,7 +213,7 @@ describe("cloud-param poll loop", () => {
       reported: [],
     });
     const seen: any[] = [];
-    eufy.on("propertyChanged", (e) => seen.push(e));
+    eufy.on("propertyChanged", ({ evidence: _evidence, ...e }) => seen.push(e));
 
     await (eufy as any).pollOnce();
 
@@ -303,7 +303,7 @@ describe("cloud-param poll loop", () => {
     (eufy as any).applyRealtimeState("T8000P0000000000", { 1550: "1" });
     expect(dev.getProperty("contact")?.value).toBe(true);
     const seen: any[] = [];
-    eufy.on("propertyChanged", (e) => seen.push(e));
+    eufy.on("propertyChanged", ({ evidence: _evidence, ...e }) => seen.push(e));
     // The cloud list still says closed, and an unrelated param on the same device moved.
     vi.spyOn((eufy as any).registry, "pollChanges").mockResolvedValue({
       params: [
@@ -356,7 +356,7 @@ describe("cloud-param poll loop", () => {
     const dev = liveCamera(eufy);
     const pollChanges = vi.spyOn((eufy as any).registry, "pollChanges");
     const seen: any[] = [];
-    eufy.on("propertyChanged", (e) => seen.push(e));
+    eufy.on("propertyChanged", ({ evidence: _evidence, ...e }) => seen.push(e));
 
     pollChanges.mockResolvedValue({ params: [paramChange(1035, "0", "1")], added: [], removed: [], reported: [] });
     await (eufy as any).pollOnce();
@@ -393,7 +393,7 @@ describe("cloud-param poll loop", () => {
       reported: [],
     });
     const seen: any[] = [];
-    eufy.on("propertyChanged", (e) => seen.push(e));
+    eufy.on("propertyChanged", ({ evidence: _evidence, ...e }) => seen.push(e));
 
     await (eufy as any).pollOnce();
 
@@ -417,7 +417,7 @@ describe("cloud-param poll loop", () => {
       reported: [],
     });
     const seen: any[] = [];
-    eufy.on("event", (e) => seen.push(e));
+    eufy.on("event", ({ evidence: _evidence, ...e }) => seen.push(e));
 
     await (eufy as any).pollOnce();
 
@@ -462,7 +462,7 @@ describe("cloud-param poll loop", () => {
       reported: [],
     });
     const seen: any[] = [];
-    eufy.on("propertyChanged", (e) => seen.push(e));
+    eufy.on("propertyChanged", ({ evidence: _evidence, ...e }) => seen.push(e));
 
     await (eufy as any).pollOnce();
 
@@ -507,7 +507,7 @@ describe("cloud-param poll loop", () => {
       reported: [],
     });
     const seen: unknown[] = [];
-    eufy.on("event", (e) => seen.push(e));
+    eufy.on("event", ({ evidence: _evidence, ...e }) => seen.push(e));
 
     await (eufy as any).pollOnce();
 
@@ -1006,7 +1006,7 @@ describe("generation-owned RTC state refresh", () => {
     const dispatch = vi.spyOn((eufy as any).rtc, "dispatchCommand");
     const login = vi.spyOn(eufy, "login");
     const seen: unknown[] = [];
-    eufy.on("propertyChanged", (event) => seen.push(event));
+    eufy.on("propertyChanged", ({ evidence: _evidence, ...event }) => seen.push(event));
     await (eufy as any).ensureRealtime();
     refresh.mockImplementation(async () => {
       (eufy as any).applyRealtimeState(child, { 1400: "0" });

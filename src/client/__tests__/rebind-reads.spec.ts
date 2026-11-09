@@ -258,7 +258,7 @@ async function heldCamera(params: Record<number, string> = {}, model = "T8114") 
   const dev = await eufy.getDevice(CAMERA);
   const seen: { deviceSn: string; property: string; value?: unknown }[] = [];
   const readInAnnouncement: unknown[] = [];
-  eufy.on("propertyChanged", (event) => {
+  eufy.on("propertyChanged", ({ evidence: _evidence, ...event }) => {
     seen.push(event);
     if (event.property === "wifiRssi") readInAnnouncement.push(dev.camera?.()?.wifiRssi);
   });

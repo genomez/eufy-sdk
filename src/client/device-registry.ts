@@ -166,6 +166,13 @@ export interface DeviceRegistryDeps {
   accountIdentity?: () => string | undefined;
   /** Synchronous notification after a refreshed roster and its topology caches are installed. */
   onRoster?: () => void;
+  /** Passive cloud ingress facts, before cached model construction or roster callbacks. */
+  onCloudEvidence?: (
+    device: string,
+    params: Readonly<Record<number, string>>,
+    times: Readonly<Record<number, number>>,
+    receivedAtMs: number,
+  ) => void;
   /** Actual cloud parameter receipt, independent of vendor freshness timestamps. */
   onCloudParams?: (device: string, params: Readonly<Record<number, string>>) => void;
   /** Surface a non-fatal fetch error (a house/body query that failed) without aborting the merge. */
@@ -192,6 +199,7 @@ export class DeviceRegistry {
   private readonly onError: (e: unknown) => void;
   private readonly logger: Logger;
   private readonly onRoster?: () => void;
+  private readonly onCloudEvidence?: DeviceRegistryDeps["onCloudEvidence"];
   private readonly onCloudParams?: DeviceRegistryDeps["onCloudParams"];
   private devices: EufyDevice[] = [];
   /** Conflicting duplicate topology cannot be made safe by the ordinary last-row merge. */
@@ -253,6 +261,7 @@ export class DeviceRegistry {
     this.logger = deps.logger ?? noopLogger;
     this.onRoster = deps.onRoster;
     this.onCloudParams = deps.onCloudParams;
+    this.onCloudEvidence = deps.onCloudEvidence;
   }
 
   /** The current device cache (last {@link getDevices} result). */
@@ -330,6 +339,7 @@ export class DeviceRegistry {
         const params: Record<number, string> = {};
         const paramUpdatedAt: Record<number, number> = {};
         mergeParams(raw.params, params, paramUpdatedAt);
+        this.onCloudEvidence?.(raw.device_sn, params, paramUpdatedAt, Date.now());
         const codec = resolveDevice({
           deviceType: raw.device_type,
           model: raw.device_model,
@@ -499,7 +509,10 @@ export class DeviceRegistry {
         mergeParams(live.params, params, paramUpdatedAt);
         const received: Record<number, string> = {};
         mergeParams(live.params, received, {});
-        if (Object.keys(received).length) this.onCloudParams?.(sn, received);
+        if (Object.keys(received).length) {
+          this.onCloudEvidence?.(sn, received, paramUpdatedAt, Date.now());
+          this.onCloudParams?.(sn, received);
+        }
       } catch (error) {
         if (error instanceof SessionExpiredError) throw error;
         if (error instanceof MegaApiError && error.code === OWNER_ONLY_CODE) {

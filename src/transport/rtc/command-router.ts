@@ -209,7 +209,13 @@ export interface RtcCommandRouterDeps {
   onFrame?: (
     stationSn: string,
     frame: PortalResponse,
-    identity: { sessionGeneration: number; sequence: number; receivedAtMonotonicMs: number },
+    identity: {
+      sessionGeneration: number;
+      sequence: number;
+      receivedAtMonotonicMs: number;
+      readGeneration?: number;
+      readIssuedAtMonotonicMs?: number;
+    },
   ) => void;
   /** Retirement of the current command session cancels client-owned observations. */
   onSessionClosed?: (stationSn: string) => void;
@@ -386,6 +392,10 @@ interface RecordingAttemptBudget {
 export class RtcCommandRouter {
   private recordingPacing = recordingPacing({});
   private readonly informationOwners = new WeakMap<InformationRefreshResult, StationSession>();
+  private readonly shadowReads = new WeakMap<
+    StationSession,
+    { readGeneration: number; readIssuedAtMonotonicMs: number }
+  >();
   private readonly informationReceiptTimes = new WeakMap<object, number>();
   private readonly wireReceiptTimes = new WeakMap<Buffer, number>();
   private readonly recordingReads = new Map<string, AbortController>();
@@ -2594,6 +2604,7 @@ export class RtcCommandRouter {
           st.lastInformationRead = { startedAtMs, finishedAtMs };
           if (this.playbackMarker && purpose === "current") this.playbackHealth.ordinaryReads++;
         }
+        if (this.shadowReads.get(st)?.readGeneration === attempt) this.shadowReads.delete(st);
         clearTimeout(timer);
         st.session.off("commandData", onData);
         st.session.off("close", onClose);
@@ -2675,6 +2686,7 @@ export class RtcCommandRouter {
         });
         sentAtMs = Date.now();
         sentAtMonotonicMs = performance.now();
+        this.shadowReads.set(st, { readGeneration: attempt, readIssuedAtMonotonicMs: sentAtMonotonicMs });
         attempted = true;
         if (transmission) transmission.attempted = true;
         if (!st.session.sendCommand(packet)) finish(new Error("RTC information send failed"), "send_failed");
@@ -3064,7 +3076,11 @@ export class RtcCommandRouter {
         this.eventTableObservers.get(session)?.(bytes.length, frame);
         if (this.isEventTableReply(created, frame)) return;
         this.informationReceiptTimes.set(frame, this.wireReceiptTimes.get(bytes)!);
-        this.deps.onFrame?.(sn, frame, { sessionGeneration: created.generation, ...this.receivedIdentity(bytes) });
+        this.deps.onFrame?.(sn, frame, {
+          sessionGeneration: created.generation,
+          ...this.receivedIdentity(bytes),
+          ...this.shadowReads.get(created),
+        });
       }
     };
     const onConnected = () => {

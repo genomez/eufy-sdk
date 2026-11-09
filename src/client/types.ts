@@ -1,3 +1,4 @@
+import type { StateEvidence } from "../core/state-evidence.js";
 /** Modified for genomez S1 experimental source preview, 2026-10-17. */
 /**
  * Public type surface of the {@link EufyMega} facade — options + the typed event map.
@@ -327,7 +328,7 @@ export interface DeviceState {
  */
 export type AnyDeviceEvent = {
   [K in keyof DeviceEventMap]: DeviceEventMap[K] & { eventName: K };
-}[keyof DeviceEventMap];
+}[keyof DeviceEventMap] & { evidence?: StateEvidence };
 
 /**
  * The complete typed event surface of {@link EufyMega} — event name → listener-argument tuple.
@@ -407,6 +408,8 @@ export type EufyMegaEventMap = {
    * a session actually lives.
    */
   deviceState: [state: DeviceState];
+  /** Shadow quality changes, including equal-value observations. */
+  propertyEvidenceChanged: [event: { deviceSn: string; property: string; evidence: StateEvidence }];
   /** Qualified realtime parameter observations, including unchanged values; receipt time is not device time. */
   propertiesObserved: [
     observation: {
@@ -414,6 +417,7 @@ export type EufyMegaEventMap = {
       source: "rtc";
       observedAtMs: number;
       properties: Record<string, boolean | number | string>;
+      evidence?: Record<string, StateEvidence>;
     },
   ];
   /**

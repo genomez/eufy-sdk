@@ -26,7 +26,7 @@ function withLiveDevice(sn: string, record: Parameters<typeof Device.fromRecord>
   );
   vi.spyOn((eufy as never as { registry: { applyRealtimeParams: () => void } }).registry, "applyRealtimeParams");
   const seen: unknown[] = [];
-  eufy.on("propertyChanged", (e) => seen.push(e));
+  eufy.on("propertyChanged", ({ evidence: _evidence, ...e }) => seen.push(e));
   const report = (params: Record<number, string>) =>
     (eufy as never as { applyRealtimeState: (s: string, p: Record<number, string>) => void }).applyRealtimeState(
       sn,

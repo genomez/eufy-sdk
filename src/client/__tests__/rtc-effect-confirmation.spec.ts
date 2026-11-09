@@ -103,7 +103,7 @@ function fixture(initial = "1") {
   const receipts: unknown[] = [];
   const changes: unknown[] = [];
   eufy.on("propertiesObserved", (event) => receipts.push(event));
-  eufy.on("propertyChanged", (event) => changes.push(event));
+  eufy.on("propertyChanged", ({ evidence: _evidence, ...event }) => changes.push(event));
   return { eufy, client, session, device, receipts, changes };
 }
 

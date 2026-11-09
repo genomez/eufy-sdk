@@ -37,7 +37,7 @@ function withFreshnessPolicy() {
   vi.spyOn(eufy as any, "awaitFirstRealtimeState").mockResolvedValue(undefined);
   vi.spyOn(registry, "applyRealtimeParams").mockImplementation(() => {});
   const seen: any[] = [];
-  eufy.on("propertyChanged", (e) => seen.push(e));
+  eufy.on("propertyChanged", ({ evidence: _evidence, ...e }) => seen.push(e));
   return { eufy, record, seen };
 }
 

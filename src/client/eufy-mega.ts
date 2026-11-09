@@ -1,3 +1,5 @@
+import { StateEvidenceOwner, type EvidenceIngress } from "./state-evidence.js";
+import type { StateEvidence } from "../core/state-evidence.js";
 /** Modified for genomez S1 experimental source preview, 2026-10-17. */
 /**
  * eufy-sdk — one client for every eufy device class.
@@ -418,6 +420,66 @@ export class EufyMega extends EventEmitter {
   private readonly boundParamIds = new Map<string, ReadonlySet<number>>();
   /** Cloud presence and report/write-observation precedence are evidence IDs, never retained raw values. */
   private readonly cloudParamIds = new WeakMap<Device, ReadonlySet<number>>();
+  private shadowEvidence = new StateEvidenceOwner();
+  private shadowEvidenceScope = "";
+
+  /** Shadow provenance is scoped separately from inventory revisions and contains no account identity. */
+  private evidenceOwner(): StateEvidenceOwner {
+    const scope = JSON.stringify([this.realtimeEpoch, this.mega.auth?.userId ?? null]);
+    if (scope !== this.shadowEvidenceScope) {
+      this.shadowEvidenceScope = scope;
+      this.shadowEvidence = new StateEvidenceOwner();
+    }
+    return this.shadowEvidence;
+  }
+
+  /** Detached cached evidence; never reads the network or refreshes a model. */
+  getStateEvidence(sn: string): Record<string, StateEvidence> {
+    const dev = this.liveDevices.get(sn)?.deref();
+    return dev ? this.projectStateEvidence(dev) : {};
+  }
+
+  /** Opaque current runtime for evidence scope validation. */
+  getStateEvidenceScope(): { runtimeGeneration: string } {
+    return { runtimeGeneration: this.evidenceOwner().runtimeGeneration };
+  }
+
+  /** Privacy-safe bounded shadow counters and decisions for offline comparison. */
+  getStateEvidenceDiagnostics() {
+    return this.evidenceOwner().diagnostics();
+  }
+
+  private projectStateEvidence(device: Device, params?: RawParams): Record<string, StateEvidence> {
+    const owner = this.evidenceOwner();
+    return Object.fromEntries(
+      (device.observedPropertyParameters?.(params) ?? []).flatMap(({ property, paramType, value }) => {
+        const evidence = owner.project(device.sn, paramType, property, value);
+        return evidence ? [[property, evidence]] : [];
+      }),
+    );
+  }
+
+  private recordStateEvidence(sn: string, params: RawParams, ingress: EvidenceIngress, onlyMissing = false): void {
+    if (typeof sn !== "string" || !sn) return;
+    const owner = this.evidenceOwner();
+    for (const [id, value] of Object.entries(params))
+      if (!onlyMissing || !owner.matches(sn, Number(id), String(value)))
+        owner.record(
+          sn,
+          Number(id),
+          String(value),
+          ["legacy_unknown", "snapshot", "cloud_poll"].includes(ingress.source)
+            ? (owner.cachedIngress(sn, Number(id), String(value)) ?? ingress)
+            : ingress,
+        );
+  }
+
+  private shadowDispatched(sn: string, cmd: Command, sentAt: number): void {
+    const observation = commandObservation(cmd);
+    if (observation)
+      this.evidenceOwner().dispatched(sn, observation.param, observation.expected, sentAt, observation.property);
+  }
+
   private readonly realtimeParamIds = new WeakMap<Device, Map<number, number>>();
   /** Scoped report revisions survive model replacement without retaining parameter values. */
   private readonly deviceParamRevisions = new Map<string, Map<number, number>>();
@@ -587,6 +649,8 @@ export class EufyMega extends EventEmitter {
         this.cameraHealthIngress?.roster(this.registry.list());
         this.reconcileFirmwareVersions();
       },
+      onCloudEvidence: (sn, params, times, receivedAtMs) =>
+        this.evidenceOwner().captureCloud(sn, params, times, receivedAtMs),
       onCloudParams: (sn, params) => this.cameraHealthIngress?.params(sn, params, "cloud_params"),
       onError: (e) => this.reportError(e, "device_registry"),
       logger: opts.logger,
@@ -897,8 +961,14 @@ export class EufyMega extends EventEmitter {
     params: Record<number, string>,
     rssiSource: "hub_report" | "realtime_overlay" = "realtime_overlay",
     receivedAtMs?: number,
+    evidenceIngress?: EvidenceIngress,
   ): void {
     if (!sn) return;
+    this.recordStateEvidence(
+      sn,
+      params,
+      evidenceIngress ?? { source: "legacy_unknown", receivedAtMs: receivedAtMs ?? Date.now() },
+    );
     this.cameraHealthIngress.recordRssiSuppression(sn, params, rssiSource);
     const known = this.boundParamIds.get(sn);
     const reported = Object.keys(params).map(Number);
@@ -914,7 +984,7 @@ export class EufyMega extends EventEmitter {
       const realtime = this.realtimeParamIds.get(device) ?? new Map<number, number>();
       for (const id of reported) realtime.set(id, revision);
       this.realtimeParamIds.set(device, realtime);
-      this.applyAndAnnounce(device, params);
+      this.applyAndAnnounce(device, params, "recorded");
     }
     this.emit("deviceState", this.deviceState(sn));
     if (widens) void this.rebindReads(sn);
@@ -938,7 +1008,16 @@ export class EufyMega extends EventEmitter {
     if (rtcReportParameters(stationSn, frame, this.registry).size) this.scheduleReportRefresh(stationSn);
     for (const [sn, params] of rtcStateParameters(stationSn, frame, this.registry)) {
       this.cameraHealthIngress.params(sn, params, "hub_report");
-      this.applyRealtimeState(sn, params, "hub_report", this.rtc.informationFrameReceivedAtMs(frame));
+      this.applyRealtimeState(sn, params, "hub_report", this.rtc.informationFrameReceivedAtMs(frame), {
+        source: identity?.readGeneration === undefined ? "rtc_push" : "rtc_readback",
+        receivedAtMs: this.rtc.informationFrameReceivedAtMs(frame) ?? observedAtMs,
+        station: stationSn,
+        sessionGeneration: identity?.sessionGeneration,
+        receiveSequence: identity?.sequence,
+        receivedAtMonotonicMs: identity?.receivedAtMonotonicMs,
+        readGeneration: identity?.readGeneration,
+        readIssuedAtMonotonicMs: identity?.readIssuedAtMonotonicMs,
+      });
       this.lateEffects.observe(sn, params);
       if (identity) this.lateContrary.observe(sn, params, identity);
       const device = this.liveDevices.get(sn)?.deref();
@@ -956,7 +1035,19 @@ export class EufyMega extends EventEmitter {
             observedAtMs,
             properties: Object.keys(properties).length,
           });
-        this.emit("propertiesObserved", { deviceSn: sn, source: "rtc", observedAtMs, properties });
+        this.emit("propertiesObserved", {
+          deviceSn: sn,
+          source: "rtc",
+          observedAtMs,
+          properties,
+          evidence: device
+            ? Object.fromEntries(
+                Object.entries(this.projectStateEvidence(device, params)).filter(([property]) =>
+                  Object.hasOwn(properties, property),
+                ),
+              )
+            : {},
+        });
       }
     }
     const inspected = inspectRtcPushSignal(stationSn, frame, this.registry);
@@ -1609,7 +1700,7 @@ export class EufyMega extends EventEmitter {
         const revisions = this.realtimeParamIds.get(device) ?? new Map<number, number>();
         revisions.set(refresh.param, revision);
         this.realtimeParamIds.set(device, revisions);
-        this.applyAndAnnounce(device, { [refresh.param]: rawValue });
+        this.applyAndAnnounce(device, { [refresh.param]: rawValue }, "cached");
         return this.matchesObservation(device.getProperty(refresh.property)?.value, refresh, before);
       };
       if (refresh.expected !== undefined && settled()) return true;
@@ -2224,6 +2315,7 @@ export class EufyMega extends EventEmitter {
                         : {}),
                     }),
                 onSent: (sentAt: number) => {
+                  this.shadowDispatched(sn, cmd, sentAt);
                   if (invocation.health) invocation.health.sent = true;
                   if (intent) this.lateEffects.sent(intent, sentAt);
                 },
@@ -2268,9 +2360,10 @@ export class EufyMega extends EventEmitter {
                     },
                   }
                 : {}),
-              ...(invocation?.health || intent
+              ...(commandObservation(cmd) || invocation?.health || intent
                 ? {
                     onSent: (sentAt: number) => {
+                      this.shadowDispatched(sn, cmd, sentAt);
                       if (invocation?.health) invocation.health.sent = true;
                       if (intent) this.lateEffects.sent(intent, sentAt);
                     },
@@ -2581,6 +2674,13 @@ export class EufyMega extends EventEmitter {
       });
     }
     const held = new WeakRef(dev);
+    this.recordStateEvidence(
+      sn,
+      { ...rec.params, ...reconciled.dpParams },
+      { source: "snapshot", receivedAtMs: null },
+      true,
+    );
+    this.projectStateEvidence(dev, { ...rec.params, ...reconciled.dpParams });
     this.liveDevices.set(sn, held);
     this.stationContextDevices.add(held);
     return dev;
@@ -3273,11 +3373,12 @@ export class EufyMega extends EventEmitter {
       byDevice.set(change.deviceSn, params);
     }
     for (const [sn, params] of byDevice) {
+      this.recordStateEvidence(sn, params, { source: "cloud_poll", receivedAtMs: null });
       this.registry.retireRealtimeParams(sn, Object.keys(params).map(Number));
       const device = this.liveDeviceToAnnounce(sn);
       if (device) {
         for (const id of Object.keys(params).map(Number)) this.realtimeParamIds.get(device)?.delete(id);
-        this.applyAndAnnounce(device, params);
+        this.applyAndAnnounce(device, params, "recorded");
       }
     }
   }
@@ -3340,9 +3441,19 @@ export class EufyMega extends EventEmitter {
    * external change is the one lost — a wrong state held indefinitely, against one redundant idempotent
    * re-read.
    */
-  private applyAndAnnounce(device: Device, params: RawParams): void {
-    for (const change of device.announcements(device.applyParams(params)))
-      this.emitSemantic("propertyChanged", { deviceSn: device.sn, ...change });
+  private applyAndAnnounce(device: Device, params: RawParams, evidenceMode?: "recorded" | "cached"): void {
+    if (evidenceMode !== "recorded")
+      this.recordStateEvidence(device.sn, params, { source: "legacy_unknown", receivedAtMs: null }, true);
+    const changed = device.applyParams(params);
+    const evidence = this.projectStateEvidence(device, params);
+    for (const change of device.announcements(changed))
+      this.emitSemantic("propertyChanged", {
+        deviceSn: device.sn,
+        ...change,
+        ...(evidence[change.property] ? { evidence: evidence[change.property] } : {}),
+      });
+    for (const [property, record] of Object.entries(evidence))
+      this.emit("propertyEvidenceChanged", { deviceSn: device.sn, property, evidence: record });
   }
 
   /**

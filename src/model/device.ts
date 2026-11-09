@@ -989,6 +989,21 @@ export class Device {
     );
   }
 
+  /** Pure typed projection with backing parameter identity, without refresh side effects. */
+  observedPropertyParameters(params?: RawParams): (PropertyChange & { paramType: number })[] {
+    return [...this.state.entries()].flatMap(([property, stored]) => {
+      if (params && !Object.hasOwn(params, stored.paramType)) return [];
+      const scalar = this.specByName.has(property) ? this.getPropertyValue(property) : stored.value;
+      const value =
+        typeof scalar === "boolean" ||
+        typeof scalar === "string" ||
+        (typeof scalar === "number" && Number.isFinite(scalar))
+          ? scalar
+          : undefined;
+      return [{ property, paramType: stored.paramType, ...(value === undefined ? {} : { value }) }];
+    });
+  }
+
   /**
    * Low-level property read by name — the untyped escape hatch. The typed fluent capability getters
    * (`dev.battery()?.level`, `dev.contact()?.open`) answer the value already narrowed to its declared

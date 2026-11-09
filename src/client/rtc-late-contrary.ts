@@ -5,6 +5,8 @@ import type { LateEffectRead } from "./rtc-late-effect.js";
 
 /** Receive identity shared by the report and read-completion paths for one RTC message. */
 export interface RtcReportIdentity {
+  readGeneration?: number;
+  readIssuedAtMonotonicMs?: number;
   sessionGeneration: number;
   sequence: number;
   receivedAtMonotonicMs: number;

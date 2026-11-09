@@ -259,7 +259,7 @@ describe("wrapped state through the real facade", () => {
     const changes: unknown[] = [];
     const observations: unknown[] = [];
     const receipts: unknown[] = [];
-    eufy.on("propertyChanged", (event) => changes.push(event));
+    eufy.on("propertyChanged", ({ evidence: _evidence, ...event }) => changes.push(event));
     eufy.on("deviceState", (event) => observations.push(event));
     eufy.on("propertiesObserved", (event) => receipts.push(event));
     try {

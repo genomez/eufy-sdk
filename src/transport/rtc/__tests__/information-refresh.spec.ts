@@ -89,6 +89,39 @@ async function prepared(overrides: Partial<RtcCommandRouterDeps> = {}) {
 }
 
 describe("RTC information refresh", () => {
+  it("preserves original receive identity and marks only the active read association", async () => {
+    const seen: Parameters<NonNullable<RtcCommandRouterDeps["onFrame"]>>[] = [];
+    const { router, session } = await prepared({
+      onFrame: (...args) => {
+        seen.push(args);
+      },
+    });
+    try {
+      const work = router.refreshInformation(SN);
+      await pause();
+      session.ack(session.sent[0]!);
+      session.emit("commandData", info(), 3);
+      const result = await work;
+      const observed = seen.find(([, frame]) => frame.commandId === 1103 && frame.isResponse === 0)!;
+      expect(observed[2]).toMatchObject({
+        sessionGeneration: result.sessionGeneration,
+        sequence: result.receivedSequence,
+        readGeneration: expect.any(Number),
+        readIssuedAtMonotonicMs: result.sentAtMonotonicMs,
+      });
+      expect(router.informationFrameReceivedAtMs(observed[1])).toBe(result.informationReceivedAtMs);
+      expect(result.notificationCorrelation).toBe("temporal-only");
+      session.emit("commandData", info(), 3);
+      expect(seen.at(-1)![2].readGeneration).toBeUndefined();
+      const before = seen.length;
+      session.close();
+      session.emit("commandData", info(), 3);
+      expect(seen).toHaveLength(before);
+    } finally {
+      router.close();
+    }
+  });
+
   it("playback uncertainty preserves failed-read taint, last-lease drop and normal re-establishment", async () => {
     const { router, session, sessions } = await prepared({ ackTimeoutMs: 10 });
     const held = await router.sessionFor(SN);

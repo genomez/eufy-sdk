@@ -33,7 +33,7 @@ function withDroppedDevice() {
   const eufy = new EufyMega({ email: "t@example.com", password: "x", logger: logger as never });
   vi.spyOn((eufy as any).registry, "applyRealtimeParams").mockImplementation(() => {});
   const announced: unknown[] = [];
-  eufy.on("propertyChanged", (e) => announced.push(e));
+  eufy.on("propertyChanged", ({ evidence: _evidence, ...e }) => announced.push(e));
   /** What `liveDevices` holds once the collector has taken the device the caller let go. */
   const collected = () => (eufy as any).liveDevices.set(SN, { deref: () => undefined });
   const poll = () =>

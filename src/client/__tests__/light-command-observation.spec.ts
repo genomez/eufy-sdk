@@ -106,7 +106,7 @@ describe("light command observation", () => {
   it("announces generic state and preserves the realtime value in a newly resolved device", async () => {
     const { eufy, client, device, report } = fixture(false);
     const changes: unknown[] = [];
-    eufy.on("propertyChanged", (event) => changes.push(event));
+    eufy.on("propertyChanged", ({ evidence: _evidence, ...event }) => changes.push(event));
     vi.spyOn(client.mega, "getDeviceParamList").mockResolvedValue({ params: [{ param_type: 1400, param_value: "0" }] });
     report(1);
     expect(changes).toEqual([{ deviceSn: cameraSn, property: "light", value: true }]);
@@ -142,7 +142,7 @@ describe("qualified property observations", () => {
     const observed: unknown[] = [];
     const changed: unknown[] = [];
     eufy.on("propertiesObserved", (e) => observed.push(e));
-    eufy.on("propertyChanged", (e) => changed.push(e));
+    eufy.on("propertyChanged", ({ evidence: _evidence, ...e }) => changed.push(e));
     report(0);
     report(0);
     expect(observed).toHaveLength(2);

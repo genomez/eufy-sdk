@@ -1,3 +1,4 @@
+import type { StateEvidence } from "../core/state-evidence.js";
 /** Modified for genomez S1 experimental source preview, 2026-10-14. */
 /**
  * Device model — shared contract.
@@ -401,6 +402,8 @@ export interface CachedParameterShapeEvidence {
  * `{ accessor, property }` pair, joined once at setup.
  */
 export interface PropertyChange {
+  /** Detached shadow evidence; legacy value semantics remain unchanged. */
+  evidence?: StateEvidence;
   /** The property whose value moved — a key of this device's own schema. */
   property: string;
   /**
