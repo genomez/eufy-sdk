@@ -179,6 +179,44 @@ describe("shadow evidence policy", () => {
     ).toMatchObject({ status: "uncertain", confirmationEligible: false, offProof: { eligible: false } });
     expect(owner.diagnostics().offCommandsWithProof).toBe(0);
   });
+  it.each([20, undefined])(
+    "keeps a contrary observation with timestamp %s from being bypassed by a read",
+    (contraryAt) => {
+      const owner = new StateEvidenceOwner();
+      vi.spyOn(performance, "now").mockReturnValue(30);
+      sample(owner, false, ingress({ receivedAtMonotonicMs: 10 }));
+      owner.dispatched("synthetic-camera", 1400, false, 15, "light");
+      sample(owner, true, ingress({ receiveSequence: 2, receivedAtMonotonicMs: contraryAt }));
+      expect(
+        sample(
+          owner,
+          false,
+          ingress({
+            source: "rtc_readback",
+            readGeneration: 1,
+            readIssuedAtMonotonicMs: 20,
+            receivedAtMonotonicMs: 40,
+            receiveSequence: 3,
+            freshSampleContract: true,
+          }),
+        ),
+      ).toMatchObject({ status: "uncertain", confirmationEligible: false });
+      expect(
+        sample(
+          owner,
+          false,
+          ingress({
+            source: "rtc_readback",
+            readGeneration: 2,
+            readIssuedAtMonotonicMs: 50,
+            receivedAtMonotonicMs: 60,
+            receiveSequence: 4,
+            freshSampleContract: true,
+          }),
+        ),
+      ).toMatchObject({ status: "current", confirmationEligible: true });
+    },
+  );
   it("cannot confirm a dispatched intent from a replacement station session", () => {
     const owner = new StateEvidenceOwner();
     sample(owner, false, ingress({ receivedAtMonotonicMs: 10 }));

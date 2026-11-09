@@ -210,7 +210,7 @@ export class StateEvidenceOwner {
       input.readIssuedAtMonotonicMs !== undefined &&
       input.receivedAtMonotonicMs !== undefined &&
       input.receivedAtMonotonicMs >= input.readIssuedAtMonotonicMs &&
-      (row.observationFenceMs === undefined || input.readIssuedAtMonotonicMs >= row.observationFenceMs) &&
+      (row.observationFenceMs === undefined || input.readIssuedAtMonotonicMs > row.observationFenceMs) &&
       (!ownedIntent || (sameIntentScope && readAfter));
     const e: StateEvidence = {
       version: 1,
@@ -302,8 +302,7 @@ export class StateEvidenceOwner {
     const sample = { value, evidence: e, ordered, receivedAtMonotonicMs: input.receivedAtMonotonicMs };
     if (e.status !== "stale" && input.source !== "command_echo") {
       if (input.station && session !== null) row.station = input.station;
-      if (input.receivedAtMonotonicMs !== undefined)
-        row.observationFenceMs = Math.max(row.observationFenceMs ?? 0, input.receivedAtMonotonicMs);
+      row.observationFenceMs = Math.max(row.observationFenceMs ?? 0, input.receivedAtMonotonicMs ?? performance.now());
     }
     row.latest = sample;
     if (e.status === "current") {
