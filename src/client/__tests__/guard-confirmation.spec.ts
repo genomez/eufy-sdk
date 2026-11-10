@@ -163,6 +163,28 @@ function clientFixture(status = "acknowledged") {
   return { eufy, client, send };
 }
 describe("real facade transaction wiring", () => {
+  it("advertises every replacement before receipts, including disconnect and account renewal", async () => {
+    const { eufy, client } = clientFixture("ack_timeout");
+    const events: any[] = [];
+    eufy.on("guardRuntime", (scope) => events.push({ event: "runtime", ...scope }));
+    eufy.on("guardConfirmation", (receipt) => events.push({ event: "receipt", ...receipt }));
+    const first = eufy.getGuardConfirmationScope();
+    await eufy.setGuardModeWithReceipt(sn, 1);
+    await eufy.disconnect();
+    const disconnected = eufy.getGuardConfirmationScope();
+    expect(disconnected.runtimeGeneration).not.toBe(first.runtimeGeneration);
+    Object.defineProperty(client.mega, "auth", { get: () => ({ userId: "synthetic-renewed" }) });
+    const renewed = eufy.getGuardConfirmationScope();
+    expect(renewed.runtimeGeneration).not.toBe(disconnected.runtimeGeneration);
+    await eufy.setGuardModeWithReceipt(sn, 1);
+    expect(events.filter((e) => e.event === "runtime")).toHaveLength(3);
+    for (const [index, event] of events.entries())
+      if (event.event === "receipt")
+        expect(
+          events.slice(0, index).some((e) => e.event === "runtime" && e.runtimeGeneration === event.runtimeGeneration),
+        ).toBe(true);
+    await eufy.disconnect();
+  });
   it("ACK returns pending, report settles, cache-only get recovers a lost event", async () => {
     const { eufy, client, send } = clientFixture();
     const receipt = await eufy.setGuardModeWithReceipt(sn, 1, "first");

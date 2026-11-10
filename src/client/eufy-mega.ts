@@ -431,8 +431,14 @@ export class EufyMega extends EventEmitter {
       this.guardScope = scope;
       this.guardConfirmation.close();
       this.guardConfirmation = new GuardConfirmationOwner((receipt) => this.emit("guardConfirmation", receipt));
+      this.emit("guardRuntime", { version: 1, runtimeGeneration: this.guardConfirmation.runtimeGeneration });
     }
     return this.guardConfirmation;
+  }
+
+  /** Authoritative current guard runtime; replacement is advertised before its first receipt. */
+  getGuardConfirmationScope(): { version: 1; runtimeGeneration: string } {
+    return { version: 1, runtimeGeneration: this.guardOwner().runtimeGeneration };
   }
   private shadowEvidence = new StateEvidenceOwner();
   private shadowEvidenceScope = "";
@@ -4618,6 +4624,7 @@ export class EufyMega extends EventEmitter {
     this.propertyPreparations.clear();
     this.commandIntents.close();
     this.realtimeEpoch++;
+    this.guardOwner();
     this.cloudPollInFlight = 0;
     this.lateContrary.close();
     this.lateEffects.close();

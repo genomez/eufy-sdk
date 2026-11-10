@@ -1,10 +1,109 @@
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { DeviceRegistry } from "../device-registry.js";
+import { EufyMega } from "../eufy-mega.js";
 import { InventoryErrorRecorder, inventoryError } from "../inventory-evidence.js";
 import { MegaApiError, SessionExpiredError } from "../../transport/http/mega-client.js";
 const raw = (sn: string) => ({ device_sn: sn, device_model: "T9000", category: "eufy_security", params: [] });
 afterEach(() => vi.restoreAllMocks());
 describe("inventory roster evidence", () => {
+  it.each([42, true, "unexpected", [], [raw("synthetic-b")], { unexpected: [] }, { devices: null }])(
+    "rejects malformed device envelopes without erasing known inventory %#",
+    async (malformed) => {
+      let bad = false;
+      const onError = vi.fn();
+      const registry = new DeviceRegistry({
+        mega: {
+          post: async (_s: string, path: string) =>
+            path.endsWith("get_house_list") ? {} : bad ? malformed : { devices: [raw("synthetic-a")] },
+        } as any,
+        onError,
+      });
+      const initial = await registry.getDevices();
+      bad = true;
+      const next = await registry.getDevices();
+      expect(next.map((d) => d.sn)).toEqual(["synthetic-a"]);
+      expect(registry.evidenceFor(next)).toMatchObject({
+        quality: "retained",
+        failed: 1,
+        lastCompleteSuccessMs: registry.evidenceFor(initial)?.lastCompleteSuccessMs,
+      });
+      expect(onError).toHaveBeenCalledWith(
+        expect.any(SyntaxError),
+        expect.objectContaining({ kind: "decode", operation: "device_list" }),
+      );
+      expect(registry.evidenceFor(initial)).toMatchObject({ generation: 1, quality: "complete" });
+    },
+  );
+  it.each([42, true, "unexpected", [], { unexpected: [] }, { house_infos: null }])(
+    "rejects malformed house envelopes and retains missing inventory %#",
+    async (malformed) => {
+      let bad = false;
+      const registry = new DeviceRegistry({
+        mega: {
+          post: async (_s: string, path: string) =>
+            path.endsWith("get_house_list") ? (bad ? malformed : {}) : { devices: bad ? [] : [raw("synthetic-a")] },
+        } as any,
+        onError: vi.fn(),
+      });
+      await registry.getDevices();
+      bad = true;
+      const next = await registry.getDevices();
+      expect(next.map((d) => d.sn)).toEqual(["synthetic-a"]);
+      expect(registry.evidenceFor(next)).toMatchObject({ quality: "partial", failed: 1 });
+      expect(registry.getInventoryErrors().recent).toEqual([
+        expect.objectContaining({ kind: "decode", operation: "house_list" }),
+      ]);
+    },
+  );
+  it("queries every valid house despite malformed siblings and records partial decode", async () => {
+    const calls: unknown[] = [];
+    const registry = new DeviceRegistry({
+      mega: {
+        post: async (_s: string, path: string, body: any) => {
+          if (path.endsWith("get_house_list"))
+            return {
+              house_infos: [null, { house_id: "synthetic-a" }, 42, [], { house_id: "" }, { house_id: "synthetic-b" }],
+            };
+          calls.push(body);
+          return { devices: body.house_id ? [raw(body.house_id)] : [] };
+        },
+      } as any,
+      onError: vi.fn(),
+    });
+    const devices = await registry.getDevices();
+    expect(calls).toEqual([{}, { house_id: "synthetic-a" }, { house_id: "synthetic-b" }]);
+    expect(devices.map((d) => d.sn)).toEqual(["synthetic-a", "synthetic-b"]);
+    expect(registry.evidenceFor(devices)).toMatchObject({ quality: "partial", attempted: 4, failed: 1 });
+    expect(registry.getInventoryErrors().recent).toEqual([
+      expect.objectContaining({ kind: "decode", operation: "house_list" }),
+    ]);
+  });
+  it("keeps successful roster evidence immutable across overlapping authentication failure", async () => {
+    const eufy = new EufyMega({ email: "test@example.com", password: "synthetic", autoRealtime: false, pollMs: 0 });
+    const client = eufy as any;
+    let calls = 0;
+    let rejectOther!: (error: Error) => void;
+    const gate = new Promise((_, reject) => {
+      rejectOther = reject;
+    });
+    client.mega.post = async (_s: string, path: string) => {
+      if (path.endsWith("get_house_list")) return ++calls === 1 ? gate : {};
+      return { devices: [raw("synthetic-a")] };
+    };
+    const other = eufy.getDevices().catch((e) => e);
+    client.registry.onRoster = () => rejectOther(new SessionExpiredError("synthetic"));
+    const snapshot = await eufy.getDevicesWithInventory();
+    expect(await other).toBeInstanceOf(SessionExpiredError);
+    expect(snapshot.inventoryEvidence).toMatchObject({ generation: 1, quality: "complete", failed: 0 });
+    expect(client.registry.evidenceFor(snapshot.devices)).toEqual(snapshot.inventoryEvidence);
+    expect(client.registry.inventorySnapshot().inventoryEvidence).toMatchObject({
+      generation: 2,
+      quality: "retained",
+      failed: 1,
+    });
+    expect(client.registry.list()).not.toBe(snapshot.devices);
+    await eufy.disconnect();
+  });
   it("atomically pairs generation and rows, retaining original time through partial/retained failures", async () => {
     let phase = 0;
     vi.spyOn(Date, "now").mockImplementation(() => 1000 + phase * 1000);

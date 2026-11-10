@@ -411,6 +411,7 @@ export type EufyMegaEventMap = {
   deviceState: [state: DeviceState];
   /** Shadow quality changes, including equal-value observations. */
   guardConfirmation: [receipt: import("./guard-confirmation.js").GuardReceipt];
+  guardRuntime: [scope: { version: 1; runtimeGeneration: string }];
   propertyEvidenceChanged: [event: { deviceSn: string; property: string; evidence: StateEvidence }];
   /** Qualified realtime parameter observations, including unchanged values; receipt time is not device time. */
   propertiesObserved: [

@@ -192,6 +192,24 @@ export interface DeviceRegistryDeps {
  */
 const LIST_REUSE_MS = 5_000;
 
+/** Parsed inventory envelopes are plain objects; an empty object is the empty-list contract. */
+function inventoryList(raw: unknown, field: string): any[] {
+  if (!plainInventoryObject(raw) || (!(field in raw) && Object.keys(raw).length !== 0))
+    throw new SyntaxError("invalid inventory envelope");
+  if (!(field in raw)) return [];
+  if (!Array.isArray(raw[field])) throw new SyntaxError("invalid inventory envelope");
+  return raw[field];
+}
+
+/** Excludes primitives and array-shaped rows from inventory decoding. */
+function plainInventoryObject(raw: unknown): raw is Record<string, any> {
+  return (
+    raw !== null &&
+    typeof raw === "object" &&
+    (Object.getPrototypeOf(raw) === Object.prototype || Object.getPrototypeOf(raw) === null)
+  );
+}
+
 export class DeviceRegistry {
   private readonly inventoryErrors = new InventoryErrorRecorder();
   private inventoryEvidence: InventoryEvidence | null = null;
@@ -215,6 +233,7 @@ export class DeviceRegistry {
         ]),
       ),
     };
+    this.devices = [...this.devices];
     this.inventorySnapshots.set(this.devices, this.inventoryEvidence);
   }
   private inventorySnapshots = new WeakMap<EufyDevice[], InventoryEvidence>();
@@ -344,11 +363,16 @@ export class DeviceRegistry {
         "house",
         "/app/house/get_house_list",
       );
-      if (!houses || (houses.house_infos !== undefined && !Array.isArray(houses.house_infos)))
-        throw new SyntaxError("invalid inventory envelope");
-      if ((houses.house_infos ?? []).some((h) => !h || typeof h.house_id !== "string" || !h.house_id))
-        throw new SyntaxError("invalid inventory row");
-      for (const h of houses.house_infos ?? []) bodies.push({ house_id: h.house_id });
+      const rows = inventoryList(houses, "house_infos");
+      if (rows.some((h) => !plainInventoryObject(h) || typeof h.house_id !== "string" || !h.house_id)) {
+        partial = true;
+        failed++;
+        const error = new SyntaxError("invalid inventory row");
+        this.onError(error, this.inventoryErrors.record(error, "house_list"));
+      }
+      for (const h of rows)
+        if (plainInventoryObject(h) && typeof h.house_id === "string" && h.house_id)
+          bodies.push({ house_id: h.house_id });
     } catch (e) {
       if (e instanceof SessionExpiredError) {
         this.retainInventory(attempted, failed + 1);
@@ -368,11 +392,14 @@ export class DeviceRegistry {
       attempted++;
       try {
         res = await this.mega.post<{ devices?: any[] }>("house", "/app/house/get_devs_list", body);
-        if (!res || (res.devices !== undefined && !Array.isArray(res.devices)))
-          throw new SyntaxError("invalid inventory envelope");
+        const rows = inventoryList(res, "devices");
         if (
-          (res.devices ?? []).some(
-            (row) => !row || typeof row.device_sn !== "string" || !row.device_sn || row.device_sn.length > 128,
+          rows.some(
+            (row) =>
+              !plainInventoryObject(row) ||
+              typeof row.device_sn !== "string" ||
+              !row.device_sn ||
+              row.device_sn.length > 128,
           )
         ) {
           partial = true;
@@ -392,7 +419,13 @@ export class DeviceRegistry {
         continue;
       }
       for (const raw of res.devices ?? []) {
-        if (typeof raw?.device_sn !== "string" || !raw.device_sn || raw.device_sn.length > 128) continue;
+        if (
+          !plainInventoryObject(raw) ||
+          typeof raw.device_sn !== "string" ||
+          !raw.device_sn ||
+          raw.device_sn.length > 128
+        )
+          continue;
         const binding = JSON.stringify([
           resolvedStationSn(raw, raw.device_sn),
           raw.device_channel ?? null,
