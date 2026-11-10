@@ -329,6 +329,7 @@ export const ARMING_MEMBERS = {
       "byte-captured writes and six are live-confirmed (each sent and observed to report its own " +
       "MODE_SWITCH); see ARMING_MODE_WIRE in arming.ts for the per-value evidence.",
     observation: {
+      temporalReport: true,
       event: "armingModeChanged",
       reflects: (value) => ({ param: ARMING_CMD.SET_ARMING, expected: ARMING_MODE_WIRE[armingModeOf(value)!] }),
       resetStandaloneSession: true,
@@ -415,3 +416,9 @@ export const ARMING: CapabilityModule = {
     { source: "push", match: CusPushEvent.ALARM_DELAY, emit: "alarm", payload: { phase: "delayed" } },
   ],
 };
+
+/** Requested-mode wire target; current alarm mode is a separate parameter. */
+export function guardModeRequest(value: boolean | number | string) {
+  const mode = armingModeOf(value);
+  return mode ? { param: ARMING_CMD.SET_ARMING, requestedMode: ARMING_MODE_WIRE[mode] } : undefined;
+}

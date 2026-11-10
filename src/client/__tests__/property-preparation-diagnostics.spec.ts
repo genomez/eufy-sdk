@@ -39,10 +39,9 @@ function fixture() {
     createdAt: Date.now(),
   });
   const dispatch = vi.spyOn(client.rtc, "dispatchCommand").mockResolvedValue(undefined);
-  vi.spyOn(client.rtc, "dispatchCommandWithReceipt").mockResolvedValue({
-    status: "acknowledged",
-    sendAttempted: true,
-    effect: "unconfirmed",
+  vi.spyOn(client.rtc, "dispatchCommandWithReceipt").mockImplementation(async (...args: unknown[]) => {
+    await client.rtc.dispatchCommand(...args);
+    return { status: "acknowledged", sendAttempted: true, effect: "unconfirmed" };
   });
   vi.spyOn(client, "refreshEventState").mockResolvedValue(false);
   return { eufy, client, dispatch };

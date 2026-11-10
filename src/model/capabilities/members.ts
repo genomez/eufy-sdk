@@ -67,6 +67,7 @@ export interface ValueMember {
   boundedStateWrites?: (ctx: AvailabilityContext) => boolean;
   /** @internal Policy for confirming this write through bounded readback before emitting its transition event. */
   observation?: {
+    temporalReport?: boolean;
     event: string;
     /**
      * The param this write will be reflected under and the raw value to expect there, resolved together for
@@ -697,6 +698,7 @@ export function memberWrite(
   return m.observation && reflected
     ? observeCommand(cmd, {
         event: m.observation.event,
+        temporalReport: m.observation.temporalReport,
         expected: reflected.expected,
         observed: reflected.observed,
         param: reflected.param,

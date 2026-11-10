@@ -1,3 +1,4 @@
+import { InventoryErrorRecorder, type InventoryError, type InventoryEvidence } from "./inventory-evidence.js";
 /** Modified for genomez S1 experimental source preview, 2026-10-17. */
 /**
  * DeviceRegistry — the device list/record/capability-resolution collaborator behind {@link EufyMega}.
@@ -176,7 +177,7 @@ export interface DeviceRegistryDeps {
   /** Actual cloud parameter receipt, independent of vendor freshness timestamps. */
   onCloudParams?: (device: string, params: Readonly<Record<number, string>>) => void;
   /** Surface a non-fatal fetch error (a house/body query that failed) without aborting the merge. */
-  onError: (e: unknown) => void;
+  onError: (e: unknown, inventoryError?: InventoryError) => void;
   /** Diagnostics sink for facts that are NOT errors — see the owner-gated overlay note on {@link DeviceRegistry.record}. */
   logger?: Logger;
 }
@@ -192,11 +193,46 @@ export interface DeviceRegistryDeps {
 const LIST_REUSE_MS = 5_000;
 
 export class DeviceRegistry {
+  private readonly inventoryErrors = new InventoryErrorRecorder();
+  private inventoryEvidence: InventoryEvidence | null = null;
+  private retainInventory(attempted: number, failed: number): void {
+    const previous = this.inventoryEvidence;
+    this.inventoryEvidence = {
+      version: 1,
+      generation: Math.min(Number.MAX_SAFE_INTEGER, (previous?.generation ?? 0) + 1),
+      completedAtMs: Date.now(),
+      quality: "retained",
+      attempted,
+      failed,
+      lastCompleteSuccessMs: previous?.lastCompleteSuccessMs ?? null,
+      rows: Object.fromEntries(
+        this.devices.map((row) => [
+          row.sn,
+          {
+            quality: "retained",
+            lastSuccessfulObservationMs: previous?.rows[row.sn]?.lastSuccessfulObservationMs ?? null,
+          },
+        ]),
+      ),
+    };
+    this.inventorySnapshots.set(this.devices, this.inventoryEvidence);
+  }
+  private inventorySnapshots = new WeakMap<EufyDevice[], InventoryEvidence>();
+  evidenceFor(devices: EufyDevice[]) {
+    return structuredClone(this.inventorySnapshots.get(devices) ?? null);
+  }
+  getInventoryErrors() {
+    return this.inventoryErrors.diagnostics();
+  }
+  inventorySnapshot() {
+    return { devices: [...this.devices], inventoryEvidence: structuredClone(this.inventoryEvidence) };
+  }
+
   private readonly localReceiptMs = new Map<string, number>();
   private receiptAccount?: string;
   private readonly accountIdentity?: DeviceRegistryDeps["accountIdentity"];
   private readonly mega: MegaHttpClient;
-  private readonly onError: (e: unknown) => void;
+  private readonly onError: (e: unknown, inventoryError?: InventoryError) => void;
   private readonly logger: Logger;
   private readonly onRoster?: () => void;
   private readonly onCloudEvidence?: DeviceRegistryDeps["onCloudEvidence"];
@@ -299,16 +335,28 @@ export class DeviceRegistry {
     // house_id, then merge + dedupe by serial.
     const bodies: Array<object> = [{}];
     let partial = false;
+    let attempted = 1,
+      failed = 0,
+      successfulLists = 0;
+    const fresh = new Map<string, number>();
     try {
       const houses = await this.mega.post<{ house_infos?: Array<{ house_id: string }> }>(
         "house",
         "/app/house/get_house_list",
       );
+      if (!houses || (houses.house_infos !== undefined && !Array.isArray(houses.house_infos)))
+        throw new SyntaxError("invalid inventory envelope");
+      if ((houses.house_infos ?? []).some((h) => !h || typeof h.house_id !== "string" || !h.house_id))
+        throw new SyntaxError("invalid inventory row");
       for (const h of houses.house_infos ?? []) bodies.push({ house_id: h.house_id });
     } catch (e) {
-      if (e instanceof SessionExpiredError) throw e;
+      if (e instanceof SessionExpiredError) {
+        this.retainInventory(attempted, failed + 1);
+        throw e;
+      }
       partial = true;
-      this.onError(e);
+      failed++;
+      this.onError(e, this.inventoryErrors.record(e, "house_list"));
     }
 
     const shadow: (() => void)[] = [];
@@ -317,16 +365,34 @@ export class DeviceRegistry {
     const conflicts = new Set<string>();
     for (const body of bodies) {
       let res: { devices?: any[] };
+      attempted++;
       try {
         res = await this.mega.post<{ devices?: any[] }>("house", "/app/house/get_devs_list", body);
+        if (!res || (res.devices !== undefined && !Array.isArray(res.devices)))
+          throw new SyntaxError("invalid inventory envelope");
+        if (
+          (res.devices ?? []).some(
+            (row) => !row || typeof row.device_sn !== "string" || !row.device_sn || row.device_sn.length > 128,
+          )
+        ) {
+          partial = true;
+          failed++;
+          const error = new SyntaxError("invalid inventory row");
+          this.onError(error, this.inventoryErrors.record(error, "device_list"));
+        }
+        successfulLists++;
       } catch (e) {
-        if (e instanceof SessionExpiredError) throw e;
+        if (e instanceof SessionExpiredError) {
+          this.retainInventory(attempted, failed + 1);
+          throw e;
+        }
         partial = true;
-        this.onError(e);
+        failed++;
+        this.onError(e, this.inventoryErrors.record(e, "device_list"));
         continue;
       }
       for (const raw of res.devices ?? []) {
-        if (!raw?.device_sn) continue;
+        if (typeof raw?.device_sn !== "string" || !raw.device_sn || raw.device_sn.length > 128) continue;
         const binding = JSON.stringify([
           resolvedStationSn(raw, raw.device_sn),
           raw.device_channel ?? null,
@@ -341,6 +407,7 @@ export class DeviceRegistry {
         const paramUpdatedAt: Record<number, number> = {};
         mergeParams(raw.params, params, paramUpdatedAt);
         const receivedAtMs = Date.now();
+        fresh.set(raw.device_sn, receivedAtMs);
         shadow.push(() => this.onCloudEvidence?.(raw.device_sn, params, paramUpdatedAt, receivedAtMs));
         const codec = resolveDevice({
           deviceType: raw.device_type,
@@ -369,6 +436,29 @@ export class DeviceRegistry {
     if (partial) for (const prev of this.devices) if (!seen.has(prev.sn)) seen.set(prev.sn, prev);
     this.syncReceiptAccount();
     this.devices = [...seen.values()];
+    const completedAtMs = Date.now();
+    const previous = this.inventoryEvidence;
+    this.inventoryEvidence = {
+      version: 1,
+      generation: Math.min(Number.MAX_SAFE_INTEGER, (previous?.generation ?? 0) + 1),
+      completedAtMs,
+      quality: !partial ? "complete" : successfulLists === 0 ? "retained" : "partial",
+      attempted,
+      failed,
+      lastCompleteSuccessMs: !partial ? completedAtMs : (previous?.lastCompleteSuccessMs ?? null),
+      rows: Object.fromEntries(
+        this.devices.map((row) => [
+          row.sn,
+          {
+            quality: fresh.has(row.sn) ? "fresh" : "retained",
+            lastSuccessfulObservationMs:
+              fresh.get(row.sn) ?? previous?.rows[row.sn]?.lastSuccessfulObservationMs ?? null,
+          },
+        ]),
+      ),
+    };
+    this.inventorySnapshots.set(this.devices, this.inventoryEvidence);
+    if (!partial) this.inventoryErrors.complete(completedAtMs);
     for (const device of this.devices)
       device.lastSeenMs =
         Math.max(lastSeenMsOf(device.paramUpdatedAt ?? {}) ?? 0, this.localReceiptMs.get(device.sn) ?? 0) || undefined;

@@ -1,3 +1,5 @@
+import { GuardConfirmationOwner, type GuardOperation } from "./guard-confirmation.js";
+import { guardModeRequest } from "../model/capabilities/arming.js";
 import { StateEvidenceOwner, type EvidenceIngress } from "./state-evidence.js";
 import type { StateEvidence } from "../core/state-evidence.js";
 /** Modified for genomez S1 experimental source preview, 2026-10-17. */
@@ -184,6 +186,7 @@ type ReadContext = CommandContext & { stationSerial?: string };
 
 /** Invocation ownership carried through the bound sink without changing capability setters. */
 interface PropertyInvocation {
+  guard?: GuardOperation;
   preparation?: PropertyPreparationObservation;
   ordinal: number;
   execution?: CommandExecutionContext;
@@ -420,6 +423,17 @@ export class EufyMega extends EventEmitter {
   private readonly boundParamIds = new Map<string, ReadonlySet<number>>();
   /** Cloud presence and report/write-observation precedence are evidence IDs, never retained raw values. */
   private readonly cloudParamIds = new WeakMap<Device, ReadonlySet<number>>();
+  private guardConfirmation = new GuardConfirmationOwner((receipt) => this.emit("guardConfirmation", receipt));
+  private guardScope = "";
+  private guardOwner(): GuardConfirmationOwner {
+    const scope = JSON.stringify([this.realtimeEpoch, this.mega.auth?.userId ?? null]);
+    if (scope !== this.guardScope) {
+      this.guardScope = scope;
+      this.guardConfirmation.close();
+      this.guardConfirmation = new GuardConfirmationOwner((receipt) => this.emit("guardConfirmation", receipt));
+    }
+    return this.guardConfirmation;
+  }
   private shadowEvidence = new StateEvidenceOwner();
   private shadowEvidenceScope = "";
   private shadowFailures = 0;
@@ -679,7 +693,7 @@ export class EufyMega extends EventEmitter {
       onCloudEvidence: (sn, params, times, receivedAtMs) =>
         this.runShadow(() => this.evidenceOwner().captureCloud(sn, params, times, receivedAtMs)),
       onCloudParams: (sn, params) => this.cameraHealthIngress?.params(sn, params, "cloud_params"),
-      onError: (e) => this.reportError(e, "device_registry"),
+      onError: (e, inventoryError) => this.reportError(e, "device_registry", inventoryError),
       logger: opts.logger,
     });
     this.cameraHealthIngress = new CameraHealthIngress(opts.email, this.registry, (event) => {
@@ -706,6 +720,7 @@ export class EufyMega extends EventEmitter {
         this.emit("p2pConnect", sn);
       },
       onClose: (sn) => {
+        this.guardOwner().closeStation(sn);
         this.cameraHealthIngress.parent(sn, "disconnected", "p2p");
         this.emit("p2pClose", sn);
       },
@@ -740,8 +755,12 @@ export class EufyMega extends EventEmitter {
       observeCommand: (sn) => this.cameraHealthIngress.command(sn),
       onTransport: (sn, state) => this.cameraHealthIngress.parent(sn, state, "rtc"),
       observeLiveMedia: (sn) => this.cameraHealthIngress.live(sn),
-      onSessionReplaced: (stationSn) => this.lateContrary.closeStation(stationSn),
+      onSessionReplaced: (stationSn) => {
+        this.lateContrary.closeStation(stationSn);
+        this.guardOwner().closeStation(stationSn);
+      },
       onSessionClosed: (stationSn) => {
+        this.guardOwner().closeStation(stationSn);
         this.lateContrary.closeStation(stationSn);
         this.lateEffects.closeStation(stationSn);
       },
@@ -859,14 +878,18 @@ export class EufyMega extends EventEmitter {
    * Only reported-error paths reach here — an error thrown straight out of a direct call is the caller's
    * to handle.
    */
-  private reportError(e: unknown, origin: SdkErrorOrigin): void {
+  private reportError(
+    e: unknown,
+    origin: SdkErrorOrigin,
+    inventoryError?: import("./inventory-evidence.js").InventoryError,
+  ): void {
     const err = e instanceof Error ? e : new Error(String(e));
     if (err instanceof SessionExpiredError) {
       if (this.listenerCount("sessionExpired")) this.emit("sessionExpired", err);
       else this.opts.logger?.warn?.(`[eufy] ${err.message}`);
       return;
     }
-    if (this.listenerCount("error")) this.emit("error", err, { origin });
+    if (this.listenerCount("error")) this.emit("error", err, { origin, ...(inventoryError ? { inventoryError } : {}) });
     else this.opts.logger?.warn?.(`[eufy] ${err.message}`);
   }
 
@@ -1063,6 +1086,7 @@ export class EufyMega extends EventEmitter {
         },
         shadow,
       );
+      this.guardOwner().observe(stationSn, sn, params, identity?.sessionGeneration, identity?.receivedAtMonotonicMs);
       this.lateEffects.observe(sn, params);
       if (identity) this.lateContrary.observe(sn, params, identity);
       const device = this.liveDevices.get(sn)?.deref();
@@ -1897,6 +1921,7 @@ export class EufyMega extends EventEmitter {
     if (f.params) {
       if (deviceSn)
         this.cameraHealthIngress.params(deviceSn, f.params, stationSn === deviceSn ? undefined : "hub_report");
+      if (deviceSn) this.guardOwner().observe(stationSn, deviceSn, f.params);
       this.applyRealtimeState(deviceSn, f.params, stationSn === deviceSn ? "realtime_overlay" : "hub_report");
     }
     this.applyRealtimeReport(deviceSn, decodeCapabilityState(signal, caps));
@@ -2044,6 +2069,8 @@ export class EufyMega extends EventEmitter {
     return {
       dispatch: async (cmd: Command) => {
         const current: PropertyInvocation = invocation ?? { ordinal: this.commandIntents.allocate() };
+        if (current.guard && !this.guardOwner().current(current.guard)) return;
+
         const target = this.rtcDevice(sn);
         if (
           target?.stationSn &&
@@ -2053,6 +2080,13 @@ export class EufyMega extends EventEmitter {
         )
           throw new Error("RTC command requires an unambiguous attached-device channel");
         const observation = commandObservation(cmd);
+        if (!current.guard && observation?.temporalReport && typeof observation.expected === "number") {
+          const guard = this.guardOwner().begin(sn, target?.stationSn || sn, observation.param, observation.expected);
+          await this.guardOwner().run(guard, () =>
+            this.commandSinkFor(sn, { ...current, guard, receiptRequested: true }).dispatch(cmd),
+          );
+          return;
+        }
         current.intent ??= this.commandIntents.acceptValidated(
           target?.stationSn || sn,
           sn,
@@ -2159,7 +2193,37 @@ export class EufyMega extends EventEmitter {
             if (expired || (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs))
               throw new Error("RTC command timed out before send");
             if (epoch !== this.realtimeEpoch) throw new Error("observed command superseded by disconnect");
-            await this.routeCommand(sn, cmd, deadlineAtMs, current);
+            if (current.guard && !this.guardOwner().current(current.guard)) {
+              acknowledge();
+              return;
+            }
+            if (current.guard && !this.rtcDevice(sn)) this.guardOwner().sent(current.guard);
+            await this.routeCommand(
+              sn,
+              cmd,
+              current.guard
+                ? Math.min(
+                    deadlineAtMs ?? Infinity,
+                    Date.now() + Math.max(0, current.guard.deadline - performance.now()),
+                  )
+                : deadlineAtMs,
+              current,
+            );
+            if (current.guard) {
+              const receipt = current.receipt;
+              if (receipt?.sendAttempted) this.guardOwner().sent(current.guard);
+              if (!receipt || receipt.status === "acknowledged")
+                this.guardOwner().dispatched(current.guard, receipt?.sessionGeneration);
+              else {
+                this.guardOwner().finish(
+                  current.guard,
+                  "not_reported",
+                  receipt.status === "rejected" ? "dispatch_rejected" : "ack_missing",
+                );
+                if (receipt.status === "rejected")
+                  throw Object.assign(new Error("guard dispatch rejected"), { code: "guard_dispatch_rejected" });
+              }
+            }
             acknowledge();
             const refreshed = await this.refreshEventState(sn, observation);
             if (!refreshed || epoch !== this.realtimeEpoch) return;
@@ -2347,13 +2411,16 @@ export class EufyMega extends EventEmitter {
                         ? {
                             intent: {
                               replacementKey: invocation.intent.replacementKey,
-                              isCurrent: () => this.commandIntents.isPropertyCurrent(invocation.intent!),
+                              isCurrent: () =>
+                                this.commandIntents.isPropertyCurrent(invocation.intent!) &&
+                                (!invocation.guard || this.guardOwner().current(invocation.guard)),
                             },
                           }
                         : {}),
                     }),
                 onSent: (sentAt: number) => {
                   const sentAtMonotonicMs = performance.now();
+                  if (invocation.guard) this.guardOwner().sent(invocation.guard);
                   if (invocation.health) invocation.health.sent = true;
                   if (intent) this.lateEffects.sent(intent, sentAt);
                   this.shadowDispatched(sn, cmd, sentAtMonotonicMs);
@@ -2395,7 +2462,9 @@ export class EufyMega extends EventEmitter {
                 ? {
                     intent: {
                       replacementKey: invocation.intent.replacementKey,
-                      isCurrent: () => this.commandIntents.isPropertyCurrent(invocation.intent!),
+                      isCurrent: () =>
+                        this.commandIntents.isPropertyCurrent(invocation.intent!) &&
+                        (!invocation.guard || this.guardOwner().current(invocation.guard)),
                     },
                   }
                 : {}),
@@ -3936,6 +4005,59 @@ export class EufyMega extends EventEmitter {
     return this.executeProperty(sn, name, value, options);
   }
 
+  /** Dispatch once and return temporal-only report ownership for this requested guard mode. */
+  async setGuardModeWithReceipt(
+    sn: string,
+    value: boolean | number | string,
+    intentGeneration?: string,
+    options: { signal?: AbortSignal } = {},
+  ) {
+    return this.executeGuardProperty(
+      sn,
+      value,
+      intentGeneration,
+      async (guard) => {
+        await this.executePreparedProperty(sn, "armingMode", value, undefined, undefined, guard);
+      },
+      options.signal,
+    );
+  }
+
+  private async executeGuardProperty(
+    sn: string,
+    value: boolean | number | string,
+    caller: string | undefined,
+    dispatch: (guard: GuardOperation) => Promise<void>,
+    signal?: AbortSignal,
+  ) {
+    const request = guardModeRequest(value);
+    if (!request) throw new Error("invalid requested guard mode");
+    if (caller !== undefined && (typeof caller !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(caller)))
+      throw new Error("invalid guard intent generation");
+    const station = this.registry.list().find((row) => row.sn === sn)?.stationSn || sn;
+    const guard = this.guardOwner().begin(sn, station, request.param, request.requestedMode, caller);
+    return this.guardOwner().run(
+      guard,
+      async () => {
+        try {
+          await dispatch(guard);
+        } catch (error) {
+          this.guardOwner().finish(guard, "not_reported", "transport_uncertain");
+          throw error;
+        }
+      },
+      signal,
+    );
+  }
+
+  /** Cache-only recovery, current runtime only; never dispatches a command. */
+  getGuardConfirmation(handle: string) {
+    return this.guardOwner().get(handle);
+  }
+  getGuardConfirmationDiagnostics() {
+    return this.guardOwner().diagnostics();
+  }
+
   /** Cache-only, observe-only assessment of this camera's connectivity evidence. */
   cameraHealth(sn: string) {
     return this.cameraHealthIngress.status(sn);
@@ -3965,6 +4087,18 @@ export class EufyMega extends EventEmitter {
     this.lateContrary.cancel(sn, intent);
   }
 
+  /** Atomic cached roster and its inventory quality; performs no network work. */
+  getInventorySnapshot() {
+    return this.registry.inventorySnapshot();
+  }
+  async getDevicesWithInventory() {
+    const devices = await this.getDevices();
+    return { devices, inventoryEvidence: this.registry.evidenceFor(devices) };
+  }
+  getInventoryErrorDiagnostics() {
+    return this.registry.getInventoryErrors();
+  }
+
   /** Sanitized physical cloud POST observations; this getter starts no work. */
   getCloudHttpDiagnostics() {
     return this.mega.getCloudHttpDiagnostics();
@@ -3984,6 +4118,21 @@ export class EufyMega extends EventEmitter {
   ): Promise<CommandReceipt> {
     const observation = this.propertyPreparationRecorder.begin(name === "armingMode" ? "guard_mode" : "other");
     try {
+      if (name === "armingMode") {
+        let commandReceipt: CommandReceipt | undefined;
+        await observation.run(() =>
+          this.executeGuardProperty(
+            sn,
+            value,
+            undefined,
+            async (guard) => {
+              commandReceipt = await this.executePreparedProperty(sn, name, value, options, observation, guard);
+            },
+            options?.signal,
+          ),
+        );
+        return commandReceipt ?? Object.freeze({ status: "acknowledged", sendAttempted: false, effect: "unconfirmed" });
+      }
       return await observation.run(() => this.executePreparedProperty(sn, name, value, options, observation));
     } finally {
       observation.finish("failed");
@@ -3997,13 +4146,15 @@ export class EufyMega extends EventEmitter {
     value: boolean | number | string,
     options?: PropertyExecutionOptions,
     observation?: PropertyPreparationObservation,
+    guard?: GuardOperation,
   ): Promise<CommandReceipt> {
     const ordinal = this.commandIntents.allocate();
     const bornAtMs = performance.now();
     const wallAtEntry = Date.now();
     const invocation: PropertyInvocation = {
       ordinal,
-      receiptRequested: options !== undefined,
+      guard,
+      receiptRequested: options !== undefined || guard !== undefined,
       preparation: observation,
     };
     const terminal = (status: CommandReceipt["status"]): CommandReceipt => {
@@ -4100,6 +4251,7 @@ export class EufyMega extends EventEmitter {
       invocation.execution?.signal?.throwIfAborted();
       if (invocation.execution && performance.now() >= invocation.execution.sendByMs)
         return terminal("expired_before_send");
+      if (guard && !this.guardOwner().current(guard)) return terminal("superseded_before_send");
       observation?.mark("command_build");
       const cmd = buildCapabilityCommand(name, value, ctx);
       if (!cmd) throw new CapabilityNotSupportedError(sn, name);
@@ -4461,6 +4613,7 @@ export class EufyMega extends EventEmitter {
    * (call {@link login} again to reconnect without re-authenticating).
    */
   async disconnect(): Promise<void> {
+    this.guardOwner().close();
     for (const controller of this.propertyPreparations) controller.abort();
     this.propertyPreparations.clear();
     this.commandIntents.close();

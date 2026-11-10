@@ -1,0 +1,190 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { GuardConfirmationOwner } from "../guard-confirmation.js";
+import { EufyMega } from "../eufy-mega.js";
+const sn = "T9000P0000000000";
+beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] }));
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+function fixture() {
+  const events: any[] = [];
+  const owner = new GuardConfirmationOwner((r) => events.push(r));
+  const begin = (mode = 1, caller?: string) => owner.begin(sn, sn, 1224, mode, caller);
+  return { owner, events, begin };
+}
+describe("guard temporal report owner", () => {
+  it("cancellation aborts preparation and the report window without resend", async () => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    const controller = new AbortController();
+    await owner.run(
+      op,
+      async () => {
+        owner.sent(op);
+        owner.dispatched(op, 1);
+      },
+      controller.signal,
+    );
+    controller.abort();
+    expect(op.receipt.reason).toBe("cancelled");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(op.receipt.attempts).toBe(1);
+  });
+  it("ignores pre-existing matches, currentMode, and reports before dispatch completion", async () => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    owner.observe(sn, sn, { 1224: "1" }, 1);
+    owner.sent(op);
+    owner.dispatched(op, 1);
+    await vi.advanceTimersByTimeAsync(1);
+    owner.observe(sn, sn, { 1230: "1" }, 1);
+    expect(op.receipt.outcome).toBe("pending");
+    owner.observe(sn, sn, { 1224: "1" }, 1);
+    expect(op.receipt).toMatchObject({ outcome: "reported", reason: "reported_after_command", attempts: 1 });
+  });
+  it("wrong requested mode is terminal and later matching reports cannot rewrite it", async () => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    owner.sent(op);
+    owner.dispatched(op, 1);
+    await vi.advanceTimersByTimeAsync(1);
+    owner.observe(sn, sn, { 1224: "63" }, 1);
+    owner.observe(sn, sn, { 1224: "1" }, 1);
+    expect(op.receipt.outcome).toBe("contradicted");
+  });
+  it("starts the full 20 second window after dispatch and uses monotonic time across rollback", async () => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    await vi.advanceTimersByTimeAsync(30_000);
+    owner.sent(op);
+    owner.dispatched(op, 1);
+    vi.setSystemTime(1);
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(op.receipt.outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    expect(op.receipt.reason).toBe("window_expired");
+  });
+  it("caps preparation/queue lifetime at 55 seconds without a late send", async () => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let sends = 0;
+    const promise = owner.run(op, async () => {
+      await gate;
+      if (owner.current(op)) sends++;
+    });
+    await vi.advanceTimersByTimeAsync(55_000);
+    expect((await promise).reason).toBe("budget_expired");
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sends).toBe(0);
+  });
+  it("same-intent duplicates join one dispatch and completed tokens never resend", async () => {
+    const { owner, begin } = fixture();
+    const op = begin(1, "request_1");
+    const send = vi.fn(async () => {
+      owner.sent(op);
+      owner.dispatched(op, 1);
+    });
+    const first = owner.run(op, send);
+    const second = owner.run(begin(1, "request_1"), send);
+    expect(second).toBe(first);
+    await first;
+    await vi.advanceTimersByTimeAsync(20_000);
+    await owner.run(begin(1, "request_1"), send);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("different deliberate mode supersedes without old callbacks settling the replacement", async () => {
+    const { owner, begin } = fixture();
+    const old = begin();
+    owner.sent(old);
+    owner.dispatched(old, 1);
+    const next = begin(63);
+    owner.dispatched(old, 1);
+    expect(old.receipt.reason).toBe("superseded");
+    expect(next.receipt.outcome).toBe("pending");
+  });
+  it.each(["session", "runtime"])("cancels on %s and has no retry", (kind) => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    owner.sent(op);
+    owner.dispatched(op, 1);
+    if (kind === "session") owner.closeStation(sn);
+    else owner.close();
+    expect(op.receipt.reason).toBe(kind === "session" ? "session_changed" : "runtime_closed");
+    expect(op.receipt.attempts).toBe(1);
+  });
+  it("replacement session reports cannot settle the previous session", async () => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    owner.sent(op);
+    owner.dispatched(op, 1);
+    await vi.advanceTimersByTimeAsync(1);
+    owner.observe(sn, sn, { 1224: "1" }, 2);
+    expect(op.receipt.reason).toBe("session_changed");
+  });
+  it("retains only 32 terminal receipts for ten monotonic minutes, with anonymous counters", async () => {
+    const { owner, begin } = fixture();
+    let first = "";
+    for (let i = 0; i < 40; i++) {
+      const op = begin(i % 2);
+      first ||= op.receipt.handle;
+      owner.finish(op, "not_reported", "ack_missing");
+    }
+    expect(owner.get(first)).toBeNull();
+    const op = begin();
+    owner.finish(op, "not_reported", "cancelled");
+    expect(owner.get(op.receipt.handle)?.reason).toBe("cancelled");
+    expect(JSON.stringify(owner.diagnostics())).not.toContain(sn);
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(owner.get(op.receipt.handle)).toBeNull();
+  });
+});
+function clientFixture(status = "acknowledged") {
+  const eufy = new EufyMega({ email: "test@example.com", password: "synthetic", autoRealtime: false, pollMs: 0 });
+  const client = eufy as any;
+  client.registry.devices = [{ sn, model: "T9000", params: { 1224: "1" }, raw: {} }];
+  vi.spyOn(client, "commandContext").mockResolvedValue({
+    codec: "station",
+    model: "T9000",
+    channel: 255,
+    accountName: "synthetic",
+    paramIds: new Set([1224]),
+    capabilities: new Set(["arming"]),
+  });
+  vi.spyOn(client, "refreshEventState").mockResolvedValue(false);
+  const send = vi
+    .spyOn(client.rtc, "dispatchCommandWithReceipt")
+    .mockResolvedValue({ status, sendAttempted: true, effect: "unconfirmed", sessionGeneration: 1 });
+  return { eufy, client, send };
+}
+describe("real facade transaction wiring", () => {
+  it("ACK returns pending, report settles, cache-only get recovers a lost event", async () => {
+    const { eufy, client, send } = clientFixture();
+    const receipt = await eufy.setGuardModeWithReceipt(sn, 1, "first");
+    expect(receipt.outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+    client.guardOwner().observe(sn, sn, { 1224: "1" }, 1);
+    expect(eufy.getGuardConfirmation(receipt.handle)?.outcome).toBe("reported");
+    expect(send).toHaveBeenCalledTimes(1);
+    await eufy.disconnect();
+    expect(eufy.getGuardConfirmation(receipt.handle)).toBeNull();
+  });
+  it("missing ACK yields not_reported rather than report eligibility", async () => {
+    const { eufy, client } = clientFixture("ack_timeout");
+    const receipt = await eufy.setGuardModeWithReceipt(sn, 1);
+    expect(receipt).toMatchObject({ outcome: "not_reported", reason: "ack_missing" });
+    client.guardOwner().observe(sn, sn, { 1224: "1" }, 1);
+    expect(eufy.getGuardConfirmation(receipt.handle)?.outcome).toBe("not_reported");
+    await eufy.disconnect();
+  });
+  it("dispatch rejection remains an RPC rejection", async () => {
+    const { eufy } = clientFixture("rejected");
+    await expect(eufy.setGuardModeWithReceipt(sn, 1)).rejects.toThrow("guard dispatch rejected");
+    await eufy.disconnect();
+  });
+});

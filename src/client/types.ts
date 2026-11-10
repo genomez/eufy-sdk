@@ -54,6 +54,7 @@ export type SdkErrorOrigin =
 /** Fixed origin attached to a reported error; contains no device or account identity. */
 export interface SdkErrorContext {
   readonly origin: SdkErrorOrigin;
+  readonly inventoryError?: import("./inventory-evidence.js").InventoryError;
 }
 
 /** Count-only startup status for one auto-managed realtime transport plane. */
@@ -409,6 +410,7 @@ export type EufyMegaEventMap = {
    */
   deviceState: [state: DeviceState];
   /** Shadow quality changes, including equal-value observations. */
+  guardConfirmation: [receipt: import("./guard-confirmation.js").GuardReceipt];
   propertyEvidenceChanged: [event: { deviceSn: string; property: string; evidence: StateEvidence }];
   /** Qualified realtime parameter observations, including unchanged values; receipt time is not device time. */
   propertiesObserved: [

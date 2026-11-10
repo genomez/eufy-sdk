@@ -318,6 +318,7 @@ export interface Ff09Identity {
 
 /** @internal */
 export interface CommandObservation {
+  temporalReport?: boolean;
   event: string;
   /** The RAW param value the device must report before this write counts as landed. */
   expected: boolean | number | string;

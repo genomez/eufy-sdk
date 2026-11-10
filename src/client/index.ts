@@ -20,3 +20,6 @@ export type {
   RecordingRowView,
 } from "../transport/rtc/recordings.js";
 export { projectRecordingRow } from "../transport/rtc/recordings.js";
+
+export { guardConfirmationCapability } from "./guard-confirmation.js";
+export type { GuardReceipt, GuardReason } from "./guard-confirmation.js";
