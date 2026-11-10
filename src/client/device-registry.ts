@@ -1,4 +1,10 @@
-import { InventoryErrorRecorder, type InventoryError, type InventoryEvidence } from "./inventory-evidence.js";
+import {
+  InventoryDecodeError,
+  InventoryErrorRecorder,
+  type InventoryError,
+  type InventoryEvidence,
+  type InventoryOperation,
+} from "./inventory-evidence.js";
 /** Modified for genomez S1 experimental source preview, 2026-10-17. */
 /**
  * DeviceRegistry — the device list/record/capability-resolution collaborator behind {@link EufyMega}.
@@ -192,12 +198,29 @@ export interface DeviceRegistryDeps {
  */
 const LIST_REUSE_MS = 5_000;
 
-/** Parsed inventory envelopes are plain objects; an empty object is the empty-list contract. */
-function inventoryList(raw: unknown, field: string): any[] {
-  if (!plainInventoryObject(raw) || (!(field in raw) && Object.keys(raw).length !== 0))
-    throw new SyntaxError("invalid inventory envelope");
-  if (!(field in raw)) return [];
-  if (!Array.isArray(raw[field])) throw new SyntaxError("invalid inventory envelope");
+/** Empty and absent lists are complete; structurally invalid envelopes fail decoding. */
+function inventoryList(
+  raw: unknown,
+  field: string,
+  operation: InventoryOperation,
+  recorder: InventoryErrorRecorder,
+): any[] {
+  if (raw === null || raw === undefined) throw new InventoryDecodeError("envelope_null");
+  if (Array.isArray(raw)) {
+    if (raw.length) throw new InventoryDecodeError("envelope_array");
+    recorder.tolerate("envelope_empty_array", operation);
+    return [];
+  }
+  if (!plainInventoryObject(raw)) throw new InventoryDecodeError("envelope_primitive");
+  if (!(field in raw)) {
+    if (Object.keys(raw).length) recorder.tolerate("field_missing_with_keys", operation);
+    return [];
+  }
+  if (raw[field] === null) {
+    recorder.tolerate("field_null", operation);
+    return [];
+  }
+  if (!Array.isArray(raw[field])) throw new InventoryDecodeError("field_not_array");
   return raw[field];
 }
 
@@ -363,16 +386,18 @@ export class DeviceRegistry {
         "house",
         "/app/house/get_house_list",
       );
-      const rows = inventoryList(houses, "house_infos");
-      if (rows.some((h) => !plainInventoryObject(h) || typeof h.house_id !== "string" || !h.house_id)) {
-        partial = true;
-        failed++;
-        const error = new SyntaxError("invalid inventory row");
-        this.onError(error, this.inventoryErrors.record(error, "house_list"));
+      const rows = inventoryList(houses, "house_infos", "house_list", this.inventoryErrors);
+      for (const h of rows) {
+        if (!plainInventoryObject(h)) {
+          this.inventoryErrors.tolerate("row_not_object", "house_list");
+          continue;
+        }
+        if (typeof h.house_id !== "string" || !h.house_id) {
+          this.inventoryErrors.tolerate("row_missing_serial", "house_list");
+          continue;
+        }
+        bodies.push({ house_id: h.house_id });
       }
-      for (const h of rows)
-        if (plainInventoryObject(h) && typeof h.house_id === "string" && h.house_id)
-          bodies.push({ house_id: h.house_id });
     } catch (e) {
       if (e instanceof SessionExpiredError) {
         this.retainInventory(attempted, failed + 1);
@@ -388,25 +413,11 @@ export class DeviceRegistry {
     const bindings = new Map<string, string>();
     const conflicts = new Set<string>();
     for (const body of bodies) {
-      let res: { devices?: any[] };
+      let rows: any[];
       attempted++;
       try {
-        res = await this.mega.post<{ devices?: any[] }>("house", "/app/house/get_devs_list", body);
-        const rows = inventoryList(res, "devices");
-        if (
-          rows.some(
-            (row) =>
-              !plainInventoryObject(row) ||
-              typeof row.device_sn !== "string" ||
-              !row.device_sn ||
-              row.device_sn.length > 128,
-          )
-        ) {
-          partial = true;
-          failed++;
-          const error = new SyntaxError("invalid inventory row");
-          this.onError(error, this.inventoryErrors.record(error, "device_list"));
-        }
+        const res = await this.mega.post<{ devices?: any[] }>("house", "/app/house/get_devs_list", body);
+        rows = inventoryList(res, "devices", "device_list", this.inventoryErrors);
         successfulLists++;
       } catch (e) {
         if (e instanceof SessionExpiredError) {
@@ -418,14 +429,15 @@ export class DeviceRegistry {
         this.onError(e, this.inventoryErrors.record(e, "device_list"));
         continue;
       }
-      for (const raw of res.devices ?? []) {
-        if (
-          !plainInventoryObject(raw) ||
-          typeof raw.device_sn !== "string" ||
-          !raw.device_sn ||
-          raw.device_sn.length > 128
-        )
+      for (const raw of rows) {
+        if (!plainInventoryObject(raw)) {
+          this.inventoryErrors.tolerate("row_not_object", "device_list");
           continue;
+        }
+        if (typeof raw.device_sn !== "string" || !raw.device_sn || raw.device_sn.length > 128) {
+          this.inventoryErrors.tolerate("row_missing_serial", "device_list");
+          continue;
+        }
         const binding = JSON.stringify([
           resolvedStationSn(raw, raw.device_sn),
           raw.device_channel ?? null,

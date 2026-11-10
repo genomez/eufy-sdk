@@ -1,6 +1,16 @@
 import { MegaApiError } from "../transport/http/mega-client.js";
 export type InventoryOperation = "house_list" | "device_list";
 export type InventoryKind = "http" | "vendor" | "timeout" | "dns" | "connect" | "tls" | "decode" | "unknown";
+export type ToleratedInventoryShape =
+  "field_null" | "field_missing_with_keys" | "envelope_empty_array" | "row_not_object" | "row_missing_serial";
+const rejectedInventoryShapes = ["envelope_null", "envelope_primitive", "envelope_array", "field_not_array"] as const;
+export type RejectedInventoryShape = (typeof rejectedInventoryShapes)[number];
+/** Decode failure with a finite shape and no response payload. */
+export class InventoryDecodeError extends SyntaxError {
+  constructor(readonly shape: RejectedInventoryShape) {
+    super("invalid inventory envelope");
+  }
+}
 export interface InventoryError {
   origin: "device_registry";
   operation: InventoryOperation;
@@ -8,6 +18,7 @@ export interface InventoryError {
   vendorCode: number | null;
   httpStatus: number | null;
   atMs: number;
+  shape?: RejectedInventoryShape;
 }
 export interface InventoryRowEvidence {
   quality: "fresh" | "retained";
@@ -64,7 +75,17 @@ export function inventoryError(error: unknown, operation: InventoryOperation): I
             : name === "TimeoutError"
               ? "timeout"
               : "unknown";
-  return { origin: "device_registry", operation, kind, vendorCode, httpStatus, atMs: Date.now() };
+  return {
+    origin: "device_registry",
+    operation,
+    kind,
+    vendorCode,
+    httpStatus,
+    atMs: Date.now(),
+    ...(error instanceof InventoryDecodeError && rejectedInventoryShapes.includes(error.shape)
+      ? { shape: error.shape }
+      : {}),
+  };
 }
 /** Bounded anonymous inventory-failure history, independent of roster identities. */
 export class InventoryErrorRecorder {
@@ -77,6 +98,11 @@ export class InventoryErrorRecorder {
   private byKind: Partial<Record<InventoryKind, number>> = {};
   private byOperation: Partial<Record<InventoryOperation, number>> = {};
   private byStatusClass: Record<string, number> = {};
+  private toleratedShapes: Partial<Record<InventoryOperation, Partial<Record<ToleratedInventoryShape, number>>>> = {};
+  tolerate(shape: ToleratedInventoryShape, operation: InventoryOperation): void {
+    const counters = (this.toleratedShapes[operation] ??= {});
+    counters[shape] = increment(counters[shape] ?? 0);
+  }
   record(error: unknown, operation: InventoryOperation): InventoryError {
     const sample = inventoryError(error, operation);
     this.total = increment(this.total);
@@ -108,6 +134,7 @@ export class InventoryErrorRecorder {
       byOperation: this.byOperation,
       byStatusClass: this.byStatusClass,
       recent: this.recent,
+      toleratedShapes: this.toleratedShapes,
     });
   }
 }

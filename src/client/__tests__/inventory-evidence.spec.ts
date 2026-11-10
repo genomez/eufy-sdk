@@ -6,57 +6,114 @@ import { MegaApiError, SessionExpiredError } from "../../transport/http/mega-cli
 const raw = (sn: string) => ({ device_sn: sn, device_model: "T9000", category: "eufy_security", params: [] });
 afterEach(() => vi.restoreAllMocks());
 describe("inventory roster evidence", () => {
-  it.each([42, true, "unexpected", [], [raw("synthetic-b")], { unexpected: [] }, { devices: null }])(
-    "rejects malformed device envelopes without erasing known inventory %#",
-    async (malformed) => {
+  const operations = ["device_list", "house_list"] as const;
+  const rejected = [
+    ["envelope_null", null],
+    ["envelope_null", undefined],
+    ["envelope_primitive", 42],
+    ["envelope_primitive", true],
+    ["envelope_primitive", "PRIVATE"],
+    ["envelope_array", [raw("PRIVATE")]],
+    ["field_not_array", {}],
+    ["field_not_array", 42],
+    ["field_not_array", "PRIVATE"],
+    ["field_not_array", true],
+    ["field_not_array", false],
+    ["field_not_array", undefined],
+  ] as const;
+  for (const operation of operations) {
+    const field = operation === "house_list" ? "house_infos" : "devices";
+    const identity = operation === "house_list" ? "house_id" : "device_sn";
+    it.each(rejected)(`${operation} rejects %s without erasing known inventory %#`, async (shape, value) => {
       let bad = false;
       const onError = vi.fn();
       const registry = new DeviceRegistry({
         mega: {
-          post: async (_s: string, path: string) =>
-            path.endsWith("get_house_list") ? {} : bad ? malformed : { devices: [raw("synthetic-a")] },
+          post: async (_s: string, path: string, body: any) => {
+            const malformed = shape === "field_not_array" ? { [field]: value } : value;
+            if (path.endsWith("get_house_list"))
+              return operation === "house_list" && bad ? malformed : { house_infos: [{ house_id: "synthetic-house" }] };
+            if (operation === "device_list" && !body.house_id && bad) return malformed;
+            return { devices: [raw(body.house_id ? "synthetic-b" : "synthetic-a")] };
+          },
         } as any,
         onError,
       });
       const initial = await registry.getDevices();
+      const retained = operation === "device_list" ? "synthetic-a" : "synthetic-b";
       bad = true;
       const next = await registry.getDevices();
-      expect(next.map((d) => d.sn)).toEqual(["synthetic-a"]);
+      expect(next.map((d) => d.sn).sort()).toEqual(["synthetic-a", "synthetic-b"]);
       expect(registry.evidenceFor(next)).toMatchObject({
-        quality: "retained",
+        quality: "partial",
         failed: 1,
         lastCompleteSuccessMs: registry.evidenceFor(initial)?.lastCompleteSuccessMs,
+        rows: {
+          [retained]: {
+            quality: "retained",
+            lastSuccessfulObservationMs: registry.evidenceFor(initial)?.rows[retained]?.lastSuccessfulObservationMs,
+          },
+        },
       });
-      expect(onError).toHaveBeenCalledWith(
+      expect(onError).toHaveBeenCalledExactlyOnceWith(
         expect.any(SyntaxError),
-        expect.objectContaining({ kind: "decode", operation: "device_list" }),
+        expect.objectContaining({ kind: "decode", operation, shape }),
       );
+      expect(registry.getInventoryErrors()).toMatchObject({
+        total: 1,
+        toleratedShapes: {},
+        recent: [expect.objectContaining({ kind: "decode", operation, shape })],
+      });
+      expect(JSON.stringify(registry.getInventoryErrors())).not.toMatch(/PRIVATE|synthetic/);
       expect(registry.evidenceFor(initial)).toMatchObject({ generation: 1, quality: "complete" });
-    },
-  );
-  it.each([42, true, "unexpected", [], { unexpected: [] }, { house_infos: null }])(
-    "rejects malformed house envelopes and retains missing inventory %#",
-    async (malformed) => {
+    });
+    const tolerated = [
+      ["field_null", { [field]: null }],
+      ["field_missing_with_keys", { PRIVATE: "PRIVATE" }],
+      ["envelope_empty_array", []],
+      ...[null, undefined, 42, true, "PRIVATE", []].map((row) => ["row_not_object", { [field]: [row] }] as const),
+      ...[
+        {},
+        { [identity]: null },
+        { [identity]: 42 },
+        { [identity]: true },
+        { [identity]: "" },
+        ...(operation === "device_list" ? [{ [identity]: "x".repeat(129) }] : []),
+      ].map((row) => ["row_missing_serial", { [field]: [row] }] as const),
+    ] as const;
+    it.each(tolerated)(`${operation} tolerates %s as complete without errors %#`, async (shape, envelope) => {
       let bad = false;
+      const onError = vi.fn();
       const registry = new DeviceRegistry({
         mega: {
-          post: async (_s: string, path: string) =>
-            path.endsWith("get_house_list") ? (bad ? malformed : {}) : { devices: bad ? [] : [raw("synthetic-a")] },
+          post: async (_s: string, path: string) => {
+            if (path.endsWith("get_house_list")) return operation === "house_list" && bad ? envelope : {};
+            return operation === "device_list" && bad ? envelope : { devices: [raw("synthetic-a")] };
+          },
         } as any,
-        onError: vi.fn(),
+        onError,
       });
       await registry.getDevices();
       bad = true;
       const next = await registry.getDevices();
-      expect(next.map((d) => d.sn)).toEqual(["synthetic-a"]);
-      expect(registry.evidenceFor(next)).toMatchObject({ quality: "partial", failed: 1 });
-      expect(registry.getInventoryErrors().recent).toEqual([
-        expect.objectContaining({ kind: "decode", operation: "house_list" }),
-      ]);
-    },
-  );
-  it("queries every valid house despite malformed siblings and records partial decode", async () => {
+      const evidence = registry.evidenceFor(next)!;
+      expect(evidence).toMatchObject({ quality: "complete", failed: 0, generation: 2 });
+      expect(evidence.lastCompleteSuccessMs).toBe(evidence.completedAtMs);
+      expect(next.map((d) => d.sn)).toEqual(operation === "house_list" ? ["synthetic-a"] : []);
+      expect(onError).not.toHaveBeenCalled();
+      expect(registry.getInventoryErrors()).toMatchObject({
+        total: 0,
+        recent: [],
+        byKind: {},
+        byOperation: {},
+        toleratedShapes: { [operation]: { [shape]: 1 } },
+      });
+      expect(JSON.stringify(registry.getInventoryErrors())).not.toMatch(/PRIVATE|synthetic|xxxxx/);
+    });
+  }
+  it("queries every valid house and device despite skipped siblings with complete evidence", async () => {
     const calls: unknown[] = [];
+    const onError = vi.fn();
     const registry = new DeviceRegistry({
       mega: {
         post: async (_s: string, path: string, body: any) => {
@@ -65,18 +122,24 @@ describe("inventory roster evidence", () => {
               house_infos: [null, { house_id: "synthetic-a" }, 42, [], { house_id: "" }, { house_id: "synthetic-b" }],
             };
           calls.push(body);
-          return { devices: body.house_id ? [raw(body.house_id)] : [] };
+          return { devices: body.house_id ? [null, raw(body.house_id), {}, 42] : [] };
         },
       } as any,
-      onError: vi.fn(),
+      onError,
     });
     const devices = await registry.getDevices();
     expect(calls).toEqual([{}, { house_id: "synthetic-a" }, { house_id: "synthetic-b" }]);
     expect(devices.map((d) => d.sn)).toEqual(["synthetic-a", "synthetic-b"]);
-    expect(registry.evidenceFor(devices)).toMatchObject({ quality: "partial", attempted: 4, failed: 1 });
-    expect(registry.getInventoryErrors().recent).toEqual([
-      expect.objectContaining({ kind: "decode", operation: "house_list" }),
-    ]);
+    expect(registry.evidenceFor(devices)).toMatchObject({ quality: "complete", attempted: 4, failed: 0 });
+    expect(onError).not.toHaveBeenCalled();
+    expect(registry.getInventoryErrors()).toMatchObject({
+      total: 0,
+      recent: [],
+      toleratedShapes: {
+        house_list: { row_not_object: 3, row_missing_serial: 1 },
+        device_list: { row_not_object: 4, row_missing_serial: 2 },
+      },
+    });
   });
   it("keeps successful roster evidence immutable across overlapping authentication failure", async () => {
     const eufy = new EufyMega({ email: "test@example.com", password: "synthetic", autoRealtime: false, pollMs: 0 });
@@ -174,7 +237,12 @@ describe("inventory roster evidence", () => {
     bad = true;
     await registry.getDevices();
     expect(registry.list()).toHaveLength(1);
-    expect(registry.getInventoryErrors().recent[0]?.kind).toBe("decode");
+    expect(registry.getInventoryErrors().recent[0]).toMatchObject({ kind: "decode", shape: "field_not_array" });
+    expect(registry.inventorySnapshot().inventoryEvidence).toMatchObject({
+      quality: "retained",
+      failed: 1,
+      rows: { "synthetic-a": { quality: "retained" } },
+    });
   });
   it("successful absence follows existing removal policy", async () => {
     let rows = [raw("synthetic-a")];
@@ -202,6 +270,30 @@ describe("sanitized cloud inventory failures", () => {
     [new MegaApiError("private", 2 ** 40, 999), "unknown", null, null],
   ])("projects finite code/status without exception payload %#", (error, kind, vendorCode, httpStatus) => {
     expect(inventoryError(error, "device_list")).toMatchObject({ kind, vendorCode, httpStatus });
+  });
+  it("counts tolerated shapes per operation, saturates and detaches counters without errors", () => {
+    const recorder = new InventoryErrorRecorder();
+    recorder.tolerate("field_null", "device_list");
+    recorder.tolerate("field_null", "device_list");
+    recorder.tolerate("row_not_object", "house_list");
+    const result = recorder.diagnostics();
+    expect(result).toMatchObject({
+      total: 0,
+      firstFailureMs: null,
+      lastFailureMs: null,
+      recent: [],
+      toleratedShapes: { device_list: { field_null: 2 }, house_list: { row_not_object: 1 } },
+    });
+    result.toleratedShapes.device_list!.field_null = 99;
+    expect(recorder.diagnostics().toleratedShapes.device_list!.field_null).toBe(2);
+    (recorder as any).toleratedShapes.device_list.field_null = Number.MAX_SAFE_INTEGER;
+    recorder.tolerate("field_null", "device_list");
+    expect(recorder.diagnostics().toleratedShapes.device_list!.field_null).toBe(Number.MAX_SAFE_INTEGER);
+  });
+  it("does not project arbitrary shape properties on exceptions", () => {
+    expect(
+      inventoryError(Object.assign(new SyntaxError("PRIVATE"), { shape: "PRIVATE" }), "device_list"),
+    ).not.toHaveProperty("shape");
   });
   it("bounds samples, saturates totals, detaches output and rejects arbitrary keys", () => {
     const recorder = new InventoryErrorRecorder();
