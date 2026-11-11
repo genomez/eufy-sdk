@@ -144,6 +144,7 @@ export class GuardConfirmationOwner {
     this.event({ ...op.receipt });
   }
 
+  /** Unknown session identity preserves temporal correlation; only two known generations can differ. */
   observe(
     station: string,
     deviceSn: string,
@@ -153,7 +154,7 @@ export class GuardConfirmationOwner {
   ): void {
     for (const op of this.active.values()) {
       if (op.station !== station || op.receipt.deviceSn !== deviceSn || op.dispatchAt === undefined) continue;
-      if (op.session !== session) {
+      if (op.session !== undefined && session !== undefined && op.session !== session) {
         this.finish(op, "not_reported", "session_changed");
         continue;
       }

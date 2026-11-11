@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GuardConfirmationOwner } from "../guard-confirmation.js";
 import { EufyMega } from "../eufy-mega.js";
+import { EventEmitter } from "node:events";
+import { performance as rtcPerformance } from "node:perf_hooks";
+import { buildPortalHeader, parsePortalHeader, type PortalResponse } from "../../transport/rtc/portal-packet.js";
 const sn = "T9000P0000000000";
 beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] }));
 afterEach(() => {
@@ -14,6 +17,66 @@ function fixture() {
   return { owner, events, begin };
 }
 describe("guard temporal report owner", () => {
+  it.each([
+    [70, undefined],
+    [undefined, 70],
+    [undefined, undefined],
+    [70, 70],
+  ])("reports the information readback with dispatch session %s and report session %s", async (dispatch, report) => {
+    vi.setSystemTime(1794350132601);
+    const { owner, begin } = fixture();
+    const op = begin();
+    await vi.advanceTimersByTimeAsync(1373);
+    owner.sent(op);
+    await vi.advanceTimersByTimeAsync(353);
+    owner.dispatched(op, dispatch);
+    await vi.advanceTimersByTimeAsync(2);
+    const readStartedAt = performance.now();
+    await vi.advanceTimersByTimeAsync(511);
+    expect(Date.now()).toBe(1794350134840);
+    const receivedAt = performance.now();
+    await vi.advanceTimersByTimeAsync(32);
+    owner.observe(sn, sn, { 1224: "1", 1230: "1" }, report, receivedAt);
+    await vi.advanceTimersByTimeAsync(44);
+    expect(Date.now()).toBe(1794350134916);
+    expect(receivedAt).toBeGreaterThan(readStartedAt);
+    expect(op.receipt).toMatchObject({ outcome: "reported", reason: "reported_after_command", attempts: 1 });
+    await vi.advanceTimersByTimeAsync(1489);
+    expect(Date.now()).toBe(1794350136405);
+    expect(op.receipt.outcome).toBe("reported");
+    expect(owner.diagnostics()).toMatchObject({ maxAttempts: 1, enabledRetry: false, pending: 0 });
+  });
+  it.each([
+    [70, undefined],
+    [undefined, 70],
+    [undefined, undefined],
+  ])("keeps report protections with dispatch session %s and report session %s", async (dispatch, report) => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    owner.sent(op);
+    const beforeDispatch = performance.now();
+    await vi.advanceTimersByTimeAsync(1);
+    owner.dispatched(op, dispatch);
+    await vi.advanceTimersByTimeAsync(1);
+    owner.observe(sn, sn, { 1224: "1" }, report, beforeDispatch);
+    owner.observe(sn, sn, { 1224: "1" }, report, op.dispatchAt);
+    owner.observe("other-station", sn, { 1224: "1" }, report);
+    owner.observe(sn, "other-device", { 1224: "1" }, report);
+    owner.observe(sn, sn, { 1230: "1" }, report);
+    expect(op.receipt.outcome).toBe("pending");
+    owner.observe(sn, sn, { 1224: "63" }, report);
+    owner.observe(sn, sn, { 1224: "1" }, report);
+    expect(op.receipt).toMatchObject({ outcome: "contradicted", reason: "different_mode_reported", attempts: 1 });
+  });
+  it.each([70, undefined])("expires an unknown-session report window after dispatch session %s", async (session) => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    owner.sent(op);
+    owner.dispatched(op, session);
+    await vi.advanceTimersByTimeAsync(20_000);
+    owner.observe(sn, sn, { 1224: "1" });
+    expect(op.receipt).toMatchObject({ outcome: "not_reported", reason: "window_expired", attempts: 1 });
+  });
   it("cancellation aborts preparation and the report window without resend", async () => {
     const { owner, begin } = fixture();
     const op = begin();
@@ -108,13 +171,20 @@ describe("guard temporal report owner", () => {
     expect(old.receipt.reason).toBe("superseded");
     expect(next.receipt.outcome).toBe("pending");
   });
-  it.each(["session", "runtime"])("cancels on %s and has no retry", (kind) => {
+  it.each([
+    ["session", 1],
+    ["runtime", 1],
+    ["session", undefined],
+    ["runtime", undefined],
+  ] as const)("cancels on %s with session %s and has no retry", async (kind, session) => {
     const { owner, begin } = fixture();
     const op = begin();
     owner.sent(op);
-    owner.dispatched(op, 1);
+    owner.dispatched(op, session);
     if (kind === "session") owner.closeStation(sn);
     else owner.close();
+    await vi.advanceTimersByTimeAsync(1);
+    owner.observe(sn, sn, { 1224: "1" });
     expect(op.receipt.reason).toBe(kind === "session" ? "session_changed" : "runtime_closed");
     expect(op.receipt.attempts).toBe(1);
   });
@@ -162,7 +232,114 @@ function clientFixture(status = "acknowledged") {
     .mockResolvedValue({ status, sendAttempted: true, effect: "unconfirmed", sessionGeneration: 1 });
   return { eufy, client, send };
 }
+/** In-memory RTC session admitting explicit acknowledgements and information frames. */
+class GuardSession extends EventEmitter {
+  isConnected = false;
+  packets: Buffer[] = [];
+  async connect() {
+    this.isConnected = true;
+    this.emit("connected");
+  }
+  sendCommand(packet: Buffer) {
+    this.packets.push(packet);
+    return true;
+  }
+  ack(packet: Buffer) {
+    const header = parsePortalHeader(packet)!;
+    this.emit(
+      "commandData",
+      Buffer.concat([buildPortalHeader(header.commandId, 4, header.channel, header.segment, 1), Buffer.alloc(4)]),
+      1,
+    );
+  }
+  information() {
+    const body = Buffer.from(JSON.stringify({ params: [{ channel: 255, param_type: 1224, param_value: 1 }] }));
+    this.emit("commandData", Buffer.concat([buildPortalHeader(1103, body.length, 255, 0), body]), 3);
+  }
+  close() {
+    this.isConnected = false;
+    this.emit("close");
+  }
+}
+
 describe("real facade transaction wiring", () => {
+  it.each([
+    ["RTC without identity", 70, undefined],
+    ["RTC after unknown dispatch", undefined, 70],
+    ["P2P without identity", 70, undefined],
+  ] as const)("accepts a post-dispatch report from %s", async (path, dispatch, report) => {
+    const { eufy, client, send } = clientFixture();
+    send.mockResolvedValue({ status: "acknowledged", sendAttempted: true, sessionGeneration: dispatch });
+    const receipt = await eufy.setGuardModeWithReceipt(sn, 1);
+    await vi.advanceTimersByTimeAsync(1);
+    try {
+      if (path.startsWith("P2P")) client.onP2PFrame(sn, { channel: 0, params: { 1224: "1" } });
+      else
+        client.onRtcFrame(
+          sn,
+          { commandId: 1103, isResponse: 0, data: { params: [{ channel: 255, param_type: 1224, param_value: 1 }] } },
+          report === undefined ? undefined : { sessionGeneration: report, receivedAtMonotonicMs: performance.now() },
+        );
+      expect(eufy.getGuardConfirmation(receipt.handle)).toMatchObject({ outcome: "reported", attempts: 1 });
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      await eufy.disconnect();
+    }
+  });
+  it("confirms the real RTC generation 70 readback after a legacy dispatch with unknown session", async () => {
+    vi.setSystemTime(1794350132601);
+    vi.spyOn(rtcPerformance, "now").mockImplementation(() => performance.now());
+    const { eufy, client, send } = clientFixture();
+    send.mockRestore();
+    const session = new GuardSession();
+    client.rtc.nextSessionGeneration = 69;
+    client.rtc.deps.identity = () => ({ authToken: "synthetic", userId: "synthetic-user" });
+    client.rtc.deps.shard = () => "us-pr";
+    client.rtc.deps.createSession = () => session;
+    const onFrame = vi.spyOn(client, "onRtcFrame");
+    const dispatch = vi.spyOn(client.rtc, "dispatchCommandWithReceipt");
+    const context = await client.commandContext(sn);
+    client.commandContext.mockImplementationOnce(
+      () => new Promise((resolve) => setTimeout(() => resolve(context), 1373)),
+    );
+    try {
+      const pending = eufy.setGuardModeWithReceipt(sn, 1);
+      await vi.advanceTimersByTimeAsync(1373);
+      expect(Date.now()).toBe(1794350133974);
+      expect(session.packets).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(353);
+      session.ack(session.packets[0]!);
+      await vi.advanceTimersByTimeAsync(0);
+      const receipt = await pending;
+      expect(receipt.outcome).toBe("pending");
+      const dispatched = await dispatch.mock.results[0]!.value;
+      expect(dispatched).toMatchObject({ status: "acknowledged", sendAttempted: true });
+      expect(dispatched.sessionGeneration).toBeUndefined();
+      expect(client.rtc.getCommandDiagnostics().recent.at(-1)).toMatchObject({
+        sessionGeneration: 70,
+        matchedResults: 0,
+      });
+      await vi.advanceTimersByTimeAsync(2);
+      const read = eufy.refreshDeviceState(sn);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(parsePortalHeader(session.packets[1]!)?.commandId).toBe(1103);
+      session.ack(session.packets[1]!);
+      await vi.advanceTimersByTimeAsync(511);
+      expect(Date.now()).toBe(1794350134840);
+      session.information();
+      expect(await read).toMatchObject({ notificationCorrelation: "temporal-only", parametersUpdated: 1 });
+      const information = onFrame.mock.calls.find(([, received]) => {
+        const frame = received as PortalResponse;
+        return frame.commandId === 1103 && frame.isResponse === 0;
+      });
+      expect(information?.[2]).toMatchObject({ sessionGeneration: 70, readGeneration: expect.any(Number) });
+      await vi.advanceTimersByTimeAsync(76);
+      expect(eufy.getGuardConfirmation(receipt.handle)).toMatchObject({ outcome: "reported", attempts: 1 });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    } finally {
+      await eufy.disconnect();
+    }
+  });
   it("advertises every replacement before receipts, including disconnect and account renewal", async () => {
     const { eufy, client } = clientFixture("ack_timeout");
     const events: any[] = [];
