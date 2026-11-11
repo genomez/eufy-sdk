@@ -198,9 +198,9 @@ export interface DeviceRegistryDeps {
  */
 const LIST_REUSE_MS = 5_000;
 
-/** Missing complete-roster rows survive fewer than three refreshes and less than ten minutes. */
+/** Ambiguous removals require three successful missing refreshes spanning at least twenty minutes. */
 const INVENTORY_MISSING_REFRESHES = 3;
-const INVENTORY_MISSING_MS = 10 * 60_000;
+const INVENTORY_MISSING_MS = 20 * 60_000;
 
 /** Tolerated empties require bounded removal protection; unexpected wrappers are partial. */
 function inventoryList(
@@ -513,13 +513,13 @@ export class DeviceRegistry {
         this.inventoryMisses.delete(sn);
         continue;
       }
+      if (this.lastRefreshRemovalBlocked) continue;
       const miss = this.inventoryMisses.get(sn) ?? { refreshes: 0, sinceMs: completedAtMs };
       miss.refreshes = Math.min(INVENTORY_MISSING_REFRESHES, miss.refreshes + 1);
       this.inventoryMisses.set(sn, miss);
       if (
         toleratedEmpty &&
-        miss.refreshes < INVENTORY_MISSING_REFRESHES &&
-        completedAtMs - miss.sinceMs < INVENTORY_MISSING_MS
+        (miss.refreshes < INVENTORY_MISSING_REFRESHES || completedAtMs - miss.sinceMs < INVENTORY_MISSING_MS)
       )
         retainedMissing.add(sn);
     }

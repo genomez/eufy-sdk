@@ -256,11 +256,12 @@ describe("inventory roster evidence", () => {
       let serials = ["synthetic-a", "synthetic-b", "synthetic-c"];
       let now = 1000;
       let failed = false;
+      let toleratedEmpty = true;
       vi.spyOn(Date, "now").mockImplementation(() => now);
       const mega = {
         post: async (_s: string, path: string, body: any) => {
           if (path.endsWith("get_house_list")) return { house_infos: [{ house_id: "synthetic-house" }] };
-          if (!body.house_id) return { devices: null };
+          if (!body.house_id) return { devices: toleratedEmpty ? null : [] };
           if (failed) throw new Error("synthetic inventory failure");
           return { devices: serials.map(raw) };
         },
@@ -278,19 +279,22 @@ describe("inventory roster evidence", () => {
         fail: (next: boolean) => {
           failed = next;
         },
+        normal: () => {
+          toleratedEmpty = false;
+        },
       };
     }
-    it("expires a real removal on the third miss and restores complete generations and additions", async () => {
+    it("expires on the third successful miss spanning twenty minutes and restores additions", async () => {
       const f = fixture();
       await f.registry.pollChanges();
       f.roster("synthetic-a", "synthetic-c");
       for (let miss = 1; miss <= 3; miss++) {
-        f.time(1000 + miss * 1000);
+        f.time(2000 + (miss - 1) * 600_000);
         const diff = await f.registry.pollChanges();
         expect(diff.removed.map((d) => d.sn)).toEqual(miss < 3 ? [] : ["synthetic-b"]);
         expect(f.registry.inventorySnapshot().inventoryEvidence).toMatchObject({
           quality: miss < 3 ? "partial" : "complete",
-          lastCompleteSuccessMs: miss < 3 ? 1000 : 4000,
+          lastCompleteSuccessMs: miss < 3 ? 1000 : 1_202_000,
         });
       }
       f.roster("synthetic-a", "synthetic-c", "synthetic-d");
@@ -318,18 +322,43 @@ describe("inventory roster evidence", () => {
         });
       }
     });
-    it.each([599_999, 600_000, 600_001])("also enforces the ten-minute bound at %s ms", async (elapsed) => {
+    it.each([1_199_999, 1_200_000, 1_200_001])("requires the twenty-minute bound at %s ms", async (elapsed) => {
       const f = fixture();
       await f.registry.pollChanges();
       f.roster("synthetic-a", "synthetic-c");
       f.time(2000);
       await f.registry.pollChanges();
+      f.time(3000);
+      await f.registry.pollChanges();
       f.time(2000 + elapsed);
       const diff = await f.registry.pollChanges();
-      expect(diff.removed.map((d) => d.sn)).toEqual(elapsed < 600_000 ? [] : ["synthetic-b"]);
+      expect(diff.removed.map((d) => d.sn)).toEqual(elapsed < 1_200_000 ? [] : ["synthetic-b"]);
       expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe(
-        elapsed < 600_000 ? "partial" : "complete",
+        elapsed < 1_200_000 ? "partial" : "complete",
       );
+    });
+    it("retains three rapid clean null misses until twenty minutes have passed", async () => {
+      const f = fixture();
+      await f.registry.pollChanges();
+      f.roster("synthetic-a", "synthetic-c");
+      for (const time of [2000, 3000, 4000, 1_201_999]) {
+        f.time(time);
+        expect((await f.registry.pollChanges()).removed).toEqual([]);
+        expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("partial");
+        expect(f.registry.list().map((d) => d.sn)).toContain("synthetic-b");
+      }
+      f.time(1_202_000);
+      expect((await f.registry.pollChanges()).removed.map((d) => d.sn)).toEqual(["synthetic-b"]);
+      expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("complete");
+    });
+    it("normally shaped clean absence removes immediately during a retention episode", async () => {
+      const f = fixture();
+      await f.registry.pollChanges();
+      f.roster("synthetic-a", "synthetic-c");
+      expect((await f.registry.pollChanges()).removed).toEqual([]);
+      f.normal();
+      expect((await f.registry.pollChanges()).removed.map((d) => d.sn)).toEqual(["synthetic-b"]);
+      expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("complete");
     });
     it("does not promote rows seen only in a partial generation into the complete baseline", async () => {
       const f = fixture();
@@ -344,27 +373,55 @@ describe("inventory roster evidence", () => {
       const f = fixture();
       await f.registry.pollChanges();
       f.roster("synthetic-a", "synthetic-c");
+      f.time(2000);
       await f.registry.pollChanges();
       f.roster("synthetic-a");
+      f.time(602_000);
       await f.registry.pollChanges();
+      f.time(1_202_000);
       expect((await f.registry.pollChanges()).removed.map((d) => d.sn)).toEqual(["synthetic-b"]);
       expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("partial");
+      f.time(1_802_000);
       expect((await f.registry.pollChanges()).removed.map((d) => d.sn)).toEqual(["synthetic-c"]);
       expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("complete");
     });
-    it("preserves failure retention even after ambiguous-empty bounds expire", async () => {
+    it("does not start or advance retention bounds during failed polls", async () => {
       const f = fixture();
       await f.registry.pollChanges();
       f.fail(true);
       for (let miss = 0; miss < 3; miss++) {
+        f.time(2000 + miss * 600_000);
         expect((await f.registry.pollChanges()).removed).toEqual([]);
         expect(f.registry.list()).toHaveLength(3);
         expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("partial");
       }
       f.fail(false);
       f.roster("synthetic-a", "synthetic-c");
+      f.time(1_802_000);
+      expect((await f.registry.pollChanges()).removed).toEqual([]);
+      expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("partial");
+      f.time(3_002_000);
+      expect((await f.registry.pollChanges()).removed).toEqual([]);
+      expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("partial");
+      f.time(3_602_000);
       expect((await f.registry.pollChanges()).removed.map((d) => d.sn)).toEqual(["synthetic-b"]);
       expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("complete");
+    });
+    it("pauses an existing miss counter across a failed poll", async () => {
+      const f = fixture();
+      await f.registry.pollChanges();
+      f.roster("synthetic-a", "synthetic-c");
+      f.time(2000);
+      await f.registry.pollChanges();
+      f.fail(true);
+      f.time(602_000);
+      expect((await f.registry.pollChanges()).removed).toEqual([]);
+      f.fail(false);
+      f.time(1_202_000);
+      expect((await f.registry.pollChanges()).removed).toEqual([]);
+      expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("partial");
+      f.time(1_802_000);
+      expect((await f.registry.pollChanges()).removed.map((d) => d.sn)).toEqual(["synthetic-b"]);
     });
     it("starts from observed rows after restart and bounds later retention afresh", async () => {
       const f = fixture();
@@ -378,8 +435,10 @@ describe("inventory roster evidence", () => {
       f.roster("synthetic-a", "synthetic-b", "synthetic-c");
       expect((await restarted.pollChanges()).added.map((d) => d.sn)).toEqual(["synthetic-b"]);
       f.roster("synthetic-a", "synthetic-c");
-      for (let miss = 1; miss <= 3; miss++)
+      for (let miss = 1; miss <= 3; miss++) {
+        f.time(2000 + (miss - 1) * 600_000);
         expect((await restarted.pollChanges()).removed.map((d) => d.sn)).toEqual(miss < 3 ? [] : ["synthetic-b"]);
+      }
     });
   });
   it.each(["parent_sn", "station_sn"])("binds coerced numeric children through %s", async (field) => {
