@@ -2,8 +2,15 @@ import { MegaApiError } from "../transport/http/mega-client.js";
 export type InventoryOperation = "house_list" | "device_list";
 export type InventoryKind = "http" | "vendor" | "timeout" | "dns" | "connect" | "tls" | "decode" | "unknown";
 export type ToleratedInventoryShape =
-  "field_null" | "field_missing_with_keys" | "envelope_empty_array" | "row_not_object" | "row_missing_serial";
-const rejectedInventoryShapes = ["envelope_null", "envelope_primitive", "envelope_array", "field_not_array"] as const;
+  | "field_null"
+  | "field_missing"
+  | "field_missing_with_keys"
+  | "envelope_empty_array"
+  | "envelope_null"
+  | "envelope_empty_string"
+  | "row_not_object"
+  | "row_missing_serial";
+const rejectedInventoryShapes = ["envelope_primitive", "envelope_array", "field_not_array"] as const;
 export type RejectedInventoryShape = (typeof rejectedInventoryShapes)[number];
 /** Decode failure with a finite shape and no response payload. */
 export class InventoryDecodeError extends SyntaxError {

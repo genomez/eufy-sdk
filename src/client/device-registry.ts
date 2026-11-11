@@ -198,30 +198,35 @@ export interface DeviceRegistryDeps {
  */
 const LIST_REUSE_MS = 5_000;
 
-/** Empty and absent lists are complete; structurally invalid envelopes fail decoding. */
+/** Tolerated empties cannot authorize removals; unexpected wrappers are partial. */
 function inventoryList(
   raw: unknown,
   field: string,
   operation: InventoryOperation,
   recorder: InventoryErrorRecorder,
-): any[] {
-  if (raw === null || raw === undefined) throw new InventoryDecodeError("envelope_null");
+): { rows: any[]; toleratedEmpty: boolean; partial: boolean } {
+  const empty = { rows: [], toleratedEmpty: true, partial: false };
+  if (raw === null || raw === undefined || raw === "") {
+    recorder.tolerate(raw === "" ? "envelope_empty_string" : "envelope_null", operation);
+    return empty;
+  }
   if (Array.isArray(raw)) {
     if (raw.length) throw new InventoryDecodeError("envelope_array");
     recorder.tolerate("envelope_empty_array", operation);
-    return [];
+    return empty;
   }
   if (!plainInventoryObject(raw)) throw new InventoryDecodeError("envelope_primitive");
   if (!(field in raw)) {
-    if (Object.keys(raw).length) recorder.tolerate("field_missing_with_keys", operation);
-    return [];
+    const partial = Object.keys(raw).length > 0;
+    recorder.tolerate(partial ? "field_missing_with_keys" : "field_missing", operation);
+    return { ...empty, partial };
   }
   if (raw[field] === null) {
     recorder.tolerate("field_null", operation);
-    return [];
+    return empty;
   }
   if (!Array.isArray(raw[field])) throw new InventoryDecodeError("field_not_array");
-  return raw[field];
+  return { rows: raw[field], toleratedEmpty: false, partial: false };
 }
 
 /** Excludes primitives and array-shaped rows from inventory decoding. */
@@ -377,6 +382,7 @@ export class DeviceRegistry {
     // house_id, then merge + dedupe by serial.
     const bodies: Array<object> = [{}];
     let partial = false;
+    let toleratedEmpty = false;
     let attempted = 1,
       failed = 0,
       successfulLists = 0;
@@ -386,17 +392,24 @@ export class DeviceRegistry {
         "house",
         "/app/house/get_house_list",
       );
-      const rows = inventoryList(houses, "house_infos", "house_list", this.inventoryErrors);
+      const list = inventoryList(houses, "house_infos", "house_list", this.inventoryErrors);
+      toleratedEmpty ||= list.toleratedEmpty;
+      partial ||= list.partial;
+      const rows = list.rows;
       for (const h of rows) {
         if (!plainInventoryObject(h)) {
           this.inventoryErrors.tolerate("row_not_object", "house_list");
+          partial = true;
           continue;
         }
-        if (typeof h.house_id !== "string" || !h.house_id) {
+        const houseId =
+          typeof h.house_id === "number" && Number.isSafeInteger(h.house_id) ? String(h.house_id) : h.house_id;
+        if (typeof houseId !== "string" || !houseId) {
           this.inventoryErrors.tolerate("row_missing_serial", "house_list");
+          partial = true;
           continue;
         }
-        bodies.push({ house_id: h.house_id });
+        bodies.push({ house_id: houseId });
       }
     } catch (e) {
       if (e instanceof SessionExpiredError) {
@@ -417,7 +430,10 @@ export class DeviceRegistry {
       attempted++;
       try {
         const res = await this.mega.post<{ devices?: any[] }>("house", "/app/house/get_devs_list", body);
-        rows = inventoryList(res, "devices", "device_list", this.inventoryErrors);
+        const list = inventoryList(res, "devices", "device_list", this.inventoryErrors);
+        toleratedEmpty ||= list.toleratedEmpty;
+        partial ||= list.partial;
+        rows = list.rows;
         successfulLists++;
       } catch (e) {
         if (e instanceof SessionExpiredError) {
@@ -429,13 +445,19 @@ export class DeviceRegistry {
         this.onError(e, this.inventoryErrors.record(e, "device_list"));
         continue;
       }
-      for (const raw of rows) {
-        if (!plainInventoryObject(raw)) {
+      for (const row of rows) {
+        if (!plainInventoryObject(row)) {
           this.inventoryErrors.tolerate("row_not_object", "device_list");
+          partial = true;
           continue;
         }
+        const raw =
+          typeof row.device_sn === "number" && Number.isSafeInteger(row.device_sn)
+            ? { ...row, device_sn: String(row.device_sn) }
+            : row;
         if (typeof raw.device_sn !== "string" || !raw.device_sn || raw.device_sn.length > 128) {
           this.inventoryErrors.tolerate("row_missing_serial", "device_list");
+          partial = true;
           continue;
         }
         const binding = JSON.stringify([
@@ -475,6 +497,7 @@ export class DeviceRegistry {
         });
       }
     }
+    partial ||= toleratedEmpty && this.devices.some((device) => !seen.has(device.sn));
     this.lastRefreshPartial = partial;
     if (partial) for (const sn of this.inventoryConflicts) conflicts.add(sn);
     this.inventoryConflicts = conflicts;

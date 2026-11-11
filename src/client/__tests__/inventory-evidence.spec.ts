@@ -2,14 +2,13 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import { DeviceRegistry } from "../device-registry.js";
 import { EufyMega } from "../eufy-mega.js";
 import { InventoryErrorRecorder, inventoryError } from "../inventory-evidence.js";
-import { MegaApiError, SessionExpiredError } from "../../transport/http/mega-client.js";
+import { MegaApiError, MegaHttpClient, SessionExpiredError } from "../../transport/http/mega-client.js";
+import { encryptBody } from "../../core/crypto.js";
 const raw = (sn: string) => ({ device_sn: sn, device_model: "T9000", category: "eufy_security", params: [] });
 afterEach(() => vi.restoreAllMocks());
 describe("inventory roster evidence", () => {
   const operations = ["device_list", "house_list"] as const;
   const rejected = [
-    ["envelope_null", null],
-    ["envelope_null", undefined],
     ["envelope_primitive", 42],
     ["envelope_primitive", true],
     ["envelope_primitive", "PRIVATE"],
@@ -69,25 +68,75 @@ describe("inventory roster evidence", () => {
     });
     const tolerated = [
       ["field_null", { [field]: null }],
-      ["field_missing_with_keys", { PRIVATE: "PRIVATE" }],
+      ["field_missing", {}],
       ["envelope_empty_array", []],
+      ["envelope_null", null],
+      ["envelope_null", undefined],
+      ["envelope_empty_string", ""],
+    ] as const;
+    it.each(tolerated)(`${operation} tolerates %s but retains missing inventory %#`, async (shape, envelope) => {
+      let bad = false;
+      let now = 1000;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      const onError = vi.fn();
+      const registry = new DeviceRegistry({
+        mega: {
+          post: async (_s: string, path: string, body: any) => {
+            if (path.endsWith("get_house_list"))
+              return operation === "house_list" && bad ? envelope : { house_infos: [{ house_id: "synthetic-house" }] };
+            if (operation === "device_list" && !body.house_id && bad) return envelope;
+            return { devices: [raw(body.house_id ? "synthetic-b" : "synthetic-a")] };
+          },
+        } as any,
+        onError,
+      });
+      const initial = await registry.getDevices();
+      await registry.pollChanges();
+      bad = true;
+      now = 2000;
+      const retained = operation === "device_list" ? "synthetic-a" : "synthetic-b";
+      for (let i = 0; i < 2; i++) {
+        expect((await registry.pollChanges()).removed).toEqual([]);
+        const { devices, inventoryEvidence } = registry.inventorySnapshot();
+        expect(devices.map((d) => d.sn).sort()).toEqual(["synthetic-a", "synthetic-b"]);
+        expect(inventoryEvidence).toMatchObject({
+          quality: "partial",
+          failed: 0,
+          lastCompleteSuccessMs: 1000,
+          rows: { [retained]: { quality: "retained", lastSuccessfulObservationMs: 1000 } },
+        });
+      }
+      expect(onError).not.toHaveBeenCalled();
+      expect(registry.getInventoryErrors()).toMatchObject({
+        total: 0,
+        recent: [],
+        toleratedShapes: { [operation]: { [shape]: 2 } },
+      });
+      expect(registry.evidenceFor(initial)).toMatchObject({ generation: 1, quality: "complete" });
+      expect(JSON.stringify(registry.getInventoryErrors())).not.toMatch(/PRIVATE|synthetic/);
+    });
+    const dropped = [
       ...[null, undefined, 42, true, "PRIVATE", []].map((row) => ["row_not_object", { [field]: [row] }] as const),
       ...[
         {},
         { [identity]: null },
-        { [identity]: 42 },
+        { [identity]: NaN },
+        { [identity]: Infinity },
+        { [identity]: 1.5 },
+        { [identity]: Number.MAX_SAFE_INTEGER + 1 },
         { [identity]: true },
         { [identity]: "" },
         ...(operation === "device_list" ? [{ [identity]: "x".repeat(129) }] : []),
       ].map((row) => ["row_missing_serial", { [field]: [row] }] as const),
     ] as const;
-    it.each(tolerated)(`${operation} tolerates %s as complete without errors %#`, async (shape, envelope) => {
+    it.each(dropped)(`${operation} marks dropped %s rows partial without errors %#`, async (shape, envelope) => {
       let bad = false;
       const onError = vi.fn();
       const registry = new DeviceRegistry({
         mega: {
           post: async (_s: string, path: string) => {
-            if (path.endsWith("get_house_list")) return operation === "house_list" && bad ? envelope : {};
+            if (path.endsWith("get_house_list"))
+              return operation === "house_list" && bad ? envelope : { house_infos: [] };
             return operation === "device_list" && bad ? envelope : { devices: [raw("synthetic-a")] };
           },
         } as any,
@@ -97,9 +146,8 @@ describe("inventory roster evidence", () => {
       bad = true;
       const next = await registry.getDevices();
       const evidence = registry.evidenceFor(next)!;
-      expect(evidence).toMatchObject({ quality: "complete", failed: 0, generation: 2 });
-      expect(evidence.lastCompleteSuccessMs).toBe(evidence.completedAtMs);
-      expect(next.map((d) => d.sn)).toEqual(operation === "house_list" ? ["synthetic-a"] : []);
+      expect(evidence).toMatchObject({ quality: "partial", failed: 0, generation: 2 });
+      expect(next.map((d) => d.sn)).toEqual(["synthetic-a"]);
       expect(onError).not.toHaveBeenCalled();
       expect(registry.getInventoryErrors()).toMatchObject({
         total: 0,
@@ -110,8 +158,31 @@ describe("inventory roster evidence", () => {
       });
       expect(JSON.stringify(registry.getInventoryErrors())).not.toMatch(/PRIVATE|synthetic|xxxxx/);
     });
+    it(`${operation} marks unexpected wrappers partial even without a baseline`, async () => {
+      const registry = new DeviceRegistry({
+        mega: {
+          post: async (_s: string, path: string) => {
+            if (path.endsWith("get_house_list"))
+              return operation === "house_list" ? { list: { house_infos: [] } } : { house_infos: [] };
+            return operation === "device_list" ? { list: { devices: [raw("PRIVATE")] } } : { devices: [] };
+          },
+        } as any,
+        onError: vi.fn(),
+      });
+      const devices = await registry.getDevices();
+      expect(registry.evidenceFor(devices)).toMatchObject({
+        quality: "partial",
+        failed: 0,
+        lastCompleteSuccessMs: null,
+      });
+      expect(registry.getInventoryErrors()).toMatchObject({
+        total: 0,
+        toleratedShapes: { [operation]: { field_missing_with_keys: 1 } },
+      });
+      expect(JSON.stringify(registry.getInventoryErrors())).not.toContain("PRIVATE");
+    });
   }
-  it("queries every valid house and device despite skipped siblings with complete evidence", async () => {
+  it("queries every valid house and device despite skipped siblings with partial evidence", async () => {
     const calls: unknown[] = [];
     const onError = vi.fn();
     const registry = new DeviceRegistry({
@@ -130,7 +201,7 @@ describe("inventory roster evidence", () => {
     const devices = await registry.getDevices();
     expect(calls).toEqual([{}, { house_id: "synthetic-a" }, { house_id: "synthetic-b" }]);
     expect(devices.map((d) => d.sn)).toEqual(["synthetic-a", "synthetic-b"]);
-    expect(registry.evidenceFor(devices)).toMatchObject({ quality: "complete", attempted: 4, failed: 0 });
+    expect(registry.evidenceFor(devices)).toMatchObject({ quality: "partial", attempted: 4, failed: 0 });
     expect(onError).not.toHaveBeenCalled();
     expect(registry.getInventoryErrors()).toMatchObject({
       total: 0,
@@ -140,6 +211,87 @@ describe("inventory roster evidence", () => {
         device_list: { row_not_object: 4, row_missing_serial: 2 },
       },
     });
+  });
+  it("coerces numeric house IDs and serials without mutating the response", async () => {
+    const calls: unknown[] = [];
+    const row = { ...raw("synthetic"), device_sn: 12345 };
+    const registry = new DeviceRegistry({
+      mega: {
+        post: async (_s: string, path: string, body: any) => {
+          if (path.endsWith("get_house_list")) return { house_infos: [{ house_id: 42 }, { house_id: 0 }] };
+          calls.push(body);
+          return { devices: body.house_id === "42" ? [row] : [] };
+        },
+      } as any,
+      onError: vi.fn(),
+    });
+    const devices = await registry.getDevices();
+    expect(calls).toEqual([{}, { house_id: "42" }, { house_id: "0" }]);
+    expect(devices).toMatchObject([{ sn: "12345", stationSn: "12345", raw: { device_sn: "12345" } }]);
+    expect(row.device_sn).toBe(12345);
+    expect(registry.evidenceFor(devices)).toMatchObject({ quality: "complete", failed: 0 });
+    expect(registry.getInventoryErrors().toleratedShapes).toEqual({});
+  });
+  it("keeps redundant tolerated empties complete when every known serial is freshly observed", async () => {
+    let empty = false;
+    const registry = new DeviceRegistry({
+      mega: {
+        post: async (_s: string, path: string, body: any) => {
+          if (path.endsWith("get_house_list")) return { house_infos: [{ house_id: "synthetic-house" }] };
+          return empty && body.house_id ? { devices: null } : { devices: [raw("synthetic-a")] };
+        },
+      } as any,
+      onError: vi.fn(),
+    });
+    await registry.getDevices();
+    empty = true;
+    const devices = await registry.getDevices();
+    expect(registry.evidenceFor(devices)).toMatchObject({
+      quality: "complete",
+      rows: { "synthetic-a": { quality: "fresh" } },
+    });
+  });
+  it.each([
+    ["envelope_null", null],
+    ["envelope_null", undefined],
+    ["envelope_empty_string", ""],
+    ["envelope_null", encryptBody("null", "00".repeat(32))],
+    ["envelope_empty_string", encryptBody('""', "00".repeat(32))],
+  ])("retains inventory through successful HTTP envelopes with %s data %#", async (shape, data) => {
+    const mega = new MegaHttpClient({ email: "synthetic@example.invalid", password: "" });
+    vi.spyOn(mega, "ensureSessionKey").mockResolvedValue({
+      shareKey: "00".repeat(32),
+      keyIdent: "synthetic-key",
+      createdAt: Date.now(),
+    } as any);
+    let empty = false;
+    const post = vi.spyOn(mega as any, "httpPost").mockImplementation(async (...args: any[]) => ({
+      status: 200,
+      data: {
+        code: 0,
+        data: args[0].endsWith("get_house_list")
+          ? { house_infos: [] }
+          : empty
+            ? data
+            : { devices: [raw("synthetic-a")] },
+      },
+    }));
+    const onError = vi.fn();
+    const registry = new DeviceRegistry({ mega, onError });
+    await registry.pollChanges();
+    empty = true;
+    expect((await registry.pollChanges()).removed).toEqual([]);
+    expect(registry.inventorySnapshot().inventoryEvidence).toMatchObject({
+      quality: "partial",
+      failed: 0,
+      rows: { "synthetic-a": { quality: "retained" } },
+    });
+    expect(registry.getInventoryErrors()).toMatchObject({
+      total: 0,
+      toleratedShapes: { device_list: { [shape as string]: 1 } },
+    });
+    expect(post).toHaveBeenCalledTimes(4);
+    expect(onError).not.toHaveBeenCalled();
   });
   it("keeps successful roster evidence immutable across overlapping authentication failure", async () => {
     const eufy = new EufyMega({ email: "test@example.com", password: "synthetic", autoRealtime: false, pollMs: 0 });
@@ -248,14 +400,16 @@ describe("inventory roster evidence", () => {
     let rows = [raw("synthetic-a")];
     const registry = new DeviceRegistry({
       mega: {
-        post: async (_s: string, path: string) => (path.endsWith("get_house_list") ? {} : { devices: rows }),
+        post: async (_s: string, path: string) =>
+          path.endsWith("get_house_list") ? { house_infos: [] } : { devices: rows },
       } as any,
       onError: vi.fn(),
     });
-    await registry.getDevices();
+    await registry.pollChanges();
     rows = [];
-    await registry.getDevices();
+    expect((await registry.pollChanges()).removed.map((d) => d.sn)).toEqual(["synthetic-a"]);
     expect(registry.list()).toEqual([]);
+    expect(registry.inventorySnapshot().inventoryEvidence?.quality).toBe("complete");
   });
 });
 describe("sanitized cloud inventory failures", () => {
