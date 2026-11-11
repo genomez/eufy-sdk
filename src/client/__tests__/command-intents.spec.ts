@@ -64,12 +64,11 @@ describe("validated command intent ownership", () => {
     expect(registry.isPropertyCurrent(current)).toBe(true);
   });
 
-  it.each(["station", "all"])("retires pending preparations and all accepted token kinds on %s close", (mode) => {
+  it("retires pending preparations and all accepted token kinds on runtime close", () => {
     const registry = new CommandIntentRegistry();
     const old = registry.acceptValidated("station", "target", registry.allocate())!;
     const preparing = registry.allocate();
-    if (mode === "station") registry.invalidateStation("station");
-    else registry.close();
+    registry.close();
     expect(registry.isCurrent(old)).toBe(false);
     expect(registry.isPropertyCurrent(old)).toBe(false);
     expect(registry.acceptValidated("station", "target", preparing)).toBeUndefined();

@@ -38,6 +38,9 @@ export interface GuardOperation {
   session?: number;
   sessionChanged?: boolean;
   lastObservedMode?: number;
+  confirmationRequested?: boolean;
+  confirmationAt?: number;
+  confirmationTimer?: ReturnType<typeof setTimeout>;
   timer?: ReturnType<typeof setTimeout>;
   terminalAt?: number;
   promise?: Promise<GuardReceipt>;
@@ -52,7 +55,10 @@ export class GuardConfirmationOwner {
   private active = new Map<string, GuardOperation>();
   private receipts = new Map<string, GuardOperation>();
   private totals = { reported: 0, contradicted: 0, not_reported: 0 };
-  constructor(private readonly event: (receipt: GuardReceipt) => void) {}
+  constructor(
+    private readonly event: (receipt: GuardReceipt) => void,
+    private readonly confirm?: (op: GuardOperation) => void,
+  ) {}
 
   begin(deviceSn: string, station: string, param: number, requestedMode: number, caller?: string): GuardOperation {
     this.prune();
@@ -136,13 +142,17 @@ export class GuardConfirmationOwner {
     clearTimeout(op.timer);
     op.timer = setTimeout(() => this.expire(op), Math.min(20_000, op.deadline - op.dispatchAt));
     op.timer.unref?.();
+    const confirmationDelay = Math.min(12_000, Math.max(0, op.deadline - op.dispatchAt - 8_000));
+    op.confirmationAt = op.dispatchAt + confirmationDelay;
+    op.confirmationTimer = setTimeout(() => this.confirmContradiction(op), confirmationDelay);
+    op.confirmationTimer.unref?.();
     this.event({ ...op.receipt });
   }
 
   dispatched(op: GuardOperation, session?: number): void {
     if (!this.current(op)) return;
     this.sent(op);
-    op.session = session;
+    op.session ??= session;
   }
 
   /** Current-session reports correlate temporally across replacements; different modes remain provisional. */
@@ -155,30 +165,50 @@ export class GuardConfirmationOwner {
   ): void {
     for (const op of this.active.values()) {
       if (op.station !== station || op.receipt.deviceSn !== deviceSn || op.dispatchAt === undefined) continue;
-      if (op.session !== undefined && session !== undefined && op.session !== session) op.sessionChanged = true;
+      if (receivedAt <= op.dispatchAt) continue;
+      if (op.session !== undefined && session !== undefined && op.session !== session) {
+        op.session = session;
+        op.sessionChanged = true;
+        op.lastObservedMode = undefined;
+      }
+      if (session !== undefined) op.session = session;
       if (!this.current(op)) continue;
       if (performance.now() >= op.dispatchAt + 20_000) {
         this.expire(op);
         continue;
       }
       const raw = params[op.param];
-      if (receivedAt <= op.dispatchAt || typeof raw !== "string" || !/^[0-9]+$/.test(raw) || !guardModeRequest(raw))
-        continue;
+      if (typeof raw !== "string" || !/^[0-9]+$/.test(raw) || !guardModeRequest(raw)) continue;
       op.lastObservedMode = Number(raw);
       if (op.lastObservedMode === op.receipt.requestedMode) this.finish(op, "reported", "reported_after_command");
+      else if (performance.now() >= op.confirmationAt!) this.confirmContradiction(op);
     }
   }
 
+  private confirmContradiction(op: GuardOperation): void {
+    if (
+      !this.current(op) ||
+      op.confirmationRequested ||
+      op.lastObservedMode === undefined ||
+      op.lastObservedMode === op.receipt.requestedMode ||
+      performance.now() >= op.dispatchAt! + 20_000
+    )
+      return;
+    op.confirmationRequested = true;
+    this.confirm?.(op);
+  }
+
   private expire(op: GuardOperation): void {
-    if (op.sessionChanged) this.finish(op, "not_reported", "session_changed");
-    else if (op.lastObservedMode !== undefined && op.lastObservedMode !== op.receipt.requestedMode)
+    if (op.lastObservedMode !== undefined && op.lastObservedMode !== op.receipt.requestedMode)
       this.finish(op, "contradicted", "different_mode_reported");
+    else if (op.sessionChanged) this.finish(op, "not_reported", "session_changed");
     else this.finish(op, "not_reported", performance.now() >= op.deadline ? "budget_expired" : "window_expired");
   }
 
   finish(op: GuardOperation, outcome: Exclude<GuardReceipt["outcome"], "pending">, reason: GuardReason): void {
     if (op.receipt.outcome !== "pending") return;
     clearTimeout(op.timer);
+    clearTimeout(op.confirmationTimer);
     op.abortCleanup?.();
     op.receipt = { ...op.receipt, outcome, reason, outcomeAtMs: Date.now() };
     op.terminalAt = performance.now();
@@ -191,7 +221,10 @@ export class GuardConfirmationOwner {
 
   /** Session retirement preserves the original report window and never grants another send. */
   closeStation(station: string): void {
-    for (const op of this.pendingStation(station)) op.sessionChanged = true;
+    for (const op of this.pendingStation(station)) {
+      op.sessionChanged = true;
+      op.lastObservedMode = undefined;
+    }
   }
 
   pendingStation(station: string): GuardOperation[] {

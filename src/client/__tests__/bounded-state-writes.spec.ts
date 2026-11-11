@@ -100,7 +100,7 @@ afterEach(() => {
 });
 
 describe("public bounded absolute-state writes", () => {
-  it.each([1_000, 60_000])(
+  it.each([1_000, 59_900, 60_000])(
     "keeps an unbound OFF correction through session close within its deadline (%s)",
     async (delay) => {
       vi.useFakeTimers();
@@ -127,6 +127,33 @@ describe("public bounded absolute-state writes", () => {
       }
     },
   );
+  it.each([59_900, 60_000])("bounds legacy preparation after session close at %s ms", async (delay) => {
+    vi.useFakeTimers();
+    const f = fixture([0, 0, 0, 0, 0]);
+    try {
+      const first = f.eufy.setProperty(targets[0]!, "light", true);
+      await vi.advanceTimersByTimeAsync(0);
+      await first;
+      const record = await f.client.registry.record(targets[0]!);
+      const preparation = Promise.withResolvers<typeof record>();
+      f.record.mockImplementationOnce(() => preparation.promise);
+      const pending = f.eufy.setProperty(targets[0]!, "light", false).then(
+        () => "sent",
+        (error: Error) => error.message,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      f.session.close();
+      await vi.advanceTimersByTimeAsync(delay);
+      if (delay === 60_000) expect(await pending).toBe("command preparation expired");
+      preparation.resolve(record);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await pending).toBe(delay < 60_000 ? "sent" : "command preparation expired");
+      expect(f.packets).toHaveLength(delay < 60_000 ? 2 : 1);
+      expect(f.client.propertyPreparations.size).toBe(0);
+    } finally {
+      await f.eufy.disconnect();
+    }
+  });
   it.each(["normal", ...targets.map((_, i) => `slow-${i}`), ...targets.map((_, i) => `silent-${i}`)])(
     "serves five distinct roster targets within the quantitative bounds: %s",
     async (scenario) => {

@@ -423,14 +423,22 @@ export class EufyMega extends EventEmitter {
   private readonly boundParamIds = new Map<string, ReadonlySet<number>>();
   /** Cloud presence and report/write-observation precedence are evidence IDs, never retained raw values. */
   private readonly cloudParamIds = new WeakMap<Device, ReadonlySet<number>>();
-  private guardConfirmation = new GuardConfirmationOwner((receipt) => this.emit("guardConfirmation", receipt));
+  private readonly guardReads = new WeakMap<GuardOperation, Promise<void>>();
+  private readonly guardReconnects = new WeakSet<GuardOperation>();
+  private guardConfirmation = new GuardConfirmationOwner(
+    (receipt) => this.emit("guardConfirmation", receipt),
+    (op) => void this.refreshGuardState(op, "confirmation"),
+  );
   private guardScope = "";
   private guardOwner(): GuardConfirmationOwner {
     const scope = JSON.stringify([this.realtimeEpoch, this.mega.auth?.userId ?? null]);
     if (scope !== this.guardScope) {
       this.guardScope = scope;
       this.guardConfirmation.close();
-      this.guardConfirmation = new GuardConfirmationOwner((receipt) => this.emit("guardConfirmation", receipt));
+      this.guardConfirmation = new GuardConfirmationOwner(
+        (receipt) => this.emit("guardConfirmation", receipt),
+        (op) => void this.refreshGuardState(op, "confirmation"),
+      );
       this.emit("guardRuntime", { version: 1, runtimeGeneration: this.guardConfirmation.runtimeGeneration });
     }
     return this.guardConfirmation;
@@ -440,9 +448,45 @@ export class EufyMega extends EventEmitter {
   private refreshPendingGuardState(station: string): void {
     for (const op of this.guardOwner().pendingStation(station)) {
       if (!op.sessionChanged || !this.guardOwner().current(op)) continue;
-      const timeoutMs = Math.min(15_000, op.deadline - performance.now(), op.dispatchAt! + 20_000 - performance.now());
-      if (timeoutMs <= 0) continue;
-      void this.refreshDeviceState(op.receipt.deviceSn, { timeoutMs }).catch(() => {});
+      void this.refreshGuardState(op);
+    }
+  }
+
+  /** Coalesced session recovery and one confirming read share the original report deadline. */
+  private refreshGuardState(op: GuardOperation, afterCurrent?: "confirmation" | "recovery"): Promise<void> {
+    const previous = this.guardReads.get(op);
+    if (previous)
+      return afterCurrent
+        ? previous.then(() => {
+            if (
+              afterCurrent === "recovery" ||
+              (op.lastObservedMode !== undefined && op.lastObservedMode !== op.receipt.requestedMode)
+            )
+              return this.refreshGuardState(op);
+          })
+        : previous;
+    const read = Promise.resolve()
+      .then(async () => {
+        if (!this.guardOwner().current(op)) return;
+        const now = performance.now();
+        const timeoutMs = Math.floor(Math.min(15_000, op.deadline - now, op.dispatchAt! + 20_000 - now));
+        if (timeoutMs <= 0) return;
+        await this.refreshDeviceState(op.receipt.deviceSn, { timeoutMs });
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (this.guardReads.get(op) === read) this.guardReads.delete(op);
+      });
+    this.guardReads.set(op, read);
+    return read;
+  }
+
+  /** One automatic reconnect read per pending attempt; failed reconnects cannot loop or renew the window. */
+  private recoverPendingGuardState(station: string): void {
+    for (const op of this.guardOwner().pendingStation(station)) {
+      if (this.guardReconnects.has(op)) continue;
+      this.guardReconnects.add(op);
+      void this.refreshGuardState(op, "recovery");
     }
   }
 
@@ -781,6 +825,7 @@ export class EufyMega extends EventEmitter {
         this.guardOwner().closeStation(stationSn);
         this.lateContrary.closeStation(stationSn);
         this.lateEffects.closeStation(stationSn);
+        this.recoverPendingGuardState(stationSn);
       },
       requestsCommandReadback: (stationSn, deviceSn, command, frame) =>
         rtcCommandReadbackRequested(stationSn, deviceSn, command, frame, this.registry),
@@ -2227,7 +2272,7 @@ export class EufyMega extends EventEmitter {
               current.guard
                 ? Math.min(
                     deadlineAtMs ?? Infinity,
-                    Date.now() + Math.max(0, current.guard.deadline - performance.now()),
+                    Date.now() + Math.max(0, Math.floor(current.guard.deadline - performance.now())),
                   )
                 : deadlineAtMs,
               current,
@@ -4247,31 +4292,36 @@ export class EufyMega extends EventEmitter {
         ...invocation.execution,
         signal: options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
       };
+    } else {
+      if (this.propertyPreparations.size >= 1_024) throw new Error("command preparation capacity exhausted");
+      controller = new AbortController();
+      this.propertyPreparations.add(controller);
     }
+    const preparationSignal = invocation.execution?.signal ?? controller.signal;
+    const preparationByMs = invocation.execution?.sendByMs ?? Math.min(bornAtMs + 60_000, guard?.deadline ?? Infinity);
     try {
-      invocation.execution?.signal?.throwIfAborted();
+      preparationSignal?.throwIfAborted();
       observation?.mark("command_context");
       const preparation = this.commandContext(sn);
-      const ctx = invocation.execution
-        ? await Promise.race([
-            preparation,
-            new Promise<never>((_, reject) => {
-              rejectPreparation = () => reject(new Error("command preparation cancelled"));
-              invocation.execution!.signal!.addEventListener("abort", rejectPreparation, { once: true });
-              timer = setTimeout(
-                () => reject(new Error("command preparation expired")),
-                Math.max(0, invocation.execution!.sendByMs - performance.now()),
-              );
-            }),
-          ])
-        : await preparation;
+      const ctx = await Promise.race([
+        preparation,
+        new Promise<never>((_, reject) => {
+          rejectPreparation = () => reject(new Error("command preparation cancelled"));
+          preparationSignal?.addEventListener("abort", rejectPreparation, { once: true });
+          timer = setTimeout(
+            () => reject(new Error("command preparation expired")),
+            Math.max(0, Math.ceil(preparationByMs - performance.now())),
+          );
+        }),
+      ]);
       clearTimeout(timer);
-      if (rejectPreparation) invocation.execution?.signal?.removeEventListener("abort", rejectPreparation);
+      if (rejectPreparation) preparationSignal?.removeEventListener("abort", rejectPreparation);
       if (epoch !== this.realtimeEpoch) {
         if (options?.profile) return terminal("closed_before_send");
         throw new Error("command preparation interrupted");
       }
       invocation.execution?.signal?.throwIfAborted();
+      if (!invocation.execution && performance.now() >= preparationByMs) throw new Error("command preparation expired");
       if (invocation.execution && performance.now() >= invocation.execution.sendByMs)
         return terminal("expired_before_send");
       if (guard && !this.guardOwner().current(guard)) return terminal("superseded_before_send");
@@ -4321,7 +4371,7 @@ export class EufyMega extends EventEmitter {
     } finally {
       this.lateContrary.finishCorrection(sn, ordinal);
       clearTimeout(timer);
-      if (rejectPreparation) invocation.execution?.signal?.removeEventListener("abort", rejectPreparation);
+      if (rejectPreparation) preparationSignal?.removeEventListener("abort", rejectPreparation);
       if (controller) this.propertyPreparations.delete(controller);
     }
   }

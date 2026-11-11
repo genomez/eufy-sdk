@@ -282,7 +282,6 @@ describe("bounded contrary observation evidence", () => {
     await vi.advanceTimersByTimeAsync(16_000);
     const old = f.observer.confirm("camera", f.owner.ordinal);
     f.observer.closeStation("station");
-    f.intents.invalidateStation("station");
     expect(f.reads[0]!.signal.aborted).toBe(true);
     f.reads[0]!.resolve(f.response(true));
     expect(await old).toMatchObject({ confirmed: false });
@@ -300,11 +299,10 @@ describe("bounded contrary observation evidence", () => {
     expect(f.events.at(-1)?.state).toBe("expired");
   });
 
-  it("new explicit authority retires a suspended watch even after station registry invalidation", async () => {
+  it("new explicit authority retires a suspended watch after session closure", async () => {
     vi.useFakeTimers();
     const f = fixture();
     f.observer.closeStation("station");
-    f.intents.invalidateStation("station");
     f.intents.acceptValidated("station", "camera", f.intents.allocate(), "light");
     expect(f.events.map((event) => event.state)).toEqual(["suspended", "superseded"]);
     await expect(f.observer.confirm("camera", f.owner.ordinal, undefined, true)).rejects.toThrow("unavailable");

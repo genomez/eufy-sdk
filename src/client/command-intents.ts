@@ -14,7 +14,6 @@ export class CommandIntentRegistry {
   private ordinal = 0;
   private generation = 0;
   private floor = 0;
-  private readonly stationFloors = new Map<string, number>();
   private readonly targets = new Map<string, CommandIntent>();
   private readonly properties = new Map<string, CommandIntent>();
   private readonly replacements = new Map<string, CommandIntent>();
@@ -38,12 +37,7 @@ export class CommandIntentRegistry {
     replacementKey?: string,
     replaceUnsent = true,
   ): CommandIntent | undefined {
-    if (
-      !Number.isSafeInteger(ordinal) ||
-      ordinal <= Math.max(this.floor, this.stationFloors.get(station) ?? 0) ||
-      ordinal > this.ordinal
-    )
-      return undefined;
+    if (!Number.isSafeInteger(ordinal) || ordinal <= this.floor || ordinal > this.ordinal) return undefined;
     const key = this.targetKey(station, device);
     const previous = this.targets.get(key);
     if (previous && ordinal === previous.ordinal) return undefined;
@@ -78,7 +72,7 @@ export class CommandIntentRegistry {
 
   /** Only a newer explicit declaration for the same property replaces an unsent property write. */
   isPropertyCurrent(intent: CommandIntent): boolean {
-    if (intent.ordinal <= Math.max(this.floor, this.stationFloors.get(intent.station) ?? 0)) return false;
+    if (intent.ordinal <= this.floor) return false;
     if (intent.replacementKey === undefined) return true;
     const key = JSON.stringify([intent.station, intent.device, intent.replacementKey]);
     return intent.replaceUnsent === false
@@ -91,29 +85,12 @@ export class CommandIntentRegistry {
     return () => this.listeners.delete(listener);
   }
 
-  /** Explicit authority reset retires preparation and recovery; a transport session close is not an authority reset. */
-  invalidateStation(station: string): void {
-    if (!this.stationFloors.has(station) && this.stationFloors.size >= this.capacity) {
-      this.close();
-      return;
-    }
-    this.stationFloors.set(station, this.ordinal);
-    for (const [key, intent] of this.targets) {
-      if (intent.station !== station) continue;
-      this.targets.delete(key);
-      for (const listener of this.listeners) listener(intent, undefined);
-    }
-    for (const [key, intent] of this.properties) if (intent.station === station) this.properties.delete(key);
-    for (const [key, intent] of this.replacements) if (intent.station === station) this.replacements.delete(key);
-  }
-
   close(): void {
     this.floor = this.ordinal;
     for (const intent of this.targets.values()) for (const listener of this.listeners) listener(intent, undefined);
     this.targets.clear();
     this.properties.clear();
     this.replacements.clear();
-    this.stationFloors.clear();
   }
 
   private targetKey(station: string, device: string): string {
