@@ -36,6 +36,8 @@ export interface GuardOperation {
   deadline: number;
   dispatchAt?: number;
   session?: number;
+  sessionChanged?: boolean;
+  lastObservedMode?: number;
   timer?: ReturnType<typeof setTimeout>;
   terminalAt?: number;
   promise?: Promise<GuardReceipt>;
@@ -127,24 +129,23 @@ export class GuardConfirmationOwner {
   }
 
   sent(op: GuardOperation): void {
-    if (this.current(op)) op.receipt.attempts = 1;
-  }
-
-  dispatched(op: GuardOperation, session?: number): void {
-    if (!this.current(op)) return;
+    if (!this.current(op) || op.dispatchAt !== undefined) return;
+    op.receipt.attempts = 1;
     op.dispatchAt = performance.now();
-    op.session = session;
     op.receipt.reason = "waiting_report";
     clearTimeout(op.timer);
-    op.timer = setTimeout(
-      () => this.finish(op, "not_reported", performance.now() >= op.deadline ? "budget_expired" : "window_expired"),
-      Math.min(20_000, op.deadline - op.dispatchAt),
-    );
+    op.timer = setTimeout(() => this.expire(op), Math.min(20_000, op.deadline - op.dispatchAt));
     op.timer.unref?.();
     this.event({ ...op.receipt });
   }
 
-  /** Unknown session identity preserves temporal correlation; only two known generations can differ. */
+  dispatched(op: GuardOperation, session?: number): void {
+    if (!this.current(op)) return;
+    this.sent(op);
+    op.session = session;
+  }
+
+  /** Current-session reports correlate temporally across replacements; different modes remain provisional. */
   observe(
     station: string,
     deviceSn: string,
@@ -154,24 +155,25 @@ export class GuardConfirmationOwner {
   ): void {
     for (const op of this.active.values()) {
       if (op.station !== station || op.receipt.deviceSn !== deviceSn || op.dispatchAt === undefined) continue;
-      if (op.session !== undefined && session !== undefined && op.session !== session) {
-        this.finish(op, "not_reported", "session_changed");
-        continue;
-      }
+      if (op.session !== undefined && session !== undefined && op.session !== session) op.sessionChanged = true;
       if (!this.current(op)) continue;
       if (performance.now() >= op.dispatchAt + 20_000) {
-        this.finish(op, "not_reported", "window_expired");
+        this.expire(op);
         continue;
       }
       const raw = params[op.param];
       if (receivedAt <= op.dispatchAt || typeof raw !== "string" || !/^[0-9]+$/.test(raw) || !guardModeRequest(raw))
         continue;
-      this.finish(
-        op,
-        Number(raw) === op.receipt.requestedMode ? "reported" : "contradicted",
-        Number(raw) === op.receipt.requestedMode ? "reported_after_command" : "different_mode_reported",
-      );
+      op.lastObservedMode = Number(raw);
+      if (op.lastObservedMode === op.receipt.requestedMode) this.finish(op, "reported", "reported_after_command");
     }
+  }
+
+  private expire(op: GuardOperation): void {
+    if (op.sessionChanged) this.finish(op, "not_reported", "session_changed");
+    else if (op.lastObservedMode !== undefined && op.lastObservedMode !== op.receipt.requestedMode)
+      this.finish(op, "contradicted", "different_mode_reported");
+    else this.finish(op, "not_reported", performance.now() >= op.deadline ? "budget_expired" : "window_expired");
   }
 
   finish(op: GuardOperation, outcome: Exclude<GuardReceipt["outcome"], "pending">, reason: GuardReason): void {
@@ -187,9 +189,13 @@ export class GuardConfirmationOwner {
     this.event({ ...op.receipt });
   }
 
+  /** Session retirement preserves the original report window and never grants another send. */
   closeStation(station: string): void {
-    for (const op of this.active.values())
-      if (op.station === station) this.finish(op, "not_reported", "session_changed");
+    for (const op of this.pendingStation(station)) op.sessionChanged = true;
+  }
+
+  pendingStation(station: string): GuardOperation[] {
+    return [...this.active.values()].filter((op) => op.station === station && op.dispatchAt !== undefined);
   }
   close(): void {
     for (const op of this.active.values()) this.finish(op, "not_reported", "runtime_closed");

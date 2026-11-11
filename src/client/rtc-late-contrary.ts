@@ -278,7 +278,7 @@ export class RtcLateContraryObserver {
   /** Session retirement invalidates evidence while preserving original ownership, expiry and read budgets. */
   private suspend(watch: Watch): void {
     if (!watch.active) {
-      this.remove(watch, "closed");
+      watch.last = undefined;
       return;
     }
     if (watch.sessionGeneration === undefined) return;

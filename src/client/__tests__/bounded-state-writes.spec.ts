@@ -100,6 +100,33 @@ afterEach(() => {
 });
 
 describe("public bounded absolute-state writes", () => {
+  it.each([1_000, 60_000])(
+    "keeps an unbound OFF correction through session close within its deadline (%s)",
+    async (delay) => {
+      vi.useFakeTimers();
+      const f = fixture([0, 0, 0, 0, 0]);
+      try {
+        const first = f.eufy.setPropertyWithReceipt(targets[0]!, "light", true, profile);
+        await vi.advanceTimersByTimeAsync(0);
+        expect((await first).status).toBe("acknowledged");
+        const record = await f.client.registry.record(targets[0]!);
+        const preparation = Promise.withResolvers<typeof record>();
+        f.record.mockImplementationOnce(() => preparation.promise);
+        const correction = f.eufy.setPropertyWithReceipt(targets[0]!, "light", false, profile);
+        await vi.advanceTimersByTimeAsync(0);
+        f.session.close();
+        await vi.advanceTimersByTimeAsync(delay);
+        preparation.resolve(record);
+        await vi.advanceTimersByTimeAsync(0);
+        const receipt = await correction;
+        expect(receipt.status).toBe(delay < 60_000 ? "acknowledged" : "expired_before_send");
+        expect(f.packets).toHaveLength(delay < 60_000 ? 2 : 1);
+        if (delay < 60_000) expect(receipt.sessionGeneration).toBe(2);
+      } finally {
+        await f.eufy.disconnect();
+      }
+    },
+  );
   it.each(["normal", ...targets.map((_, i) => `slow-${i}`), ...targets.map((_, i) => `silent-${i}`)])(
     "serves five distinct roster targets within the quantitative bounds: %s",
     async (scenario) => {

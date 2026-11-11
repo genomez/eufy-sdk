@@ -3,6 +3,7 @@ import { GuardConfirmationOwner } from "../guard-confirmation.js";
 import { EufyMega } from "../eufy-mega.js";
 import { EventEmitter } from "node:events";
 import { performance as rtcPerformance } from "node:perf_hooks";
+import { observeCommand } from "../../core/contracts.js";
 import { buildPortalHeader, parsePortalHeader, type PortalResponse } from "../../transport/rtc/portal-packet.js";
 const sn = "T9000P0000000000";
 beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] }));
@@ -65,8 +66,9 @@ describe("guard temporal report owner", () => {
     owner.observe(sn, sn, { 1230: "1" }, report);
     expect(op.receipt.outcome).toBe("pending");
     owner.observe(sn, sn, { 1224: "63" }, report);
+    expect(op.receipt.outcome).toBe("pending");
     owner.observe(sn, sn, { 1224: "1" }, report);
-    expect(op.receipt).toMatchObject({ outcome: "contradicted", reason: "different_mode_reported", attempts: 1 });
+    expect(op.receipt).toMatchObject({ outcome: "reported", reason: "reported_after_command", attempts: 1 });
   });
   it.each([70, undefined])("expires an unknown-session report window after dispatch session %s", async (session) => {
     const { owner, begin } = fixture();
@@ -94,7 +96,7 @@ describe("guard temporal report owner", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(op.receipt.attempts).toBe(1);
   });
-  it("ignores pre-existing matches, currentMode, and reports before dispatch completion", async () => {
+  it("ignores pre-existing matches and currentMode", async () => {
     const { owner, begin } = fixture();
     const op = begin();
     owner.observe(sn, sn, { 1224: "1" }, 1);
@@ -106,13 +108,16 @@ describe("guard temporal report owner", () => {
     owner.observe(sn, sn, { 1224: "1" }, 1);
     expect(op.receipt).toMatchObject({ outcome: "reported", reason: "reported_after_command", attempts: 1 });
   });
-  it("wrong requested mode is terminal and later matching reports cannot rewrite it", async () => {
+  it("a differing mode becomes terminal only at the original window end", async () => {
     const { owner, begin } = fixture();
     const op = begin();
     owner.sent(op);
     owner.dispatched(op, 1);
     await vi.advanceTimersByTimeAsync(1);
     owner.observe(sn, sn, { 1224: "63" }, 1);
+    expect(op.receipt.outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(op.receipt).toMatchObject({ outcome: "contradicted", reason: "different_mode_reported", attempts: 1 });
     owner.observe(sn, sn, { 1224: "1" }, 1);
     expect(op.receipt.outcome).toBe("contradicted");
   });
@@ -176,7 +181,7 @@ describe("guard temporal report owner", () => {
     ["runtime", 1],
     ["session", undefined],
     ["runtime", undefined],
-  ] as const)("cancels on %s with session %s and has no retry", async (kind, session) => {
+  ] as const)("preserves session windows but cancels runtime close: %s, %s", async (kind, session) => {
     const { owner, begin } = fixture();
     const op = begin();
     owner.sent(op);
@@ -185,17 +190,48 @@ describe("guard temporal report owner", () => {
     else owner.close();
     await vi.advanceTimersByTimeAsync(1);
     owner.observe(sn, sn, { 1224: "1" });
-    expect(op.receipt.reason).toBe(kind === "session" ? "session_changed" : "runtime_closed");
+    expect(op.receipt.reason).toBe(kind === "session" ? "reported_after_command" : "runtime_closed");
     expect(op.receipt.attempts).toBe(1);
   });
-  it("replacement session reports cannot settle the previous session", async () => {
+  it("a matching current report from a newer session settles the original attempt", async () => {
     const { owner, begin } = fixture();
     const op = begin();
     owner.sent(op);
     owner.dispatched(op, 1);
     await vi.advanceTimersByTimeAsync(1);
     owner.observe(sn, sn, { 1224: "1" }, 2);
-    expect(op.receipt.reason).toBe("session_changed");
+    expect(op.receipt.reason).toBe("reported_after_command");
+  });
+  it("expires without an early terminal event after a session close", async () => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    owner.sent(op);
+    owner.dispatched(op, 1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    owner.closeStation(sn);
+    expect(op.receipt.outcome).toBe("pending");
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(op.receipt).toMatchObject({ outcome: "not_reported", reason: "session_changed", attempts: 1 });
+  });
+  it("starts at send and never renews the window at ACK", async () => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    owner.sent(op);
+    await vi.advanceTimersByTimeAsync(12_000);
+    owner.dispatched(op, 1);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(op.receipt).toMatchObject({ outcome: "not_reported", reason: "window_expired", attempts: 1 });
+  });
+  it("uses session_changed at expiry even when a different mode was observed", async () => {
+    const { owner, begin } = fixture();
+    const op = begin();
+    owner.sent(op);
+    owner.dispatched(op, 1);
+    await vi.advanceTimersByTimeAsync(1);
+    owner.observe(sn, sn, { 1224: "63" }, 1);
+    owner.closeStation(sn);
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(op.receipt).toMatchObject({ outcome: "not_reported", reason: "session_changed", attempts: 1 });
   });
   it("retains only 32 terminal receipts for ten monotonic minutes, with anonymous counters", async () => {
     const { owner, begin } = fixture();
@@ -252,9 +288,9 @@ class GuardSession extends EventEmitter {
       1,
     );
   }
-  information() {
-    const body = Buffer.from(JSON.stringify({ params: [{ channel: 255, param_type: 1224, param_value: 1 }] }));
-    this.emit("commandData", Buffer.concat([buildPortalHeader(1103, body.length, 255, 0), body]), 3);
+  information(mode = 1, commandId = 1103) {
+    const body = Buffer.from(JSON.stringify({ params: [{ channel: 255, param_type: 1224, param_value: mode }] }));
+    this.emit("commandData", Buffer.concat([buildPortalHeader(commandId, body.length, 255, 0), body]), 3);
   }
   close() {
     this.isConnected = false;
@@ -262,7 +298,227 @@ class GuardSession extends EventEmitter {
   }
 }
 
+function wireFixture(readback = true) {
+  const f = clientFixture();
+  f.send.mockRestore();
+  if (readback) f.client.refreshEventState.mockRestore();
+  vi.spyOn(rtcPerformance, "now").mockImplementation(() => performance.now());
+  vi.spyOn(f.client.registry, "refreshedList").mockImplementation(async () => f.client.registry.list());
+  const sessions: GuardSession[] = [];
+  f.client.rtc.deps.identity = () => ({ authToken: "synthetic", userId: "synthetic-user" });
+  f.client.rtc.deps.shard = () => "us-pr";
+  f.client.rtc.deps.createSession = () => {
+    const session = new GuardSession();
+    sessions.push(session);
+    return session;
+  };
+  return { ...f, sessions };
+}
+
 describe("real facade transaction wiring", () => {
+  it("sends a guard invocation still preparing when the previous session closes", async () => {
+    const { eufy, client, sessions } = wireFixture(false);
+    try {
+      const initial = eufy.setGuardModeWithReceipt(sn, 1);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
+      sessions[0]!.ack(sessions[0]!.packets[0]!);
+      await vi.advanceTimersByTimeAsync(0);
+      const first = await initial;
+      sessions[0]!.information();
+      expect(eufy.getGuardConfirmation(first.handle)?.outcome).toBe("reported");
+      const context = await client.commandContext(sn);
+      const preparation = Promise.withResolvers<unknown>();
+      client.commandContext.mockImplementationOnce(() => preparation.promise);
+      const pending = eufy.setGuardModeWithReceipt(sn, 63);
+      await vi.advanceTimersByTimeAsync(0);
+      sessions[0]!.close();
+      await vi.advanceTimersByTimeAsync(100);
+      preparation.resolve(context);
+      await vi.advanceTimersByTimeAsync(0);
+      const next = sessions[1]!;
+      expect(next.packets).toHaveLength(1);
+      next.ack(next.packets[0]!);
+      await vi.advanceTimersByTimeAsync(0);
+      const receipt = await pending;
+      await vi.advanceTimersByTimeAsync(1);
+      next.information(63);
+      expect(eufy.getGuardConfirmation(receipt.handle)).toMatchObject({ outcome: "reported", attempts: 1 });
+    } finally {
+      await eufy.disconnect();
+    }
+  });
+  it("reads the device after ACK even when the cached mode already matches", async () => {
+    const { eufy, sessions } = wireFixture();
+    try {
+      const pending = eufy.setGuardModeWithReceipt(sn, 1);
+      await vi.advanceTimersByTimeAsync(0);
+      const session = sessions[0]!;
+      await vi.advanceTimersByTimeAsync(1);
+      session.ack(session.packets[0]!);
+      await vi.advanceTimersByTimeAsync(0);
+      const receipt = await pending;
+      expect(receipt.outcome).toBe("pending");
+      expect(session.packets.map((p) => parsePortalHeader(p)!.commandId)).toEqual([1350, 1103]);
+      session.ack(session.packets[1]!);
+      await vi.advanceTimersByTimeAsync(1);
+      session.information();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(eufy.getGuardConfirmation(receipt.handle)).toMatchObject({ outcome: "reported", attempts: 1 });
+    } finally {
+      await eufy.disconnect();
+    }
+  });
+  it("accepts a matching report before ACK without moving the send timestamp", async () => {
+    const { eufy, client, sessions } = wireFixture();
+    try {
+      const pending = eufy.setGuardModeWithReceipt(sn, 1);
+      await vi.advanceTimersByTimeAsync(0);
+      const session = sessions[0]!;
+      const op = client.guardOwner().pendingStation(sn)[0];
+      expect(op.dispatchAt).toBe(0);
+      await vi.advanceTimersByTimeAsync(100);
+      session.information();
+      expect((await pending).outcome).toBe("reported");
+      await vi.advanceTimersByTimeAsync(100);
+      session.ack(session.packets[0]!);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(op.dispatchAt).toBe(0);
+      expect(parsePortalHeader(session.packets[1]!)?.commandId).toBe(1103);
+      session.ack(session.packets[1]!);
+      session.information();
+    } finally {
+      await eufy.disconnect();
+    }
+  });
+  it("keeps a stale first readback provisional until a later matching push", async () => {
+    const { eufy, sessions } = wireFixture();
+    try {
+      const pending = eufy.setGuardModeWithReceipt(sn, 1);
+      await vi.advanceTimersByTimeAsync(0);
+      const session = sessions[0]!;
+      await vi.advanceTimersByTimeAsync(1);
+      session.ack(session.packets[0]!);
+      await vi.advanceTimersByTimeAsync(0);
+      const receipt = await pending;
+      session.ack(session.packets[1]!);
+      session.information(63);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(eufy.getGuardConfirmation(receipt.handle)?.outcome).toBe("pending");
+      session.information(1);
+      expect(eufy.getGuardConfirmation(receipt.handle)).toMatchObject({ outcome: "reported", attempts: 1 });
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(eufy.getGuardConfirmation(receipt.handle)?.outcome).toBe("reported");
+    } finally {
+      await eufy.disconnect();
+    }
+  });
+  it("requests a fresh read after planned refresh adoption within the original window", async () => {
+    const { eufy, client, sessions } = wireFixture(false);
+    vi.spyOn(client.rtc, "canRefresh").mockReturnValue(true);
+    try {
+      const pending = eufy.setGuardModeWithReceipt(sn, 1);
+      await vi.advanceTimersByTimeAsync(0);
+      const original = sessions[0]!;
+      await vi.advanceTimersByTimeAsync(1);
+      original.ack(original.packets[0]!);
+      await vi.advanceTimersByTimeAsync(0);
+      const receipt = await pending;
+      const replacement = client.rtc.replaceSession(sn, client.rtc.sessions.get(sn));
+      await vi.advanceTimersByTimeAsync(0);
+      const next = sessions[1]!;
+      next.ack(next.packets[0]!);
+      next.information(63);
+      await vi.advanceTimersByTimeAsync(0);
+      await replacement;
+      expect(eufy.getGuardConfirmation(receipt.handle)?.outcome).toBe("pending");
+      expect(next.packets.map((p) => parsePortalHeader(p)!.commandId)).toEqual([1103, 1103]);
+      original.information(1);
+      expect(eufy.getGuardConfirmation(receipt.handle)?.outcome).toBe("pending");
+      next.ack(next.packets[1]!);
+      await vi.advanceTimersByTimeAsync(1);
+      next.information(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(eufy.getGuardConfirmation(receipt.handle)).toMatchObject({ outcome: "reported", attempts: 1 });
+    } finally {
+      await eufy.disconnect();
+    }
+  });
+  it("survives a tainted-session drop and reads again when the next session connects", async () => {
+    const { eufy, client, sessions } = wireFixture(false);
+    try {
+      const pending = eufy.setGuardModeWithReceipt(sn, 1);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
+      sessions[0]!.ack(sessions[0]!.packets[0]!);
+      await vi.advanceTimersByTimeAsync(0);
+      const receipt = await pending;
+      const original = client.rtc.sessions.get(sn);
+      original.informationTainted = true;
+      client.rtc.touch(sn, original);
+      expect(eufy.getGuardConfirmation(receipt.handle)?.outcome).toBe("pending");
+      const read = eufy.refreshDeviceState(sn);
+      await vi.advanceTimersByTimeAsync(0);
+      const next = sessions[1]!;
+      expect(next.packets).toHaveLength(1);
+      next.ack(next.packets[0]!);
+      await vi.advanceTimersByTimeAsync(1);
+      next.information();
+      await read;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(eufy.getGuardConfirmation(receipt.handle)).toMatchObject({ outcome: "reported", attempts: 1 });
+      expect(sessions.flatMap((s) => s.packets).filter((p) => parsePortalHeader(p)!.commandId === 1350)).toHaveLength(
+        1,
+      );
+    } finally {
+      await eufy.disconnect();
+    }
+  });
+  it("finishes an implicit guard operation immediately when dispatch throws", async () => {
+    const { eufy, client } = clientFixture();
+    const route = vi.spyOn(client, "routeCommand").mockRejectedValue(new Error("synthetic dispatch failure"));
+    const command = observeCommand(
+      { kind: "set-json", param: 1224, data: { value: 1 }, channel: 255 },
+      {
+        temporalReport: true,
+        event: "armingModeChanged",
+        property: "armingMode",
+        param: 1224,
+        expected: 1,
+        timeoutMs: 20_000,
+      },
+    );
+    try {
+      await expect(client.commandSinkFor(sn).dispatch(command)).rejects.toThrow("synthetic dispatch failure");
+      expect(eufy.getGuardConfirmationDiagnostics()).toMatchObject({ pending: 0, not_reported: 1 });
+      await expect(client.commandSinkFor(sn).dispatch(command)).rejects.toThrow("synthetic dispatch failure");
+      expect(route).toHaveBeenCalledTimes(2);
+      expect(eufy.getGuardConfirmationDiagnostics()).toMatchObject({ pending: 0, not_reported: 2 });
+    } finally {
+      await eufy.disconnect();
+    }
+  });
+  it("does not label unrelated pushes as readbacks during an outstanding information read", async () => {
+    const { eufy, client, sessions } = wireFixture();
+    const frame = vi.spyOn(client, "onRtcFrame");
+    try {
+      const pending = eufy.setGuardModeWithReceipt(sn, 1);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
+      const session = sessions[0]!;
+      session.ack(session.packets[0]!);
+      await vi.advanceTimersByTimeAsync(0);
+      await pending;
+      session.information(63, 1704);
+      const push = frame.mock.calls.find(([, value]) => (value as PortalResponse).commandId === 1704);
+      expect(push).toBeDefined();
+      expect((push?.[2] as any)?.readGeneration).toBeUndefined();
+      session.ack(session.packets[1]!);
+      session.information();
+    } finally {
+      await eufy.disconnect();
+    }
+  });
   it.each([
     ["RTC without identity", 70, undefined],
     ["RTC after unknown dispatch", undefined, 70],
@@ -286,7 +542,7 @@ describe("real facade transaction wiring", () => {
       await eufy.disconnect();
     }
   });
-  it("confirms the real RTC generation 70 readback after a legacy dispatch with unknown session", async () => {
+  it("confirms the incident replay readback and captures the legacy sending session", async () => {
     vi.setSystemTime(1794350132601);
     vi.spyOn(rtcPerformance, "now").mockImplementation(() => performance.now());
     const { eufy, client, send } = clientFixture();
@@ -314,7 +570,8 @@ describe("real facade transaction wiring", () => {
       expect(receipt.outcome).toBe("pending");
       const dispatched = await dispatch.mock.results[0]!.value;
       expect(dispatched).toMatchObject({ status: "acknowledged", sendAttempted: true });
-      expect(dispatched.sessionGeneration).toBeUndefined();
+      expect(dispatched.sessionGeneration).toBe(70);
+      expect(dispatched.sentAtMonotonicMs).toBe(1373);
       expect(client.rtc.getCommandDiagnostics().recent.at(-1)).toMatchObject({
         sessionGeneration: 70,
         matchedResults: 0,

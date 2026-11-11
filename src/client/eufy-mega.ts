@@ -436,6 +436,16 @@ export class EufyMega extends EventEmitter {
     return this.guardConfirmation;
   }
 
+  /** A replacement session can report within the original send-relative window without another write. */
+  private refreshPendingGuardState(station: string): void {
+    for (const op of this.guardOwner().pendingStation(station)) {
+      if (!op.sessionChanged || !this.guardOwner().current(op)) continue;
+      const timeoutMs = Math.min(15_000, op.deadline - performance.now(), op.dispatchAt! + 20_000 - performance.now());
+      if (timeoutMs <= 0) continue;
+      void this.refreshDeviceState(op.receipt.deviceSn, { timeoutMs }).catch(() => {});
+    }
+  }
+
   /** Authoritative current guard runtime; replacement is advertised before its first receipt. */
   getGuardConfirmationScope(): { version: 1; runtimeGeneration: string } {
     return { version: 1, runtimeGeneration: this.guardOwner().runtimeGeneration };
@@ -764,7 +774,9 @@ export class EufyMega extends EventEmitter {
       onSessionReplaced: (stationSn) => {
         this.lateContrary.closeStation(stationSn);
         this.guardOwner().closeStation(stationSn);
+        this.refreshPendingGuardState(stationSn);
       },
+      onSessionConnected: (stationSn) => this.refreshPendingGuardState(stationSn),
       onSessionClosed: (stationSn) => {
         this.guardOwner().closeStation(stationSn);
         this.lateContrary.closeStation(stationSn);
@@ -1738,7 +1750,7 @@ export class EufyMega extends EventEmitter {
    * still turns on its own cadence: each pass re-reads what is known, so a value the device volunteers over
    * its own session settles the wait between two cloud reads rather than after them.
    */
-  private refreshEventState(sn: string, refresh: SemanticEventRefresh): Promise<boolean> {
+  private refreshEventState(sn: string, refresh: SemanticEventRefresh, requireRead = false): Promise<boolean> {
     const epoch = this.realtimeEpoch;
     return (async (): Promise<boolean> => {
       if (epoch !== this.realtimeEpoch) return false;
@@ -1771,7 +1783,7 @@ export class EufyMega extends EventEmitter {
         this.applyAndAnnounce(device, { [refresh.param]: rawValue }, "cached");
         return this.matchesObservation(device.getProperty(refresh.property)?.value, refresh, before);
       };
-      if (refresh.expected !== undefined && settled()) return true;
+      if (!requireRead && refresh.expected !== undefined && settled()) return true;
       if (refresh.expected !== undefined && this.rtcDevice(sn) && Date.now() < deadline) {
         const abort = new AbortController();
         this.observationReads.add(abort);
@@ -2088,9 +2100,14 @@ export class EufyMega extends EventEmitter {
         const observation = commandObservation(cmd);
         if (!current.guard && observation?.temporalReport && typeof observation.expected === "number") {
           const guard = this.guardOwner().begin(sn, target?.stationSn || sn, observation.param, observation.expected);
-          await this.guardOwner().run(guard, () =>
-            this.commandSinkFor(sn, { ...current, guard, receiptRequested: true }).dispatch(cmd),
-          );
+          await this.guardOwner().run(guard, async () => {
+            try {
+              await this.commandSinkFor(sn, { ...current, guard, receiptRequested: true }).dispatch(cmd);
+            } catch (error) {
+              this.guardOwner().finish(guard, "not_reported", "transport_uncertain");
+              throw error;
+            }
+          });
           return;
         }
         current.intent ??= this.commandIntents.acceptValidated(
@@ -2231,7 +2248,7 @@ export class EufyMega extends EventEmitter {
               }
             }
             acknowledge();
-            const refreshed = await this.refreshEventState(sn, observation);
+            const refreshed = await this.refreshEventState(sn, observation, current.guard !== undefined);
             if (!refreshed || epoch !== this.realtimeEpoch) return;
             this.emitSemantic(observation.event, { deviceSn: sn });
             if (observation.resetStandaloneSession && !this.rtcDevice(sn)) await this.recycleStandaloneSession(sn);

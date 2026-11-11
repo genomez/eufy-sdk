@@ -254,11 +254,11 @@ export class RtcLateEffectReconciler {
     intent.recovery.abort();
   }
 
+  /** Retire sent recovery on session close; unbound preparation retains its original ordering and deadlines. */
   closeStation(station: string): void {
     this.stations.get(station)?.read?.abort();
     for (const intent of [...this.intents.values()])
-      if (intent.station === station) this.remove(intent, undefined, "disconnected");
-    this.registry.invalidateStation(station);
+      if (intent.station === station && intent.sentAt !== undefined) this.remove(intent, undefined, "disconnected");
   }
 
   close(): void {

@@ -81,6 +81,40 @@ function fixture(desired = false) {
 afterEach(() => vi.useRealTimers());
 
 describe("bounded contrary observation evidence", () => {
+  it("preserves provisional unsent ownership until the command reports its actual new session", () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const owner = f.intents.acceptValidated("station", "camera", f.intents.allocate(), "light")!;
+    const watch = f.observer.begin(
+      "station",
+      "camera",
+      observeCommand(
+        { kind: "set-json", param: 1400, data: { value: 0 }, channel: 1 },
+        {
+          event: "property changed",
+          param: 1400,
+          property: "light",
+          expected: 0,
+          passiveReadback: true,
+          replaceableState: true,
+          lateEffectReadback: true,
+          timeoutMs: 14_000,
+        },
+      ),
+      owner,
+    );
+    f.observer.closeStation("station");
+    f.observer.finish(watch, {
+      status: "acknowledged",
+      sendAttempted: true,
+      effect: "unconfirmed",
+      sentAtMonotonicMs: Date.now(),
+      sessionGeneration: 2,
+    });
+    f.report(false, 2);
+    expect(f.events.at(-1)).toMatchObject({ state: "matched", intent: owner.ordinal });
+    f.observer.close();
+  });
   it.each([false, true])(
     "keeps watching after first match and confirms opposite %s with two messages",
     async (desired) => {

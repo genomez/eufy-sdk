@@ -91,6 +91,7 @@ export class CommandIntentRegistry {
     return () => this.listeners.delete(listener);
   }
 
+  /** Explicit authority reset retires preparation and recovery; a transport session close is not an authority reset. */
   invalidateStation(station: string): void {
     if (!this.stationFloors.has(station) && this.stationFloors.size >= this.capacity) {
       this.close();

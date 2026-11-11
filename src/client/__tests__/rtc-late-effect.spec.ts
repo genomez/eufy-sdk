@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { observeCommand } from "../../core/contracts.js";
 import { RtcLateEffectReconciler, type LateEffectEvent } from "../rtc-late-effect.js";
+import { CommandIntentRegistry } from "../command-intents.js";
 
 const lightCommand = (value: number, channel = 1) =>
   observeCommand(
@@ -49,6 +50,26 @@ function fixture() {
 afterEach(() => vi.useRealTimers());
 
 describe("RTC late effect station scheduling", () => {
+  it("preserves unsent recovery ownership and preparing ordinals across a session close", () => {
+    const intents = new CommandIntentRegistry();
+    const reconciler = new RtcLateEffectReconciler({
+      intents,
+      canRead: () => true,
+      read: async () => {},
+      event: () => {},
+    });
+    const owner = intents.acceptValidated("station", "camera", intents.allocate(), "light")!;
+    const preparing = intents.allocate();
+    const pending = reconciler.begin("station", "camera", lightCommand(0), { intent: owner });
+    reconciler.closeStation("station");
+    expect(intents.isPropertyCurrent(owner)).toBe(true);
+    expect(intents.isCurrent(owner)).toBe(true);
+    reconciler.sent(pending, Date.now());
+    expect(reconciler.finish(pending, true)).toBe(true);
+    expect(intents.acceptValidated("station", "other-camera", preparing, "light")).toBeDefined();
+    reconciler.close();
+    expect(intents.isPropertyCurrent(owner)).toBe(false);
+  });
   it("accepts pending only while the transmitted generation owns a bounded job", () => {
     vi.useFakeTimers();
     const f = fixture();

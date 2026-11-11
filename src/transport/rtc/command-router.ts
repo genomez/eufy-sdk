@@ -217,9 +217,10 @@ export interface RtcCommandRouterDeps {
       readIssuedAtMonotonicMs?: number;
     },
   ) => void;
-  /** Retirement of the current command session cancels client-owned observations. */
+  /** Current command-session lifecycle, separate from runtime teardown. */
   onSessionClosed?: (stationSn: string) => void;
   onSessionReplaced?: (stationSn: string) => void;
+  onSessionConnected?: (stationSn: string) => void;
   /** Injected report recognizer requests one information read for the targeted command. */
   requestsCommandReadback?: (stationSn: string, deviceSn: string, command: Command, frame: PortalResponse) => boolean;
   /** Injected state decoder confirms only the information read's target parameter. */
@@ -728,7 +729,10 @@ export class RtcCommandRouter {
     this.preemptRecordingReads(this.deps.findDevice(sn)?.stationSn || sn);
     this.eventTableProbes.get(this.deps.findDevice(sn)?.stationSn || sn)?.abort();
     this.playbackProbes.get(this.deps.findDevice(sn)?.stationSn || sn)?.controller.abort();
-    if (!options.execution) return this.dispatchLegacyCommand(sn, cmd, options);
+    if (!options.execution) {
+      await this.dispatchLegacyCommand(sn, cmd, options);
+      return;
+    }
     const receipt = await this.dispatchCommandWithReceipt(sn, cmd, options);
     if (receipt.status === "acknowledged") return;
     if (receipt.rejectionCode !== undefined)
@@ -757,8 +761,7 @@ export class RtcCommandRouter {
     this.playbackProbes.get(this.deps.findDevice(sn)?.stationSn || sn)?.controller.abort();
     const context = options.execution ? Object.freeze({ ...options.execution }) : undefined;
     if (!context) {
-      await this.dispatchLegacyCommand(sn, cmd, options);
-      return Object.freeze({ status: "acknowledged", sendAttempted: true, effect: "unconfirmed" });
+      return this.dispatchLegacyCommand(sn, cmd, options);
     }
     const observer = this.observeCommand(sn);
     const finalize = (receipt: CommandReceipt): CommandReceipt => {
@@ -1021,7 +1024,7 @@ export class RtcCommandRouter {
       intent?: { replacementKey?: string; isCurrent?: () => boolean };
       onResponse?: (receipt: CommandReceipt) => void;
     } = {},
-  ): Promise<void> {
+  ): Promise<CommandReceipt> {
     const owner = this.workOwner(this.deps.findDevice(sn)?.stationSn || sn);
     const budget = this.commandTimeoutMs;
     const deadlineAtMs = options.deadlineAtMs ?? Date.now() + budget;
@@ -1061,6 +1064,8 @@ export class RtcCommandRouter {
     let outcome: ReturnType<typeof commandOutcome> = "success";
     const deadline = new AbortController();
     let sent = false;
+    let sentAtMonotonicMs: number | undefined;
+    let receipt!: CommandReceipt;
     const timerArmedAtMs = Date.now();
     const diagnosticDeadlineAtMs = Math.min(deadlineAtMs, timerArmedAtMs + timeoutMs);
     const timer = setTimeout(
@@ -1151,6 +1156,7 @@ export class RtcCommandRouter {
               : undefined,
             () => {
               sent = true;
+              sentAtMonotonicMs = performance.now();
               observer?.sent();
               options.onSent?.(Date.now());
             },
@@ -1168,32 +1174,35 @@ export class RtcCommandRouter {
         error instanceof StationWorkError && error.reason === "expired_before_send"
           ? new Error("RTC command timed out before send")
           : error;
-      if (deadline.signal.aborted && acknowledged) {
-        if (!acknowledged.error) return;
-        failure = acknowledged.error;
+      if (deadline.signal.aborted && acknowledged && !acknowledged.error) {
+        outcome = "success";
+      } else {
+        if (deadline.signal.aborted && acknowledged?.error) failure = acknowledged.error;
+        outcome = commandOutcome(failure);
+        throw failure;
       }
-      outcome = commandOutcome(failure);
-      throw failure;
     } finally {
-      observer?.finish(
-        Object.freeze({
-          status:
-            outcome === "success"
-              ? "acknowledged"
-              : outcome === "rejected"
-                ? "rejected"
-                : outcome === "ack_timeout"
-                  ? "ack_timeout"
-                  : outcome === "expired_after_send"
-                    ? "expired_after_send"
-                    : outcome === "connect_timeout"
-                      ? "connect_timeout"
-                      : "not_sent",
-          sendAttempted: sent,
-          effect: "unconfirmed",
-          rejectionCode: evidence.rejectionCode ?? undefined,
-        }),
-      );
+      receipt = Object.freeze({
+        status:
+          outcome === "success"
+            ? "acknowledged"
+            : outcome === "rejected"
+              ? "rejected"
+              : outcome === "ack_timeout"
+                ? "ack_timeout"
+                : outcome === "expired_after_send"
+                  ? "expired_after_send"
+                  : outcome === "connect_timeout"
+                    ? "connect_timeout"
+                    : "not_sent",
+        sendAttempted: sent,
+        effect: "unconfirmed",
+        rejectionCode: evidence.rejectionCode ?? undefined,
+        sessionGeneration: evidence.sessionGeneration ?? undefined,
+        sentAtMs: evidence.sendAttemptedAtMs ?? undefined,
+        sentAtMonotonicMs,
+      });
+      observer?.finish(receipt);
       if (evidenceEpoch === this.epoch) this.commandEvidence.finish(evidence, outcome);
       const current = st;
       const releaseExchange = () => {
@@ -1206,6 +1215,7 @@ export class RtcCommandRouter {
       if (run && acknowledged) void run.then(releaseExchange, releaseExchange);
       else releaseExchange();
     }
+    return receipt;
   }
 
   /** At most sixteen issued transactions, retained for sixty seconds after waiter completion. */
@@ -3086,7 +3096,9 @@ export class RtcCommandRouter {
         this.deps.onFrame?.(sn, frame, {
           sessionGeneration: created.generation,
           ...this.receivedIdentity(bytes),
-          ...this.shadowReads.get(created),
+          ...(frame.commandId === 1103 && frame.isResponse === 0 && informationPayload(frame.data)
+            ? this.shadowReads.get(created)
+            : undefined),
         });
       }
     };
@@ -3132,7 +3144,10 @@ export class RtcCommandRouter {
     created.ready = this.bringUp(sn, session, connectTimeoutMs, created.connectionRecord, icePolicy).then(() => {
       created.connectedAtMs = Date.now();
       created.connectedAtMonotonicMs = performance.now();
-      if (this.sessions.get(sn) === created) this.transportState(sn, "connected");
+      if (this.sessions.get(sn) === created) {
+        this.transportState(sn, "connected");
+        this.deps.onSessionConnected?.(sn);
+      }
     });
     return created;
   }
