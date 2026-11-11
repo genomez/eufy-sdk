@@ -39,7 +39,7 @@ export interface GuardOperation {
   sessionChanged?: boolean;
   lastObservedMode?: number;
   confirmationRequested?: boolean;
-  confirmationReadStarted?: boolean;
+  confirmationReadMode?: number;
   confirmationAt?: number;
   confirmationTimer?: ReturnType<typeof setTimeout>;
   timer?: ReturnType<typeof setTimeout>;
@@ -171,6 +171,7 @@ export class GuardConfirmationOwner {
         op.session = session;
         op.sessionChanged = true;
         op.lastObservedMode = undefined;
+        op.confirmationReadMode = undefined;
       }
       if (session !== undefined) op.session = session;
       if (!this.current(op)) continue;
@@ -203,7 +204,8 @@ export class GuardConfirmationOwner {
     if (
       op.lastObservedMode !== undefined &&
       op.lastObservedMode !== op.receipt.requestedMode &&
-      (!this.confirm || op.confirmationReadStarted)
+      op.confirmationReadMode !== undefined &&
+      op.confirmationReadMode !== op.receipt.requestedMode
     )
       this.finish(op, "contradicted", "different_mode_reported");
     else if (op.sessionChanged) this.finish(op, "not_reported", "session_changed");
@@ -229,6 +231,7 @@ export class GuardConfirmationOwner {
     for (const op of this.pendingStation(station)) {
       op.sessionChanged = true;
       op.lastObservedMode = undefined;
+      op.confirmationReadMode = undefined;
     }
   }
 

@@ -13,7 +13,12 @@ afterEach(() => {
 });
 function fixture() {
   const events: any[] = [];
-  const owner = new GuardConfirmationOwner((r) => events.push(r));
+  const owner = new GuardConfirmationOwner(
+    (r) => events.push(r),
+    (op) => {
+      op.confirmationReadMode = op.lastObservedMode;
+    },
+  );
   const begin = (mode = 1, caller?: string) => owner.begin(sn, sn, 1224, mode, caller);
   return { owner, events, begin };
 }
@@ -418,7 +423,7 @@ describe("real facade transaction wiring", () => {
     "confirms a provisional mode with one read around twelve seconds: %s",
     async (response) => {
       const { eufy, client, sessions } = wireFixture();
-      const reads = vi.spyOn(eufy, "refreshDeviceState");
+      const reads = vi.spyOn(client.rtc, "refreshInformation");
       try {
         const pending = eufy.setGuardModeWithReceipt(sn, 1);
         await vi.advanceTimersByTimeAsync(0);
@@ -443,11 +448,20 @@ describe("real facade transaction wiring", () => {
         );
         await vi.advanceTimersByTimeAsync(1);
         expect(eufy.getGuardConfirmation(receipt.handle)).toMatchObject({
-          outcome: response === "matches" ? "reported" : "contradicted",
-          reason: response === "matches" ? "reported_after_command" : "different_mode_reported",
+          outcome: response === "matches" ? "reported" : response === "differs" ? "contradicted" : "not_reported",
+          reason:
+            response === "matches"
+              ? "reported_after_command"
+              : response === "differs"
+                ? "different_mode_reported"
+                : "window_expired",
           attempts: 1,
         });
-        expect(reads.mock.calls.filter(([, options]) => options?.timeoutMs === 8_000)).toHaveLength(1);
+        expect(
+          reads.mock.calls.filter(
+            ([, options]) => (options as { timeoutMs?: number } | undefined)?.timeoutMs === 8_000,
+          ),
+        ).toHaveLength(1);
         expect(sessions.flatMap((s) => s.packets).filter((p) => parsePortalHeader(p)!.commandId === 1350)).toHaveLength(
           1,
         );
@@ -457,6 +471,37 @@ describe("real facade transaction wiring", () => {
       }
     },
   );
+  it("does not assert contradiction when the confirming read times out before window expiry", async () => {
+    const { eufy, client, sessions } = wireFixture(false);
+    client.rtc.deps.ackTimeoutMs = 2_000;
+    try {
+      const pending = eufy.setGuardModeWithReceipt(sn, 1);
+      await vi.advanceTimersByTimeAsync(0);
+      const session = sessions[0]!;
+      await vi.advanceTimersByTimeAsync(1);
+      session.ack(session.packets[0]!);
+      await vi.advanceTimersByTimeAsync(0);
+      const receipt = await pending;
+      session.information(63);
+      await vi.advanceTimersByTimeAsync(11_999);
+      expect(session.packets.map((p) => parsePortalHeader(p)!.commandId)).toEqual([1350, 1103]);
+      session.ack(session.packets[1]!);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(client.rtc.getReadDiagnostics().recent.some((read: any) => read.outcome === "timeout")).toBe(true);
+      expect(eufy.getGuardConfirmation(receipt.handle)?.outcome).toBe("pending");
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(eufy.getGuardConfirmation(receipt.handle)).toMatchObject({
+        outcome: "not_reported",
+        reason: "session_changed",
+        attempts: 1,
+      });
+      expect(sessions.flatMap((s) => s.packets).filter((p) => parsePortalHeader(p)!.commandId === 1350)).toHaveLength(
+        1,
+      );
+    } finally {
+      await eufy.disconnect();
+    }
+  });
   it("requests a confirming read for a differing report first observed after twelve seconds", async () => {
     const { eufy, sessions } = wireFixture(false);
     try {

@@ -477,8 +477,13 @@ export class EufyMega extends EventEmitter {
       const now = performance.now();
       const timeoutMs = Math.floor(Math.min(15_000, op.deadline - now, op.dispatchAt! + 20_000 - now));
       if (timeoutMs <= 0) return;
-      if (afterCurrent === "confirmation") op.confirmationReadStarted = true;
-      await this.refreshDeviceState(op.receipt.deviceSn, { timeoutMs });
+      if (afterCurrent === "confirmation") {
+        const result = await this.rtc.refreshInformation(op.station, { timeoutMs });
+        if (!this.guardOwner().current(op) || !this.rtc.informationResultCurrent(op.station, result)) return;
+        const raw = rtcStateParameters(op.station, result.frame, this.registry).get(op.receipt.deviceSn)?.[op.param];
+        if (typeof raw === "string" && /^[0-9]+$/.test(raw) && guardModeRequest(raw))
+          op.confirmationReadMode = Number(raw);
+      } else await this.refreshDeviceState(op.receipt.deviceSn, { timeoutMs });
     };
     const started = afterCurrent === "confirmation" ? start() : Promise.resolve().then(start);
     void started.then(completion.resolve, completion.reject);
