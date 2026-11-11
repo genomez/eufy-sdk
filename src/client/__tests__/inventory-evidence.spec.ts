@@ -251,6 +251,157 @@ describe("inventory roster evidence", () => {
       rows: { "synthetic-a": { quality: "fresh" } },
     });
   });
+  describe("bounded retention under constant tolerated empties", () => {
+    function fixture() {
+      let serials = ["synthetic-a", "synthetic-b", "synthetic-c"];
+      let now = 1000;
+      let failed = false;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      const mega = {
+        post: async (_s: string, path: string, body: any) => {
+          if (path.endsWith("get_house_list")) return { house_infos: [{ house_id: "synthetic-house" }] };
+          if (!body.house_id) return { devices: null };
+          if (failed) throw new Error("synthetic inventory failure");
+          return { devices: serials.map(raw) };
+        },
+      };
+      const createRegistry = () => new DeviceRegistry({ mega: mega as any, onError: vi.fn() });
+      return {
+        registry: createRegistry(),
+        createRegistry,
+        roster: (...next: string[]) => {
+          serials = next;
+        },
+        time: (next: number) => {
+          now = next;
+        },
+        fail: (next: boolean) => {
+          failed = next;
+        },
+      };
+    }
+    it("expires a real removal on the third miss and restores complete generations and additions", async () => {
+      const f = fixture();
+      await f.registry.pollChanges();
+      f.roster("synthetic-a", "synthetic-c");
+      for (let miss = 1; miss <= 3; miss++) {
+        f.time(1000 + miss * 1000);
+        const diff = await f.registry.pollChanges();
+        expect(diff.removed.map((d) => d.sn)).toEqual(miss < 3 ? [] : ["synthetic-b"]);
+        expect(f.registry.inventorySnapshot().inventoryEvidence).toMatchObject({
+          quality: miss < 3 ? "partial" : "complete",
+          lastCompleteSuccessMs: miss < 3 ? 1000 : 4000,
+        });
+      }
+      f.roster("synthetic-a", "synthetic-c", "synthetic-d");
+      const diff = await f.registry.pollChanges();
+      expect(diff.added.map((d) => d.sn)).toEqual(["synthetic-d"]);
+      expect(diff.removed).toEqual([]);
+      expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("complete");
+    });
+    it.each([1, 2])("resets a transient absence after %s misses without a removal", async (misses) => {
+      const f = fixture();
+      await f.registry.pollChanges();
+      for (let episode = 0; episode < 2; episode++) {
+        f.roster("synthetic-a", "synthetic-c");
+        for (let miss = 0; miss < misses; miss++) {
+          expect((await f.registry.pollChanges()).removed).toEqual([]);
+          expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("partial");
+        }
+        f.roster("synthetic-a", "synthetic-b", "synthetic-c");
+        const diff = await f.registry.pollChanges();
+        expect(diff.removed).toEqual([]);
+        expect(diff.added).toEqual([]);
+        expect(f.registry.inventorySnapshot().inventoryEvidence).toMatchObject({
+          quality: "complete",
+          rows: { "synthetic-b": { quality: "fresh" } },
+        });
+      }
+    });
+    it.each([599_999, 600_000, 600_001])("also enforces the ten-minute bound at %s ms", async (elapsed) => {
+      const f = fixture();
+      await f.registry.pollChanges();
+      f.roster("synthetic-a", "synthetic-c");
+      f.time(2000);
+      await f.registry.pollChanges();
+      f.time(2000 + elapsed);
+      const diff = await f.registry.pollChanges();
+      expect(diff.removed.map((d) => d.sn)).toEqual(elapsed < 600_000 ? [] : ["synthetic-b"]);
+      expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe(
+        elapsed < 600_000 ? "partial" : "complete",
+      );
+    });
+    it("does not promote rows seen only in a partial generation into the complete baseline", async () => {
+      const f = fixture();
+      await f.registry.pollChanges();
+      f.roster("synthetic-a", "synthetic-c", "synthetic-d");
+      await f.registry.pollChanges();
+      f.roster("synthetic-a", "synthetic-b", "synthetic-c");
+      expect((await f.registry.pollChanges()).removed.map((d) => d.sn)).toEqual(["synthetic-d"]);
+      expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("complete");
+    });
+    it("expires each missing row independently while another row remains protected", async () => {
+      const f = fixture();
+      await f.registry.pollChanges();
+      f.roster("synthetic-a", "synthetic-c");
+      await f.registry.pollChanges();
+      f.roster("synthetic-a");
+      await f.registry.pollChanges();
+      expect((await f.registry.pollChanges()).removed.map((d) => d.sn)).toEqual(["synthetic-b"]);
+      expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("partial");
+      expect((await f.registry.pollChanges()).removed.map((d) => d.sn)).toEqual(["synthetic-c"]);
+      expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("complete");
+    });
+    it("preserves failure retention even after ambiguous-empty bounds expire", async () => {
+      const f = fixture();
+      await f.registry.pollChanges();
+      f.fail(true);
+      for (let miss = 0; miss < 3; miss++) {
+        expect((await f.registry.pollChanges()).removed).toEqual([]);
+        expect(f.registry.list()).toHaveLength(3);
+        expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("partial");
+      }
+      f.fail(false);
+      f.roster("synthetic-a", "synthetic-c");
+      expect((await f.registry.pollChanges()).removed.map((d) => d.sn)).toEqual(["synthetic-b"]);
+      expect(f.registry.inventorySnapshot().inventoryEvidence?.quality).toBe("complete");
+    });
+    it("starts from observed rows after restart and bounds later retention afresh", async () => {
+      const f = fixture();
+      await f.registry.pollChanges();
+      f.roster("synthetic-a", "synthetic-c");
+      await f.registry.pollChanges();
+      const restarted = f.createRegistry();
+      expect((await restarted.pollChanges()).removed).toEqual([]);
+      expect(restarted.list().map((d) => d.sn)).toEqual(["synthetic-a", "synthetic-c"]);
+      expect(restarted.inventorySnapshot().inventoryEvidence?.quality).toBe("complete");
+      f.roster("synthetic-a", "synthetic-b", "synthetic-c");
+      expect((await restarted.pollChanges()).added.map((d) => d.sn)).toEqual(["synthetic-b"]);
+      f.roster("synthetic-a", "synthetic-c");
+      for (let miss = 1; miss <= 3; miss++)
+        expect((await restarted.pollChanges()).removed.map((d) => d.sn)).toEqual(miss < 3 ? [] : ["synthetic-b"]);
+    });
+  });
+  it.each(["parent_sn", "station_sn"])("binds coerced numeric children through %s", async (field) => {
+    const registry = new DeviceRegistry({
+      mega: {
+        post: async (_s: string, path: string) =>
+          path.endsWith("get_house_list")
+            ? { house_infos: [] }
+            : {
+                devices: [
+                  { ...raw("synthetic"), device_sn: 12345 },
+                  { ...raw("synthetic"), device_sn: 67, [field]: 12345, device_channel: 1 },
+                ],
+              },
+      } as any,
+      onError: vi.fn(),
+    });
+    await registry.getDevices();
+    expect(registry.list()[1]?.stationSn).toBe("12345");
+    expect(registry.serialForFrame("12345", 1)).toBe("67");
+    expect((await registry.record("67")).parentSn).toBe("12345");
+  });
   it.each([
     ["envelope_null", null],
     ["envelope_null", undefined],

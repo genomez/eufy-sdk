@@ -198,7 +198,11 @@ export interface DeviceRegistryDeps {
  */
 const LIST_REUSE_MS = 5_000;
 
-/** Tolerated empties cannot authorize removals; unexpected wrappers are partial. */
+/** Missing complete-roster rows survive fewer than three refreshes and less than ten minutes. */
+const INVENTORY_MISSING_REFRESHES = 3;
+const INVENTORY_MISSING_MS = 10 * 60_000;
+
+/** Tolerated empties require bounded removal protection; unexpected wrappers are partial. */
 function inventoryList(
   raw: unknown,
   field: string,
@@ -241,6 +245,10 @@ function plainInventoryObject(raw: unknown): raw is Record<string, any> {
 export class DeviceRegistry {
   private readonly inventoryErrors = new InventoryErrorRecorder();
   private inventoryEvidence: InventoryEvidence | null = null;
+  private lastCompleteSerials = new Set<string>();
+  private readonly inventoryMisses = new Map<string, { refreshes: number; sinceMs: number }>();
+  /** Failed queries and dropped rows block removals independently of bounded empty-shape retention. */
+  private lastRefreshRemovalBlocked = false;
   private retainInventory(attempted: number, failed: number): void {
     const previous = this.inventoryEvidence;
     this.inventoryEvidence = {
@@ -497,14 +505,34 @@ export class DeviceRegistry {
         });
       }
     }
-    partial ||= toleratedEmpty && this.devices.some((device) => !seen.has(device.sn));
+    const completedAtMs = Date.now();
+    this.lastRefreshRemovalBlocked = partial;
+    const retainedMissing = new Set<string>();
+    for (const sn of this.lastCompleteSerials) {
+      if (seen.has(sn)) {
+        this.inventoryMisses.delete(sn);
+        continue;
+      }
+      const miss = this.inventoryMisses.get(sn) ?? { refreshes: 0, sinceMs: completedAtMs };
+      miss.refreshes = Math.min(INVENTORY_MISSING_REFRESHES, miss.refreshes + 1);
+      this.inventoryMisses.set(sn, miss);
+      if (
+        toleratedEmpty &&
+        miss.refreshes < INVENTORY_MISSING_REFRESHES &&
+        completedAtMs - miss.sinceMs < INVENTORY_MISSING_MS
+      )
+        retainedMissing.add(sn);
+    }
+    partial ||= retainedMissing.size > 0;
     this.lastRefreshPartial = partial;
     if (partial) for (const sn of this.inventoryConflicts) conflicts.add(sn);
     this.inventoryConflicts = conflicts;
-    if (partial) for (const prev of this.devices) if (!seen.has(prev.sn)) seen.set(prev.sn, prev);
+    if (partial)
+      for (const prev of this.devices)
+        if (!seen.has(prev.sn) && (this.lastRefreshRemovalBlocked || retainedMissing.has(prev.sn)))
+          seen.set(prev.sn, prev);
     this.syncReceiptAccount();
     this.devices = [...seen.values()];
-    const completedAtMs = Date.now();
     const previous = this.inventoryEvidence;
     this.inventoryEvidence = {
       version: 1,
@@ -526,7 +554,11 @@ export class DeviceRegistry {
       ),
     };
     this.inventorySnapshots.set(this.devices, this.inventoryEvidence);
-    if (!partial) this.inventoryErrors.complete(completedAtMs);
+    if (!partial) {
+      this.lastCompleteSerials = new Set(seen.keys());
+      this.inventoryMisses.clear();
+      this.inventoryErrors.complete(completedAtMs);
+    }
     for (const device of this.devices)
       device.lastSeenMs =
         Math.max(lastSeenMsOf(device.paramUpdatedAt ?? {}) ?? 0, this.localReceiptMs.get(device.sn) ?? 0) || undefined;
@@ -557,9 +589,9 @@ export class DeviceRegistry {
    * phantom state events on the first poll.
    *
    * Both halves of the roster diff are gated on the baseline being trustworthy, in opposite directions.
-   * `removed` is suppressed when THIS refresh was {@link lastRefreshPartial} — a failed house query
-   * yields a subset of the account, and reporting those absences as removals would report a device that
-   * is simply unqueried as gone. `added` is suppressed when the PREVIOUS snapshot was
+   * `removed` is suppressed when this refresh lost a query or dropped a row. Missing rows after a
+   * tolerated empty remain in the roster only within their refresh/time bounds, so an expired row can
+   * leave even while another row remains temporarily retained. `added` is suppressed when the PREVIOUS snapshot was
    * incomplete, for the mirror-image reason: a device missing from a partial baseline is not new, and
    * announcing it would present a chunk of an existing account as freshly discovered.
    *
@@ -590,7 +622,7 @@ export class DeviceRegistry {
     }
     const present = new Set(devices.map((d) => d.sn));
     const removed =
-      this.lastRefreshPartial || !base
+      this.lastRefreshRemovalBlocked || !base
         ? []
         : [...base.devices.entries()].filter(([sn]) => !present.has(sn)).map(([, state]) => state.device);
     this.pollSnapshot = {

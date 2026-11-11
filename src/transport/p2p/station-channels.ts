@@ -10,6 +10,12 @@
  */
 import type { EufyDevice } from "../../core/types.js";
 
+/** Nonempty serials, with safe integer identifiers normalized to the same string representation. */
+function stationSerial(raw: unknown): string | undefined {
+  const value = typeof raw === "number" && Number.isSafeInteger(raw) ? String(raw) : raw;
+  return typeof value === "string" && value ? value : undefined;
+}
+
 /**
  * The station a device's traffic belongs to, from its cloud record and its own serial.
  *
@@ -20,9 +26,9 @@ import type { EufyDevice } from "../../core/types.js";
  * A device naming no parent answers its own serial, so every device has a station.
  */
 export function resolvedStationSn(raw: Record<string, unknown>, sn: string): string {
-  const parent = typeof raw.parent_sn === "string" && raw.parent_sn ? raw.parent_sn : undefined;
+  const parent = stationSerial(raw.parent_sn);
   if (parent && parent !== sn) return parent;
-  const station = typeof raw.station_sn === "string" && raw.station_sn ? raw.station_sn : undefined;
+  const station = stationSerial(raw.station_sn);
   return station ?? sn;
 }
 
@@ -37,9 +43,8 @@ export function resolvedStationSn(raw: Record<string, unknown>, sn: string): str
  */
 export function stationOf(dev: EufyDevice): string {
   const raw = (dev.raw ?? {}) as Record<string, unknown>;
-  const parent =
-    typeof raw.parent_sn === "string" && raw.parent_sn && raw.parent_sn !== dev.sn ? raw.parent_sn : undefined;
-  return parent ?? dev.stationSn ?? resolvedStationSn(raw, dev.sn);
+  const parent = stationSerial(raw.parent_sn);
+  return parent && parent !== dev.sn ? parent : (stationSerial(dev.stationSn) ?? resolvedStationSn(raw, dev.sn));
 }
 
 /**
