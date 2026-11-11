@@ -462,22 +462,26 @@ export class EufyMega extends EventEmitter {
               afterCurrent === "recovery" ||
               (op.lastObservedMode !== undefined && op.lastObservedMode !== op.receipt.requestedMode)
             )
-              return this.refreshGuardState(op);
+              return this.refreshGuardState(op, afterCurrent);
           })
         : previous;
-    const read = Promise.resolve()
-      .then(async () => {
-        if (!this.guardOwner().current(op)) return;
-        const now = performance.now();
-        const timeoutMs = Math.floor(Math.min(15_000, op.deadline - now, op.dispatchAt! + 20_000 - now));
-        if (timeoutMs <= 0) return;
-        await this.refreshDeviceState(op.receipt.deviceSn, { timeoutMs });
-      })
+    const completion = Promise.withResolvers<void>();
+    const read = completion.promise
       .catch(() => {})
       .finally(() => {
         if (this.guardReads.get(op) === read) this.guardReads.delete(op);
       });
     this.guardReads.set(op, read);
+    const start = async () => {
+      if (!this.guardOwner().current(op)) return;
+      const now = performance.now();
+      const timeoutMs = Math.floor(Math.min(15_000, op.deadline - now, op.dispatchAt! + 20_000 - now));
+      if (timeoutMs <= 0) return;
+      if (afterCurrent === "confirmation") op.confirmationReadStarted = true;
+      await this.refreshDeviceState(op.receipt.deviceSn, { timeoutMs });
+    };
+    const started = afterCurrent === "confirmation" ? start() : Promise.resolve().then(start);
+    void started.then(completion.resolve, completion.reject);
     return read;
   }
 

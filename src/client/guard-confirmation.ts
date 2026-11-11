@@ -39,6 +39,7 @@ export interface GuardOperation {
   sessionChanged?: boolean;
   lastObservedMode?: number;
   confirmationRequested?: boolean;
+  confirmationReadStarted?: boolean;
   confirmationAt?: number;
   confirmationTimer?: ReturnType<typeof setTimeout>;
   timer?: ReturnType<typeof setTimeout>;
@@ -199,7 +200,11 @@ export class GuardConfirmationOwner {
   }
 
   private expire(op: GuardOperation): void {
-    if (op.lastObservedMode !== undefined && op.lastObservedMode !== op.receipt.requestedMode)
+    if (
+      op.lastObservedMode !== undefined &&
+      op.lastObservedMode !== op.receipt.requestedMode &&
+      (!this.confirm || op.confirmationReadStarted)
+    )
       this.finish(op, "contradicted", "different_mode_reported");
     else if (op.sessionChanged) this.finish(op, "not_reported", "session_changed");
     else this.finish(op, "not_reported", performance.now() >= op.deadline ? "budget_expired" : "window_expired");

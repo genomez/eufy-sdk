@@ -349,6 +349,31 @@ function wireFixture(readback = true, monotonic = () => performance.now()) {
 }
 
 describe("real facade transaction wiring", () => {
+  it("does not assert contradiction when a last-moment report leaves no integer read budget", async () => {
+    let now = 0.25;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    vi.spyOn(rtcPerformance, "now").mockImplementation(() => now);
+    const { eufy, client, send } = clientFixture();
+    const reads = vi.spyOn(eufy, "refreshDeviceState");
+    try {
+      const receipt = await eufy.setGuardModeWithReceipt(sn, 1);
+      now = 20_000;
+      client.guardOwner().observe(sn, sn, { 1224: "63" }, 1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reads).not.toHaveBeenCalled();
+      expect(eufy.getGuardConfirmation(receipt.handle)?.outcome).toBe("pending");
+      now = 20_000.25;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(eufy.getGuardConfirmation(receipt.handle)).toMatchObject({
+        outcome: "not_reported",
+        reason: "window_expired",
+        attempts: 1,
+      });
+      expect(send).toHaveBeenCalledTimes(1);
+    } finally {
+      await eufy.disconnect();
+    }
+  });
   it("reads a replacement adopted around eight seconds with a fractional monotonic clock", async () => {
     vi.useRealTimers();
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
