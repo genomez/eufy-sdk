@@ -426,7 +426,18 @@ export class RtcCommandRouter {
       return;
     this.eventPersonProbeSessions.add(owner.session);
     eventPersonProbeAttempts++;
-    void this.readEventCandidate(stationSn, { timeoutMs: 2000 }, undefined, true).catch(() => {});
+    // A probe that was refused or pre-empted before any answer gives its attempt back, so foreground
+    // work cannot use up the diagnostic; the session mark is cleared so a later idle moment can retry.
+    const refund = () => {
+      eventPersonProbeAttempts = Math.max(0, eventPersonProbeAttempts - 1);
+      this.eventPersonProbeSessions.delete(owner.session);
+    };
+    void this.readEventCandidate(stationSn, { timeoutMs: 2000 }, undefined, true).then(
+      (receipt) => {
+        if (receipt.outcome === "busy/not_admitted" || receipt.outcome === "abandoned") refund();
+      },
+      () => {},
+    );
   }
 
   /** Abort optional person diagnostics and expose lease cleanup before foreground admission. */

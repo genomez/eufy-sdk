@@ -129,6 +129,31 @@ describe("event person table probe", () => {
     },
   );
 
+  it("gives back a pre-empted attempt so the same session can probe again later", async () => {
+    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "1");
+    const f = await fixture();
+    router = f.router;
+    const first = router.readRecordingCatalog(scope);
+    await sent(f.session);
+    f.session.table([row()]);
+    expect((await first).status).toBe("ok");
+    await sent(f.session, 2);
+    const probe = Reflect.get(router, "eventPersonProbes").get(station);
+    router.preemptRecordingReads();
+    await probe.finished;
+    await tick();
+    f.advance(61_000);
+    const second = router.readRecordingCatalog(scope);
+    await sent(f.session, 3);
+    f.session.table([row({ record_id: 2 })]);
+    expect((await second).status).toBe("ok");
+    await sent(f.session, 4);
+    expect(request(f.session.sent[3]!).payload.table).toBe("event_person_list");
+    f.session.table([], { table: "event_person_list" });
+    await tick();
+    expect(personLines()).toHaveLength(1);
+  });
+
   it("limits attempts across replacement sessions and new routers to three for the process", async () => {
     vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "1");
     const f = await fixture();
