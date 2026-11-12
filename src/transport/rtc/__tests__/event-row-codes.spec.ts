@@ -101,11 +101,15 @@ describe("event row code diagnostic", () => {
     expect(f.parsed().map((line) => line.camera_index)).toEqual([0, 1, 0, 1, 2, 2, 3]);
   });
 
-  it("deduplicates numeric and numeric-string record ids across reads", () => {
+  it("skips unchanged records across reads and rewrites a record whose integers changed", () => {
     const f = fixture();
-    f.diagnostic.writeRows([row(), row({ record_id: "1", trigger_type: 3111 }), row({ record_id: 2 })]);
+    f.diagnostic.writeRows([row(), row({ record_id: "1" }), row({ record_id: 2 })]);
     f.diagnostic.writeRows([row(), row({ record_id: 2 })]);
     expect(f.parsed().map((line) => line.record_id)).toEqual([1, 2]);
+    f.diagnostic.writeRows([row({ record_id: "1", trigger_type: 3111 }), row({ record_id: 2 })]);
+    f.diagnostic.writeRows([row({ record_id: 1, trigger_type: 3111 })]);
+    expect(f.parsed().map((line) => line.record_id)).toEqual([1, 2, 1]);
+    expect(f.parsed().at(-1).codes.trigger_type).toBe(3111);
   });
 
   it("keeps channel-only cameras on different stations distinct without writing either station", () => {

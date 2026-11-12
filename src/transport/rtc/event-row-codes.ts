@@ -29,9 +29,10 @@ function integerFields(row: Record<string, unknown>): Record<string, number> {
   );
 }
 
-/** Process-local ordinals, last-2000-id deduplication and a hard 5000-successful-line lifetime limit. */
+/** Process-local ordinals, last-2000-id change detection (a record is rewritten only when its integers change)
+ * and a hard 5000-successful-line lifetime limit. */
 export class EventRowCodeDiagnostic {
-  private readonly ids = new Set<number>();
+  private readonly ids = new Map<number, string>();
   private readonly cameras = new Map<string, number>();
   private written = 0;
 
@@ -48,7 +49,7 @@ export class EventRowCodeDiagnostic {
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
         const row = raw as Record<string, unknown>;
         const record = integer(row.record_id);
-        if (record === undefined || record < 1 || this.ids.has(record)) continue;
+        if (record === undefined || record < 1) continue;
         const start = integer(row.start_time) ?? chicagoInstant(row.start_time, timeZone);
         if (start === undefined || start < 1) continue;
         const serial = typeof row.device_sn === "string" && row.device_sn.length ? row.device_sn : null;
@@ -75,10 +76,13 @@ export class EventRowCodeDiagnostic {
               ? integerFields(extra as Record<string, unknown>)
               : {},
         };
+        const signature = JSON.stringify([index, line.codes, line.str_extra]);
+        if (this.ids.get(record) === signature) continue;
         this.writeLine(`${JSON.stringify(line)}\n`);
         this.cameras.set(camera, index);
-        this.ids.add(record);
-        if (this.ids.size > ID_CAP) this.ids.delete(this.ids.values().next().value!);
+        this.ids.delete(record);
+        this.ids.set(record, signature);
+        if (this.ids.size > ID_CAP) this.ids.delete(this.ids.keys().next().value!);
         this.written++;
       } catch {}
     }

@@ -411,10 +411,10 @@ export class RtcCommandRouter {
   private readonly loggedEventRowShapes = new Set<string>();
   private readonly eventPersonProbeSessions = new WeakSet<RtcSession>();
 
-  /** Opt-in, at most one 100-row/2-second FULL_TABLE read on the same idle session; no acquisition or retry. */
+  /** On unless EUFY_EVENT_PERSON_PROBE=0: at most one 100-row/2-second FULL_TABLE read per session; no acquisition or retry. */
   private probeEventPersons(stationSn: string, owner: StationSession): void {
     if (
-      process.env.EUFY_EVENT_PERSON_PROBE !== "1" ||
+      process.env.EUFY_EVENT_PERSON_PROBE === "0" ||
       this.sessions.get(stationSn) !== owner ||
       this.eventPersonProbeSessions.has(owner.session)
     )

@@ -60,8 +60,8 @@ describe("event person table probe", () => {
     });
   });
 
-  it("defaults off after an event-table read", async () => {
-    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", undefined);
+  it("can be turned off with EUFY_EVENT_PERSON_PROBE=0", async () => {
+    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "0");
     const f = await recordingFixture();
     router = f.router;
     const read = router.readRecordingCatalog(scope);
