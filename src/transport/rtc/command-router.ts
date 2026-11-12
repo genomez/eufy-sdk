@@ -41,6 +41,7 @@ import {
   connectionCloseOrigin,
   type ConnectionRecord,
 } from "./connection-diagnostics.js";
+import { appendFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { StationWorkScheduler, StationWorkError, type StationWorkDiagnostics } from "./station-work-scheduler.js";
 import {
@@ -418,9 +419,16 @@ export class RtcCommandRouter {
       const key = [...names].sort().join(" ");
       if (this.loggedEventRowShapes.has(key)) return;
       this.loggedEventRowShapes.add(key);
-      // The bridge installs no SDK logger sink, so fall back to stdout (the add-on log).
+      // The bridge installs no SDK logger sink and its launcher drops other stdout, so also append the
+      // value-free line to a container-local file that is readable with docker exec.
+      const line = `[rtc] event table row keys ${shape}`;
       const info = this.deps.logger?.info?.bind(this.deps.logger) ?? console.info;
-      info(`[rtc] event table row keys ${shape}`);
+      info(line);
+      appendFileSync(
+        process.env.EUFY_EVENT_ROW_KEYS_FILE ?? "/tmp/eufy-event-row-keys.log",
+        `${new Date().toISOString()} ${line}\n`,
+        { mode: 0o600 },
+      );
     } catch {
       // Diagnostics never affect the catalog read.
     }
