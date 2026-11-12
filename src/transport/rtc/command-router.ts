@@ -90,7 +90,13 @@ import {
   type EventThumbnailReceipt,
   type ThumbnailImageResult,
 } from "./event-thumb-candidate.js";
-import { collectEventTableCandidate, eventRowKeyShape, type EventTableReceipt } from "./event-table-candidate.js";
+import {
+  collectEventTableCandidate,
+  eventRowKeyShape,
+  type EventTableReceipt,
+  type EventTableName,
+} from "./event-table-candidate.js";
+import { eventRowCodes } from "./event-row-codes.js";
 import {
   EventPlaybackCandidate,
   PLAYBACK_ADMISSION_GATES,
@@ -403,6 +409,30 @@ export class RtcCommandRouter {
   private readonly recordingReads = new Map<string, AbortController>();
   /** Distinct event-table row shapes already logged; bounded so a long run logs at most a few lines. */
   private readonly loggedEventRowShapes = new Set<string>();
+  private readonly eventPersonProbeSessions = new WeakSet<RtcSession>();
+
+  /** Opt-in, at most one 100-row/2-second FULL_TABLE read on the same idle session; no acquisition or retry. */
+  private probeEventPersons(stationSn: string, owner: StationSession): void {
+    if (
+      process.env.EUFY_EVENT_PERSON_PROBE !== "1" ||
+      this.sessions.get(stationSn) !== owner ||
+      this.eventPersonProbeSessions.has(owner.session)
+    )
+      return;
+    this.eventPersonProbeSessions.add(owner.session);
+    void this.readEventCandidate(stationSn, { timeoutMs: 2000 }, undefined, true).catch(() => {});
+  }
+
+  /** Only a row count and value-free schema are appended; filesystem failure is isolated from the read. */
+  private logEventPersonKeys(rows: readonly unknown[]): void {
+    try {
+      appendFileSync(
+        process.env.EUFY_EVENT_ROW_KEYS_FILE ?? "/tmp/eufy-event-row-keys.log",
+        `[rtc] event_person_list row keys ${eventRowKeyShape(rows)}\n`,
+        { mode: 0o600 },
+      );
+    } catch {}
+  }
 
   /** Diagnostic: log each new value-free event-table row shape once (column names, types, counts). */
   private logEventRowKeys(rows: readonly unknown[]): void {
@@ -464,7 +494,10 @@ export class RtcCommandRouter {
   private readonly eventThumbReplies = new Map<string, { owner: StationSession; expiresAtMs: number }>();
   private lastEventTableTransaction = 0;
   private readonly eventTableObservers = new Map<RtcSession, (decodedBytes: number, frame: PortalResponse) => void>();
-  private readonly eventTableReplies = new Map<string, { owner: StationSession; expiresAtMs: number }>();
+  private readonly eventTableReplies = new Map<
+    string,
+    { owner: StationSession; expiresAtMs: number; table?: EventTableName }
+  >();
   private readonly storageCandidateSessions = new WeakSet<StationSession>();
   private commandEvidence = new CommandEvidenceRecorder();
   private readonly readEvidence = new InformationReadEvidence();
@@ -1287,8 +1320,8 @@ export class RtcCommandRouter {
     const value = body as Record<string, unknown>;
     return (
       value.cmd === 10000 &&
-      value.table === "history_record_info" &&
       typeof value.transaction === "string" &&
+      value.table === (this.eventTableReplies.get(value.transaction)?.table ?? "history_record_info") &&
       this.eventTableReplies.get(value.transaction)?.owner === owner
     );
   }
@@ -1525,6 +1558,7 @@ export class RtcCommandRouter {
       st.pendingExchanges++;
       if (st.idle) clearTimeout(st.idle);
       let exchange: Promise<CatalogReadResult | CoverReadResult> | undefined;
+      let eventRowsRead = false;
       const outcome = (value: EventTableReceipt["outcome"]): RecordingReadFailure =>
         failure(
           value === "abandoned"
@@ -1598,7 +1632,9 @@ export class RtcCommandRouter {
                   continuity,
                   observation,
                   (rows, envelopeValid) => {
+                    eventRowsRead = true;
                     this.logEventRowKeys(rows);
+                    eventRowCodes.writeRows(rows, this.deps.recordingTimeZone, scope.stationSn);
                     normalized = normalizeRecordingRows(
                       rows,
                       scope,
@@ -1664,6 +1700,7 @@ export class RtcCommandRouter {
         if (this.recordingReads.get(scope.stationSn) === controller) this.recordingReads.delete(scope.stationSn);
         st.pendingExchanges--;
         this.release(scope.stationSn, st);
+        if (eventRowsRead) setImmediate(() => this.probeEventPersons(scope.stationSn, st));
       }
     } catch {
       return failure("scope_invalid", "unavailable");
@@ -2148,8 +2185,9 @@ export class RtcCommandRouter {
     stationSn: string,
     opts: { signal?: AbortSignal; timeoutMs?: number },
     thumb?: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt; shapes?: ThumbnailShapes },
+    personProbe = false,
   ): Promise<EventTableReceipt> {
-    this.preemptRecordingReads(stationSn);
+    if (!personProbe) this.preemptRecordingReads(stationSn);
     const started = performance.now();
     const limit = thumb ? 16_000 : 8_000;
     const timeoutMs = opts.timeoutMs ?? limit;
@@ -2245,14 +2283,23 @@ export class RtcCommandRouter {
               {
                 subscribe: observe,
                 issued: () =>
-                  this.eventTableReplies.set(transaction, { owner: st, expiresAtMs: Number.POSITIVE_INFINITY }),
+                  this.eventTableReplies.set(transaction, {
+                    owner: st,
+                    expiresAtMs: Number.POSITIVE_INFINITY,
+                    table: personProbe ? "event_person_list" : "history_record_info",
+                  }),
               },
               thumb
                 ? (rows) => {
                     thumb.shapes = thumbnailShapes(rows);
                     thumb.file = selectThumbnail(rows);
                   }
-                : undefined,
+                : personProbe
+                  ? (rows) => this.logEventPersonKeys(rows)
+                  : undefined,
+              undefined,
+              personProbe ? 100 : 20,
+              personProbe ? "event_person_list" : "history_record_info",
             );
             clearTimeout(tableTimer);
             if (!thumb) return table;

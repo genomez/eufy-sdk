@@ -5,6 +5,7 @@ export const EVENT_TABLE_BYTE_CAP = 256 * 1024;
 /** An array of n empty JSON objects requires at least 3n + 1 bytes within the decoded table budget. */
 export const CATALOG_QUERY_COUNT_MAX = Math.floor((EVENT_TABLE_BYTE_CAP - 1) / 3);
 const TABLE = "history_record_info";
+export type EventTableName = typeof TABLE | "event_person_list";
 const TOP_FIELDS = ["cmd", "count", "data", "end_id", "mIntRet", "msg", "start_id", "table", "transaction", "version"];
 const ROW_FIELDS = [
   "device_sn",
@@ -71,8 +72,7 @@ const ROW_KEY_LIMIT = 150;
 export function eventRowKeyShape(rows: readonly unknown[]): string {
   const counts = new Map<string, number>();
   const bump = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
-  const type = (value: unknown) =>
-    value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+  const type = (value: unknown) => (value === null ? "null" : Array.isArray(value) ? "array" : typeof value);
   const nested = (prefix: string, value: unknown) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return;
     const entries = Object.entries(value as Record<string, unknown>);
@@ -81,7 +81,9 @@ export function eventRowKeyShape(rows: readonly unknown[]): string {
       return;
     }
     for (const [inner, v] of entries)
-      bump(NESTED_KEY_NAME.test(inner) && !DIGIT_RUN.test(inner) ? `${prefix}.${inner}:${type(v)}` : `${prefix}.<other>`);
+      bump(
+        NESTED_KEY_NAME.test(inner) && !DIGIT_RUN.test(inner) ? `${prefix}.${inner}:${type(v)}` : `${prefix}.<other>`,
+      );
   };
   for (const raw of rows) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -116,6 +118,46 @@ export interface EventTableObservation {
   issued: () => void;
 }
 
+/** Database FULL_TABLE (10000) read in the same nested 1350/1306 station envelope as queryDatabase. */
+export function buildEventTableRequest(
+  accountId: string,
+  segment: number,
+  transaction: string,
+  queryCount = 20,
+  beforeRecordId?: number,
+  table: EventTableName = TABLE,
+): Buffer {
+  return buildPortalPacket({
+    commandId: 1350,
+    channel: 255,
+    segment,
+    payload: {
+      account_id: accountId,
+      cmd: 1306,
+      mChannel: 255,
+      mValue3: 0,
+      payload: {
+        cmd: 10000,
+        table,
+        transaction,
+        payload: {
+          count: queryCount,
+          start_date: "",
+          end_date: "",
+          start_id: beforeRecordId === undefined ? 0 : beforeRecordId - 1,
+          end_id: 1,
+          flag: 0,
+          need_ai: 1,
+          res_unzip: 1,
+          update_time: "0",
+          start_time: "0",
+          alarm_id: "",
+        },
+      },
+    },
+  });
+}
+
 /** One transaction-correlated table query, observing only already-decoded router frames. */
 export function collectEventTableCandidate(
   session: RtcSession,
@@ -129,6 +171,7 @@ export function collectEventTableCandidate(
   onRows?: (rows: unknown[], envelopeValid: boolean) => void,
   beforeRecordId?: number,
   queryCount = 20,
+  table: EventTableName = TABLE,
 ): Promise<EventTableReceipt> {
   const started = performance.now();
   const receipt: EventTableReceipt = {
@@ -244,7 +287,7 @@ export function collectEventTableCandidate(
       const body = frame.data;
       if (!body || typeof body !== "object" || Array.isArray(body)) return;
       const value = body as Record<string, unknown>;
-      if (value.cmd !== 10000 || value.transaction !== transaction || value.table !== TABLE) return;
+      if (value.cmd !== 10000 || value.transaction !== transaction || value.table !== table) return;
       receipt.decompressedBytes += decodedBytes;
       if (receipt.decompressedBytes > EVENT_TABLE_BYTE_CAP) {
         finish("receive_rejected");
@@ -274,35 +317,7 @@ export function collectEventTableCandidate(
     session.on("error", onClose);
     signal.addEventListener("abort", onAbort, { once: true });
     if (!valid()) return;
-    const packet = buildPortalPacket({
-      commandId: 1350,
-      channel: 255,
-      segment,
-      payload: {
-        account_id: accountId,
-        cmd: 1306,
-        mChannel: 255,
-        mValue3: 0,
-        payload: {
-          cmd: 10000,
-          table: TABLE,
-          transaction,
-          payload: {
-            count: queryCount,
-            start_date: "",
-            end_date: "",
-            start_id: beforeRecordId === undefined ? 0 : beforeRecordId - 1,
-            end_id: 1,
-            flag: 0,
-            need_ai: 1,
-            res_unzip: 1,
-            update_time: "0",
-            start_time: "0",
-            alarm_id: "",
-          },
-        },
-      },
-    });
+    const packet = buildEventTableRequest(accountId, segment, transaction, queryCount, beforeRecordId, table);
     try {
       if (!valid()) return;
       sent = true;
