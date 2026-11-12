@@ -410,7 +410,9 @@ export class RtcCommandRouter {
       const key = shape.replace(/^rows=\d+ /, "").replace(/x\d+(?= |$)/g, "");
       if (this.loggedEventRowShapes.has(key) || this.loggedEventRowShapes.size >= 4) return;
       this.loggedEventRowShapes.add(key);
-      this.deps.logger?.info?.(`[rtc] event table row keys ${shape}`);
+      // The bridge installs no SDK logger sink, so fall back to stdout (the add-on log).
+      const info = this.deps.logger?.info?.bind(this.deps.logger) ?? console.info;
+      info(`[rtc] event table row keys ${shape}`);
     } catch {
       // Diagnostics never affect the catalog read.
     }
