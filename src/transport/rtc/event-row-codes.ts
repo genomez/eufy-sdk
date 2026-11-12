@@ -4,8 +4,10 @@ import { chicagoInstant } from "./event-time.js";
 const LINE_CAP = 5000;
 const ID_CAP = 2000;
 const SAFE_KEY = /^[a-z][a-z0-9_]{0,47}$/;
+const CODE_KEY =
+  /^(?:vision|self_learning|int_extra|int_reserve|duration|(?:[a-z][a-z0-9_]*_)?(?:type|status|mode|flag)|(?:frame|storage|video|file|event|record)_(?:count|size|bytes|duration))$/;
 const PRIVATE_KEY =
-  /(?:serial|name|path|url|uri|thumb|text|token|account|password|secret|comment|description|message|email|phone)|(?:^|_)(?:sn|(?:station|device|camera|user)_?(?:id|sn))(?:_|$)/;
+  /(?:serial|name|path|url|uri|thumb|text|token|account|secret|comment|description|message|email|phone|person|face|member|family|owner|pass)|(?:^|_)(?:sn|id|uid|did|pin|pwd|mac|ip|ssid|mobile|tel|(?:station|device|camera|user)_?(?:id|sn))(?:_|$)/;
 
 /** Numeric decimal strings and numbers only; booleans, blanks, fractions and unsafe integers are absent. */
 function integer(value: unknown): number | undefined {
@@ -22,7 +24,11 @@ function integerFields(row: Record<string, unknown>): Record<string, number> {
   return Object.fromEntries(
     Object.entries(row).flatMap(([key, raw]) => {
       const value = integer(raw);
-      return SAFE_KEY.test(key) && !/\d{4,}/.test(key) && !PRIVATE_KEY.test(key) && value !== undefined
+      return SAFE_KEY.test(key) &&
+        CODE_KEY.test(key) &&
+        !/\d{4,}/.test(key) &&
+        !PRIVATE_KEY.test(key) &&
+        value !== undefined
         ? [[key, value]]
         : [];
     }),
@@ -32,7 +38,7 @@ function integerFields(row: Record<string, unknown>): Record<string, number> {
 /** Process-local ordinals, last-2000-id change detection (a record is rewritten only when its integers change)
  * and a hard 5000-successful-line lifetime limit. */
 export class EventRowCodeDiagnostic {
-  private readonly ids = new Map<number, string>();
+  private readonly ids = new Map<string, string>();
   private readonly cameras = new Map<string, number>();
   private written = 0;
 
@@ -77,11 +83,12 @@ export class EventRowCodeDiagnostic {
               : {},
         };
         const signature = JSON.stringify([index, line.codes, line.str_extra]);
-        if (this.ids.get(record) === signature) continue;
+        const recordKey = JSON.stringify([station ?? null, record]);
+        if (this.ids.get(recordKey) === signature) continue;
         this.writeLine(`${JSON.stringify(line)}\n`);
         this.cameras.set(camera, index);
-        this.ids.delete(record);
-        this.ids.set(record, signature);
+        this.ids.delete(recordKey);
+        this.ids.set(recordKey, signature);
         if (this.ids.size > ID_CAP) this.ids.delete(this.ids.keys().next().value!);
         this.written++;
       } catch {}

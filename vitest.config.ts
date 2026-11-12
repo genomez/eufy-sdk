@@ -9,6 +9,7 @@ export default defineConfig({
     globals: true, // keep bare describe/it/test/expect — no per-spec imports (types via vitest/globals in tsconfig)
     include: ["src/**/*.spec.ts"],
     clearMocks: true,
+    setupFiles: ["./src/transport/rtc/__tests__/diagnostic-files.ts"],
     // Cap parallelism the same way the old jest config did: each worker holds a full transform
     // pipeline; unbounded workers on a high-core/low-memory-cgroup box (CI, sandbox) sum past the
     // memory ceiling and the kernel SIGKILLs the run.

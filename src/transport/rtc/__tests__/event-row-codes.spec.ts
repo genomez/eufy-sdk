@@ -29,7 +29,10 @@ describe("event row code diagnostic", () => {
         int_reserve: "4.0",
         another_int: 15,
         device_type: 9000,
-        exponent: " 1e2 ",
+        event_status: " 1e2 ",
+        duration: 12,
+        frame_count: "30",
+        storage_size: 1024,
         fractional: 1.5,
         unsafe: "9007199254740992",
         boolean: true,
@@ -49,8 +52,8 @@ describe("event row code diagnostic", () => {
         UPPER: 129,
         serial123456: 130,
         str_extra: JSON.stringify({
-          detection: "3111",
-          negative: -2,
+          detect_type: "3111",
+          event_flag: -2,
           fraction: 2.5,
           name: "131",
           face_name: "132",
@@ -77,15 +80,68 @@ describe("event row code diagnostic", () => {
           self_learning: 0,
           int_extra: -3,
           int_reserve: 4,
-          another_int: 15,
           device_type: 9000,
-          exponent: 100,
+          event_status: 100,
+          duration: 12,
+          frame_count: 30,
+          storage_size: 1024,
         },
-        str_extra: { detection: 3111, negative: -2 },
+        str_extra: { detect_type: 3111, event_flag: -2 },
       },
     ]);
     expect(f.lines[0]).toMatch(/\n$/);
     expect(f.lines.join("")).not.toMatch(/synthetic|1234567|private/);
+  });
+
+  it.each([
+    "person_id",
+    "face_id",
+    "ai_face_id",
+    "family_id",
+    "member_id",
+    "owner_id",
+    "uid",
+    "mobile",
+    "tel",
+    "pin",
+    "passcode",
+    "pwd",
+    "ssid",
+    "ip",
+    "mac",
+    "id",
+    "did",
+    "person_type",
+    "face_status",
+    "member_mode",
+    "family_flag",
+    "owner_type",
+    "pass_status",
+    "id_type",
+    "uid_status",
+    "did_mode",
+    "pin_flag",
+    "pwd_type",
+    "mac_status",
+    "ip_mode",
+    "ssid_flag",
+    "mobile_type",
+    "tel_status",
+    "event_id_type",
+    "unknown_integer",
+  ])("rejects numeric identity or unapproved column %s in both row and str_extra", (key) => {
+    const f = fixture();
+    f.diagnostic.writeRows([row({ [key]: 4242, str_extra: JSON.stringify({ [key]: "4242", trigger_type: 3 }) })]);
+    expect(f.parsed()[0].codes).toEqual({});
+    expect(f.parsed()[0].str_extra).toEqual({ trigger_type: 3 });
+    expect(f.lines[0]).not.toContain("4242");
+  });
+
+  it.each([true, false, "", " ", "3tail", null, 1.5, "9007199254740992"])("rejects non-integer code %s", (value) => {
+    const f = fixture();
+    f.diagnostic.writeRows([row({ trigger_type: value, str_extra: JSON.stringify({ video_type: value }) })]);
+    expect(f.parsed()[0].codes).toEqual({});
+    expect(f.parsed()[0].str_extra).toEqual({});
   });
 
   it("keeps first-seen camera ordinals stable across calls and distinguishes channels", () => {
@@ -117,6 +173,22 @@ describe("event row code diagnostic", () => {
     f.diagnostic.writeRows([row({ device_sn: undefined, channel: 1 })], undefined, "synthetic-station-a");
     f.diagnostic.writeRows([row({ record_id: 2, device_sn: undefined, channel: 1 })], undefined, "synthetic-station-b");
     expect(f.parsed().map((line) => line.camera_index)).toEqual([0, 1]);
+    expect(f.lines.join("")).not.toContain("synthetic");
+  });
+
+  it("deduplicates overlapping record ids independently across stations", () => {
+    const f = fixture();
+    for (let repeat = 0; repeat < 3; repeat++) {
+      f.diagnostic.writeRows([row({ trigger_type: 3 })], undefined, "synthetic-station-a");
+      f.diagnostic.writeRows([row({ trigger_type: 4 })], undefined, "synthetic-station-b");
+    }
+    expect(f.parsed().map((line) => [line.record_id, line.camera_index, line.codes.trigger_type])).toEqual([
+      [1, 0, 3],
+      [1, 1, 4],
+    ]);
+    f.diagnostic.writeRows([row({ trigger_type: 5 })], undefined, "synthetic-station-a");
+    f.diagnostic.writeRows([row({ trigger_type: 4 })], undefined, "synthetic-station-b");
+    expect(f.lines).toHaveLength(3);
     expect(f.lines.join("")).not.toContain("synthetic");
   });
 

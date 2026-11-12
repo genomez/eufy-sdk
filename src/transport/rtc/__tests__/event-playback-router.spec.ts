@@ -210,6 +210,30 @@ const options = () => ({
   fresh: () => true,
 });
 
+it("aborts an active person probe and releases its lease before playback admission", async () => {
+  const { router, session } = await fixture();
+  session.tableReply = false;
+  const probeRead = Reflect.get(router, "readEventCandidate").call(
+    router,
+    station,
+    { timeoutMs: 2000 },
+    undefined,
+    true,
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  const probe = Reflect.get(router, "eventPersonProbes").get(station);
+  expect(probe.controller.signal.aborted).toBe(false);
+  session.tableReply = true;
+  const playback = router.readEventPlaybackCandidate(station, options());
+  expect(probe.controller.signal.aborted).toBe(true);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(await probeRead).toMatchObject({ outcome: "abandoned" });
+  expect(Reflect.get(router, "eventPersonProbes").size).toBe(0);
+  expect(Reflect.get(router, "eventTableProbes").size).toBe(0);
+  await vi.advanceTimersByTimeAsync(5100);
+  expect(await playback).toMatchObject({ admissionGateName: "none", startAttempted: true, captureOutcome: "eof" });
+});
+
 it.each(["time", "bytes", "abort", "live", "eof"] as const)(
   "armed download uses clip authority and always replaces after %s cutoff",
   async (bound) => {

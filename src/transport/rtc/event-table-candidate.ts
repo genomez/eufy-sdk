@@ -68,8 +68,9 @@ const ROW_KEY_LIMIT = 150;
  * Value-free shape of event-table rows for one diagnostic log line: every column name with its value
  * type and row count, plus one level of nested names inside object values or JSON-object strings.
  * Names that do not look like identifiers are counted as `<other>`; no value ever appears.
+ * With topLevelOnly, object and JSON-string contents are never inspected.
  */
-export function eventRowKeyShape(rows: readonly unknown[]): string {
+export function eventRowKeyShape(rows: readonly unknown[], topLevelOnly = false): string {
   const counts = new Map<string, number>();
   const bump = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
   const type = (value: unknown) => (value === null ? "null" : Array.isArray(value) ? "array" : typeof value);
@@ -96,6 +97,7 @@ export function eventRowKeyShape(rows: readonly unknown[]): string {
         continue;
       }
       bump(`${key}:${type(value)}`);
+      if (topLevelOnly) continue;
       nested(key, value);
       if (typeof value === "string" && value.trimStart().startsWith("{")) {
         try {

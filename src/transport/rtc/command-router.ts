@@ -387,6 +387,9 @@ function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
 /** Anonymous process-local ordinal; never derived from connection or account data. */
 let nextRefreshOwnerIncarnation = 0;
 
+/** Shared across routers and replacement sessions; optional person-table diagnostics stop after three attempts. */
+let eventPersonProbeAttempts = 0;
+
 interface RecordingAttemptBudget {
   catalog?: number;
   coverFinished?: number;
@@ -410,17 +413,27 @@ export class RtcCommandRouter {
   /** Distinct event-table row shapes already logged; bounded so a long run logs at most a few lines. */
   private readonly loggedEventRowShapes = new Set<string>();
   private readonly eventPersonProbeSessions = new WeakSet<RtcSession>();
+  private readonly eventPersonProbes = new Map<string, { controller: AbortController; finished: Promise<void> }>();
 
-  /** On unless EUFY_EVENT_PERSON_PROBE=0: at most one 100-row/2-second FULL_TABLE read per session; no acquisition or retry. */
+  /** On unless EUFY_EVENT_PERSON_PROBE=0: one 100-row/2-second read per session, three attempts per process; no acquisition or retry. */
   private probeEventPersons(stationSn: string, owner: StationSession): void {
     if (
       process.env.EUFY_EVENT_PERSON_PROBE === "0" ||
+      eventPersonProbeAttempts >= 3 ||
       this.sessions.get(stationSn) !== owner ||
       this.eventPersonProbeSessions.has(owner.session)
     )
       return;
     this.eventPersonProbeSessions.add(owner.session);
+    eventPersonProbeAttempts++;
     void this.readEventCandidate(stationSn, { timeoutMs: 2000 }, undefined, true).catch(() => {});
+  }
+
+  /** Abort optional person diagnostics and expose lease cleanup before foreground admission. */
+  private preemptEventPersonProbe(stationSn: string): Promise<void> | undefined {
+    const probe = this.eventPersonProbes.get(stationSn);
+    probe?.controller.abort();
+    return probe?.finished;
   }
 
   /** Only a row count and value-free schema are appended; filesystem failure is isolated from the read. */
@@ -428,7 +441,7 @@ export class RtcCommandRouter {
     try {
       appendFileSync(
         process.env.EUFY_EVENT_ROW_KEYS_FILE ?? "/tmp/eufy-event-row-keys.log",
-        `[rtc] event_person_list row keys ${eventRowKeyShape(rows)}\n`,
+        `[rtc] event_person_list row keys ${eventRowKeyShape(rows, true)}\n`,
         { mode: 0o600 },
       );
     } catch {}
@@ -1331,6 +1344,7 @@ export class RtcCommandRouter {
     if (stationSn !== undefined) {
       if (this.sessions.has(stationSn)) this.recordingDemandAt.set(stationSn, performance.now());
       this.recordingReads.get(stationSn)?.abort();
+      this.preemptEventPersonProbe(stationSn);
     } else {
       for (const sn of this.sessions.keys()) this.preemptRecordingReads(sn);
     }
@@ -1467,6 +1481,8 @@ export class RtcCommandRouter {
     selector: InternalCoverSelector | undefined,
     opts: RecordingReadOptions,
   ): Promise<CatalogReadResult | CoverReadResult> {
+    const personProbe = input?.stationSn ? this.preemptEventPersonProbe(input.stationSn) : undefined;
+    if (personProbe) await personProbe;
     const failure = (
       reason: RecordingReadReason,
       status: RecordingReadFailure["status"] = "deferred",
@@ -1786,6 +1802,8 @@ export class RtcCommandRouter {
       nativeMessage?: (direction: "in" | "out", message: unknown) => void;
     } = {},
   ): Promise<PlaybackReceipt> {
+    const personProbe = this.preemptEventPersonProbe(stationSn);
+    if (personProbe) await personProbe;
     const started = performance.now();
     let recordingAdmission: RecordingReadReason | undefined;
     if (opts.clip) {
@@ -2181,6 +2199,7 @@ export class RtcCommandRouter {
     };
   }
 
+  /** Person probes cancel through the collector, retaining scheduler ownership until exchange cleanup completes. */
   private async readEventCandidate(
     stationSn: string,
     opts: { signal?: AbortSignal; timeoutMs?: number },
@@ -2241,6 +2260,8 @@ export class RtcCommandRouter {
     const tableTimer = setTimeout(() => controller.abort("deadline"), Math.max(0, tableDeadlineMs - performance.now()));
     const timer = setTimeout(() => controller.abort("deadline"), Math.max(0, deadlineMs - performance.now()));
     this.eventTableProbes.set(stationSn, controller);
+    const personFinished = personProbe ? Promise.withResolvers<void>() : undefined;
+    if (personFinished) this.eventPersonProbes.set(stationSn, { controller, finished: personFinished.promise });
     this.lastEventTableTransaction = Math.max(Date.now(), this.lastEventTableTransaction + 1);
     const transaction = String(this.lastEventTableTransaction);
     st.leases++;
@@ -2254,7 +2275,7 @@ export class RtcCommandRouter {
         kind: "read",
         priority: "routine",
         sendByMs: deadlineMs,
-        signal,
+        signal: personProbe ? undefined : signal,
         run: async () => {
           if (
             signal.aborted ||
@@ -2371,6 +2392,8 @@ export class RtcCommandRouter {
       if (this.eventTableProbes.get(stationSn) === controller) this.eventTableProbes.delete(stationSn);
       st.pendingExchanges--;
       this.release(stationSn, st);
+      if (this.eventPersonProbes.get(stationSn)?.controller === controller) this.eventPersonProbes.delete(stationSn);
+      personFinished?.resolve();
     }
     const current = continuity();
     if (result.outcome === "success" || result.outcome === "empty") {
@@ -2502,13 +2525,16 @@ export class RtcCommandRouter {
       !st.informationTainted &&
       (allowBusy ||
         st.pendingExchanges === 0 ||
-        (st.pendingExchanges === 1 && this.recordingReads.get(stationSn)?.signal.aborted === true))
+        (st.pendingExchanges === 1 &&
+          (this.recordingReads.get(stationSn)?.signal.aborted === true || this.eventPersonProbes.has(stationSn))))
     );
   }
 
   /** Refresh information on a station, preserving the notification's temporal-only correlation. */
   async refreshInformation(stationSn: string, opts: InformationRefreshOptions = {}): Promise<InformationRefreshResult> {
     this.preemptRecordingReads(stationSn);
+    const personProbe = this.preemptEventPersonProbe(stationSn);
+    if (personProbe) await personProbe;
     const timeoutMs = opts.timeoutMs ?? 15_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000)
       throw new RangeError("RTC information timeout must be an integer between 1 and 60000 milliseconds");
