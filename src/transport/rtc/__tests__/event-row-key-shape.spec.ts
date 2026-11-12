@@ -24,7 +24,24 @@ describe("eventRowKeyShape", () => {
   });
 
   it("caps the number of listed names", () => {
-    const row = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`k${i}`, i]));
+    const row = Object.fromEntries(Array.from({ length: 170 }, (_, i) => [`k${i}`, i]));
     expect(eventRowKeyShape([row])).toMatch(/\+20 more$/);
+  });
+
+  it("never prints data-like nested keys", () => {
+    const shape = eventRowKeyShape([
+      {
+        by_camera: { T8214P1234567890: 1 },
+        people: { Jason: 1, jason: 2 },
+        big: Object.fromEntries(Array.from({ length: 13 }, (_, i) => [`n${i}`, i])),
+        T8170T1023350: "top-level serial-shaped key",
+      },
+    ]);
+    expect(shape).not.toMatch(/T8214|T8170|Jason/);
+    expect(shape).toContain("by_camera.<other>x1");
+    expect(shape).toContain("people.<other>x1");
+    expect(shape).toContain("people.jason:numberx1");
+    expect(shape).toContain("big.<many>x1");
+    expect(shape).toContain("<other>x1");
   });
 });

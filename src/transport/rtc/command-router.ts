@@ -405,10 +405,18 @@ export class RtcCommandRouter {
 
   /** Diagnostic: log each new value-free event-table row shape once (column names, types, counts). */
   private logEventRowKeys(rows: readonly unknown[]): void {
+    if (this.loggedEventRowShapes.size >= 4) return;
     try {
       const shape = eventRowKeyShape(rows);
-      const key = shape.replace(/^rows=\d+ /, "").replace(/x\d+(?= |$)/g, "");
-      if (this.loggedEventRowShapes.has(key) || this.loggedEventRowShapes.size >= 4) return;
+      // Dedupe on the set of names only, so type/count variation cannot use up the four lines.
+      const names = new Set(
+        shape
+          .replace(/^rows=\d+ /, "")
+          .split(" ")
+          .map((entry) => entry.replace(/x\d+$/, "").replace(/:[a-z]+$/, "")),
+      );
+      const key = [...names].sort().join(" ");
+      if (this.loggedEventRowShapes.has(key)) return;
       this.loggedEventRowShapes.add(key);
       // The bridge installs no SDK logger sink, so fall back to stdout (the add-on log).
       const info = this.deps.logger?.info?.bind(this.deps.logger) ?? console.info;

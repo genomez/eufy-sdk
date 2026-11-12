@@ -56,7 +56,12 @@ function fieldTypes(body: Record<string, unknown>, rows: unknown[]): Record<stri
 }
 
 const ROW_KEY_NAME = /^[A-Za-z][A-Za-z0-9_]{0,47}$/;
-const ROW_KEY_LIMIT = 80;
+/** Nested names must look like schema (lowercase snake case, no digit runs), not data such as serials or names. */
+const NESTED_KEY_NAME = /^[a-z][a-z0-9_]{0,47}$/;
+const DIGIT_RUN = /\d{4,}/;
+/** A nested object with more distinct names than this is treated as a data-keyed map. */
+const NESTED_KEY_MAX = 12;
+const ROW_KEY_LIMIT = 150;
 
 /**
  * Value-free shape of event-table rows for one diagnostic log line: every column name with its value
@@ -70,8 +75,13 @@ export function eventRowKeyShape(rows: readonly unknown[]): string {
     value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
   const nested = (prefix: string, value: unknown) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return;
-    for (const [inner, v] of Object.entries(value as Record<string, unknown>))
-      bump(ROW_KEY_NAME.test(inner) ? `${prefix}.${inner}:${type(v)}` : `${prefix}.<other>`);
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length > NESTED_KEY_MAX) {
+      bump(`${prefix}.<many>`);
+      return;
+    }
+    for (const [inner, v] of entries)
+      bump(NESTED_KEY_NAME.test(inner) && !DIGIT_RUN.test(inner) ? `${prefix}.${inner}:${type(v)}` : `${prefix}.<other>`);
   };
   for (const raw of rows) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -79,7 +89,7 @@ export function eventRowKeyShape(rows: readonly unknown[]): string {
       continue;
     }
     for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-      if (!ROW_KEY_NAME.test(key)) {
+      if (!ROW_KEY_NAME.test(key) || DIGIT_RUN.test(key)) {
         bump("<other>");
         continue;
       }
