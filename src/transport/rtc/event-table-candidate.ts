@@ -55,6 +55,51 @@ function fieldTypes(body: Record<string, unknown>, rows: unknown[]): Record<stri
   ]);
 }
 
+const ROW_KEY_NAME = /^[A-Za-z][A-Za-z0-9_]{0,47}$/;
+const ROW_KEY_LIMIT = 80;
+
+/**
+ * Value-free shape of event-table rows for one diagnostic log line: every column name with its value
+ * type and row count, plus one level of nested names inside object values or JSON-object strings.
+ * Names that do not look like identifiers are counted as `<other>`; no value ever appears.
+ */
+export function eventRowKeyShape(rows: readonly unknown[]): string {
+  const counts = new Map<string, number>();
+  const bump = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
+  const type = (value: unknown) =>
+    value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+  const nested = (prefix: string, value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    for (const [inner, v] of Object.entries(value as Record<string, unknown>))
+      bump(ROW_KEY_NAME.test(inner) ? `${prefix}.${inner}:${type(v)}` : `${prefix}.<other>`);
+  };
+  for (const raw of rows) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      bump("<non-object row>");
+      continue;
+    }
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (!ROW_KEY_NAME.test(key)) {
+        bump("<other>");
+        continue;
+      }
+      bump(`${key}:${type(value)}`);
+      nested(key, value);
+      if (typeof value === "string" && value.trimStart().startsWith("{")) {
+        try {
+          nested(`${key}{json}`, JSON.parse(value));
+        } catch {
+          bump(`${key}{json}:unparsed`);
+        }
+      }
+    }
+  }
+  const entries = [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const shown = entries.slice(0, ROW_KEY_LIMIT).map(([key, n]) => `${key}x${n}`);
+  if (entries.length > ROW_KEY_LIMIT) shown.push(`+${entries.length - ROW_KEY_LIMIT} more`);
+  return `rows=${rows.length} ${shown.join(" ")}`;
+}
+
 /** Passive decoded-frame observation; subscription does not own or change notify reassembly. */
 export interface EventTableObservation {
   subscribe: (observe: (decodedBytes: number, frame: PortalResponse) => void) => () => void;

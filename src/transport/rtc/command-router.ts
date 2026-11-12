@@ -89,7 +89,7 @@ import {
   type EventThumbnailReceipt,
   type ThumbnailImageResult,
 } from "./event-thumb-candidate.js";
-import { collectEventTableCandidate, type EventTableReceipt } from "./event-table-candidate.js";
+import { collectEventTableCandidate, eventRowKeyShape, type EventTableReceipt } from "./event-table-candidate.js";
 import {
   EventPlaybackCandidate,
   PLAYBACK_ADMISSION_GATES,
@@ -400,6 +400,21 @@ export class RtcCommandRouter {
   private readonly informationReceiptTimes = new WeakMap<object, number>();
   private readonly wireReceiptTimes = new WeakMap<Buffer, number>();
   private readonly recordingReads = new Map<string, AbortController>();
+  /** Distinct event-table row shapes already logged; bounded so a long run logs at most a few lines. */
+  private readonly loggedEventRowShapes = new Set<string>();
+
+  /** Diagnostic: log each new value-free event-table row shape once (column names, types, counts). */
+  private logEventRowKeys(rows: readonly unknown[]): void {
+    try {
+      const shape = eventRowKeyShape(rows);
+      const key = shape.replace(/^rows=\d+ /, "").replace(/x\d+(?= |$)/g, "");
+      if (this.loggedEventRowShapes.has(key) || this.loggedEventRowShapes.size >= 4) return;
+      this.loggedEventRowShapes.add(key);
+      this.deps.logger?.info?.(`[rtc] event table row keys ${shape}`);
+    } catch {
+      // Diagnostics never affect the catalog read.
+    }
+  }
   private readonly recordingAttempts = new Map<string, RecordingAttemptBudget>();
   private readonly recordingDemandAt = new Map<string, number>();
   private readonly connectionEvidence = new ConnectionEvidenceRecorder();
@@ -1565,6 +1580,7 @@ export class RtcCommandRouter {
                   continuity,
                   observation,
                   (rows, envelopeValid) => {
+                    this.logEventRowKeys(rows);
                     normalized = normalizeRecordingRows(
                       rows,
                       scope,
