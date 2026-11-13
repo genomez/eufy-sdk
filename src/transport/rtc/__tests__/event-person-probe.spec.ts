@@ -1,35 +1,55 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildEventTableRequest } from "../event-table-candidate.js";
 import { parsePortalHeader } from "../portal-packet.js";
 import { recordingFixture, RecordingSession, row, scope, sent, station, control } from "./recordings-fixture.js";
 import type { RtcSession } from "../session.js";
 import type { RtcCommandRouter } from "../command-router.js";
+import type { EventTableReceipt } from "../event-table-candidate.js";
 
-vi.mock("node:fs", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("node:fs")>()),
-  appendFileSync: vi.fn(),
-}));
+vi.mock("node:fs", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:fs")>();
+  return { ...original, appendFileSync: vi.fn(original.appendFileSync) };
+});
 
 let router: RtcCommandRouter | undefined;
 const routers: RtcCommandRouter[] = [];
 let fixture: typeof recordingFixture;
+let directory: string;
+let logFile: string;
 beforeEach(async () => {
   vi.resetModules();
+  vi.mocked(appendFileSync).mockReset();
+  vi.mocked(appendFileSync).mockImplementation(
+    (await vi.importActual<typeof import("node:fs")>("node:fs")).appendFileSync,
+  );
+  directory = mkdtempSync(join(tmpdir(), "eufy-person-probe-"));
+  logFile = join(directory, "keys.log");
+  vi.stubEnv("EUFY_EVENT_ROW_KEYS_FILE", logFile);
   fixture = (await import("./recordings-fixture.js")).recordingFixture;
 });
-afterEach(() => {
+afterEach(async () => {
   router?.close();
   for (const owner of routers.splice(0)) owner.close();
+  await tick();
   router = undefined;
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  rmSync(directory, { recursive: true, force: true });
 });
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const request = (packet: Buffer) => JSON.parse(packet.subarray(16).toString());
 const personLines = () =>
   vi.mocked(appendFileSync).mock.calls.filter(([, line]) => String(line).includes("event_person_list row keys"));
+const logLines = () => (existsSync(logFile) ? readFileSync(logFile, "utf8").trimEnd().split("\n") : []);
+const outcomes = () => logLines().filter((line) => line.includes("event_person_list probe outcome="));
+const isoPrefix = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
+const invokeProbe = (target: RtcCommandRouter, owner = Reflect.get(target, "sessions").get(station)) =>
+  Reflect.get(target, "probeEventPersons").call(target, station, owner);
+const skipped = (reason: string) => logLines().filter((line) => line.endsWith(`probe skipped reason=${reason}`));
 
 describe("event person table probe", () => {
   it("is enabled by default when the environment variable is unset", async () => {
@@ -126,6 +146,9 @@ describe("event person table probe", () => {
       expect(Reflect.get(router, "eventPersonProbes").size).toBe(0);
       expect(Reflect.get(router, "eventTableProbes").size).toBe(0);
       expect(personLines()).toHaveLength(0);
+      expect(outcomes().filter((line) => line.includes("outcome=abandoned"))).toEqual([
+        expect.stringMatching(/refunded=true attempt=1\/3$/),
+      ]);
     },
   );
 
@@ -190,6 +213,16 @@ describe("event person table probe", () => {
     expect((await read).status).toBe("ok");
     await tick();
     expect(other.session.sent).toHaveLength(1);
+    invokeProbe(other.router);
+    invokeProbe(router);
+    expect(skipped("attempt_cap")).toHaveLength(1);
+    expect(outcomes()).toHaveLength(3);
+    expect(outcomes().map((line) => line.match(/attempt=\d\/3$/)?.[0])).toEqual([
+      "attempt=1/3",
+      "attempt=2/3",
+      "attempt=3/3",
+    ]);
+    expect(logLines().filter((line) => line.endsWith("probe eligible"))).toHaveLength(1);
   });
 
   it("builds only the nested bounded FULL_TABLE read with the established station envelope", () => {
@@ -239,11 +272,16 @@ describe("event person table probe", () => {
     await tick();
     expect(f.session.sent).toHaveLength(1);
     expect(personLines()).toHaveLength(0);
+    invokeProbe(router);
+    const other = await fixture();
+    routers.push(other.router);
+    invokeProbe(other.router);
+    expect(skipped("disabled")).toHaveLength(1);
+    expect(outcomes()).toHaveLength(0);
   });
 
   it("reads once per session, correlates the table and transaction, and logs only count and key shape", async () => {
     vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "1");
-    vi.stubEnv("EUFY_EVENT_ROW_KEYS_FILE", "synthetic-row-keys.log");
     const f = await fixture();
     router = f.router;
     const read = router.readRecordingCatalog(scope);
@@ -277,11 +315,34 @@ describe("event person table probe", () => {
     await tick();
     expect(personLines()).toEqual([
       [
-        "synthetic-row-keys.log",
-        "[rtc] event_person_list row keys rows=1 extra:stringx1 name:stringx1 people:objectx1 person_id:stringx1 record_id:numberx1\n",
+        logFile,
+        expect.stringMatching(
+          /Z \[rtc\] event_person_list row keys rows=1 extra:stringx1 name:stringx1 people:objectx1 person_id:stringx1 record_id:numberx1\n$/,
+        ),
         { mode: 0o600 },
       ],
     ]);
+    expect(outcomes()).toEqual([
+      expect.stringMatching(
+        /Z \[rtc\] event_person_list probe outcome=success elapsedMs=0 rows=1 resultCode=0 compressedBytes=null decompressedBytes=\d+ ownerContinuous=true generationContinuous=true refunded=false attempt=1\/3$/,
+      ),
+    ]);
+    expect(logLines().every((line) => isoPrefix.test(line))).toBe(true);
+    for (const [path, line, options] of vi.mocked(appendFileSync).mock.calls)
+      if (String(line).includes("event_person_list")) {
+        expect(path).toBe(logFile);
+        expect(options).toEqual({ mode: 0o600 });
+      }
+    for (const value of [
+      station,
+      "synthetic-camera-0",
+      "synthetic-account",
+      "synthetic-person",
+      "synthetic-name",
+      "synthetic_person",
+      logFile,
+    ])
+      expect(readFileSync(logFile, "utf8")).not.toContain(value);
     expect(f.onFrame).not.toHaveBeenCalled();
     f.advance(61_000);
     const second = router.readRecordingCatalog(scope);
@@ -290,6 +351,10 @@ describe("event person table probe", () => {
     expect((await second).status).toBe("ok");
     await tick();
     expect(f.session.sent).toHaveLength(3);
+    invokeProbe(router);
+    invokeProbe(router);
+    expect(skipped("session_already_probed")).toHaveLength(1);
+    expect(outcomes()).toHaveLength(1);
   });
 
   it("logs an empty table and isolates append failure from the completed catalog", async () => {
@@ -306,8 +371,98 @@ describe("event person table probe", () => {
     });
     f.session.table([], { table: "event_person_list" });
     await tick();
-    expect(personLines().at(-1)?.[1]).toBe("[rtc] event_person_list row keys rows=0 \n");
+    expect(personLines().at(-1)?.[1]).toMatch(/Z \[rtc\] event_person_list row keys rows=0 \n$/);
+    expect(outcomes()).toEqual([expect.stringContaining("outcome=empty elapsedMs=0 rows=0 resultCode=0")]);
     expect(f.session.sent).toHaveLength(2);
+  });
+
+  it("logs each non-admitted attempt once and retains refunds and eligibility across routers", async () => {
+    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "1");
+    const f = await fixture();
+    router = f.router;
+    const owner = Reflect.get(router, "sessions").get(station);
+    owner.leases++;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      invokeProbe(router);
+      await tick();
+    }
+    owner.leases--;
+    expect(outcomes()).toEqual([
+      expect.stringMatching(
+        /probe outcome=busy\/not_admitted elapsedMs=0 rows=null resultCode=null compressedBytes=null decompressedBytes=0 ownerContinuous=true generationContinuous=true refunded=true attempt=1\/3$/,
+      ),
+      expect.stringMatching(/probe outcome=busy\/not_admitted .* refunded=true attempt=1\/3$/),
+    ]);
+    expect(f.session.sent).toHaveLength(0);
+    invokeProbe(router);
+    await sent(f.session);
+    f.session.table([], { table: "event_person_list" });
+    await tick();
+    expect(outcomes()).toHaveLength(3);
+    expect(outcomes()[2]).toMatch(/outcome=empty .* refunded=false attempt=1\/3$/);
+    expect(personLines()).toHaveLength(1);
+    const other = await fixture();
+    routers.push(other.router);
+    invokeProbe(other.router);
+    await sent(other.session);
+    other.session.table([], { table: "event_person_list" });
+    await tick();
+    expect(outcomes()[3]).toMatch(/outcome=empty .* attempt=2\/3$/);
+    invokeProbe(router);
+    invokeProbe(other.router);
+    invokeProbe(other.router);
+    expect(skipped("session_already_probed")).toHaveLength(1);
+    expect(logLines().filter((line) => line.endsWith("probe eligible"))).toHaveLength(1);
+  });
+
+  it("logs only the rejection constructor once without refunding the attempt", async () => {
+    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "1");
+    const f = await fixture();
+    router = f.router;
+    const error = new TypeError(`${station} synthetic-account ${logFile}`);
+    error.name = "synthetic-account";
+    const read = vi.fn<() => Promise<EventTableReceipt>>().mockRejectedValue(error);
+    Reflect.set(router, "readEventCandidate", read);
+    invokeProbe(router);
+    await tick();
+    invokeProbe(router);
+    await tick();
+    expect(read).toHaveBeenCalledExactlyOnceWith(station, { timeoutMs: 2000 }, undefined, true);
+    expect(outcomes()).toEqual([expect.stringMatching(/probe outcome=error errorName=TypeError attempt=1\/3$/)]);
+    expect(skipped("session_already_probed")).toHaveLength(1);
+    const text = readFileSync(logFile, "utf8");
+    for (const value of [station, "synthetic-account", logFile, error.message]) expect(text).not.toContain(value);
+  });
+
+  it("isolates an unwritable log path from successful empty reads and settled outcomes", async () => {
+    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "1");
+    vi.stubEnv("EUFY_EVENT_ROW_KEYS_FILE", directory);
+    const f = await fixture();
+    router = f.router;
+    const readCandidate = vi.fn(Reflect.get(router, "readEventCandidate").bind(router));
+    Reflect.set(router, "readEventCandidate", readCandidate);
+    const read = router.readRecordingCatalog(scope);
+    await sent(f.session);
+    f.session.table([row()]);
+    expect((await read).status).toBe("ok");
+    await sent(f.session, 2);
+    f.session.table([], { table: "event_person_list" });
+    await tick();
+    expect(readCandidate).toHaveBeenCalledTimes(1);
+    await expect(readCandidate.mock.results[0]!.value).resolves.toMatchObject({ outcome: "empty", rowCount: 0 });
+    expect(Reflect.get(router, "eventPersonProbes").size).toBe(0);
+    expect(Reflect.get(router, "eventTableProbes").size).toBe(0);
+    expect(personLines()).toHaveLength(1);
+    const failedWrites = vi
+      .mocked(appendFileSync)
+      .mock.calls.flatMap(([path], index) =>
+        path === directory ? [vi.mocked(appendFileSync).mock.results[index]!.type] : [],
+      );
+    expect(failedWrites).toEqual(["throw", "throw", "throw", "throw"]);
+    vi.stubEnv("EUFY_EVENT_ROW_KEYS_FILE", logFile);
+    invokeProbe(router);
+    expect(skipped("session_already_probed")).toHaveLength(1);
+    expect(readCandidate).toHaveBeenCalledTimes(1);
   });
 
   it("never acquires a session after the catalog owner closes", async () => {
@@ -318,28 +473,47 @@ describe("event person table probe", () => {
     await sent(f.session);
     f.session.table([row()]);
     await read;
+    const owner = Reflect.get(router, "sessions").get(station);
     f.session.close();
     await tick();
+    invokeProbe(router, owner);
+    const other = await fixture();
+    routers.push(other.router);
+    invokeProbe(other.router, owner);
+    expect(skipped("owner_changed")).toHaveLength(1);
+    expect(outcomes()).toHaveLength(0);
     expect(f.session.sent).toHaveLength(1);
     expect(f.session.isConnected).toBe(false);
   });
 
-  it("times out after two seconds without retrying or blocking later catalog reads", async () => {
-    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "1");
-    const f = await fixture();
-    router = f.router;
-    const read = router.readRecordingCatalog(scope);
-    await sent(f.session);
-    f.session.table([row()]);
-    expect((await read).status).toBe("ok");
-    await sent(f.session, 2);
-    await new Promise((resolve) => setTimeout(resolve, 2100));
-    f.advance(61_000);
-    const second = router.readRecordingCatalog(scope);
-    await sent(f.session, 3);
-    f.session.table([row({ record_id: 2 })]);
-    expect((await second).status).toBe("ok");
-    await tick();
-    expect(f.session.sent).toHaveLength(3);
-  });
+  it.each([true, false])(
+    "times out after two seconds without retrying or blocking later catalog reads (ack=%s)",
+    async (ack) => {
+      vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "1");
+      const f = await fixture();
+      router = f.router;
+      const read = router.readRecordingCatalog(scope);
+      await sent(f.session);
+      f.session.table([row()]);
+      expect((await read).status).toBe("ok");
+      f.session.ack = ack;
+      await sent(f.session, 2);
+      await new Promise((resolve) => setTimeout(resolve, 2100));
+      expect(outcomes()).toEqual([
+        expect.stringMatching(
+          new RegExp(
+            `probe outcome=${ack ? "ack_only/timeout" : "timeout"} elapsedMs=0 rows=null resultCode=null compressedBytes=null decompressedBytes=0 ownerContinuous=true generationContinuous=true refunded=false attempt=1/3$`,
+          ),
+        ),
+      ]);
+      f.session.ack = true;
+      f.advance(61_000);
+      const second = router.readRecordingCatalog(scope);
+      await sent(f.session, 3);
+      f.session.table([row({ record_id: 2 })]);
+      expect((await second).status).toBe("ok");
+      await tick();
+      expect(f.session.sent).toHaveLength(3);
+    },
+  );
 });

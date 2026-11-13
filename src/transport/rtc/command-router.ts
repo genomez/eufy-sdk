@@ -390,6 +390,9 @@ let nextRefreshOwnerIncarnation = 0;
 /** Shared across routers and replacement sessions; optional person-table diagnostics stop after three attempts. */
 let eventPersonProbeAttempts = 0;
 
+/** Eligibility and each skip reason are logged at most once across routers for the process. */
+const loggedEventPersonProbeStates = new Set<string>();
+
 interface RecordingAttemptBudget {
   catalog?: number;
   coverFinished?: number;
@@ -417,27 +420,52 @@ export class RtcCommandRouter {
 
   /** On unless EUFY_EVENT_PERSON_PROBE=0: one 100-row/2-second read per session, three attempts per process; no acquisition or retry. */
   private probeEventPersons(stationSn: string, owner: StationSession): void {
-    if (
-      process.env.EUFY_EVENT_PERSON_PROBE === "0" ||
-      eventPersonProbeAttempts >= 3 ||
-      this.sessions.get(stationSn) !== owner ||
-      this.eventPersonProbeSessions.has(owner.session)
-    )
+    const reason =
+      process.env.EUFY_EVENT_PERSON_PROBE === "0"
+        ? "disabled"
+        : eventPersonProbeAttempts >= 3
+          ? "attempt_cap"
+          : this.sessions.get(stationSn) !== owner
+            ? "owner_changed"
+            : this.eventPersonProbeSessions.has(owner.session)
+              ? "session_already_probed"
+              : undefined;
+    if (reason) {
+      this.logEventPersonProbeOnce(`skipped reason=${reason}`);
       return;
+    }
+    this.logEventPersonProbeOnce("eligible");
     this.eventPersonProbeSessions.add(owner.session);
-    eventPersonProbeAttempts++;
-    // A probe that was refused or pre-empted before any answer gives its attempt back, so foreground
-    // work cannot use up the diagnostic; the session mark is cleared so a later idle moment can retry.
+    const attempt = ++eventPersonProbeAttempts;
+    /** Refused or pre-empted probes return their attempt and session mark for later idle admission. */
     const refund = () => {
       eventPersonProbeAttempts = Math.max(0, eventPersonProbeAttempts - 1);
       this.eventPersonProbeSessions.delete(owner.session);
     };
     void this.readEventCandidate(stationSn, { timeoutMs: 2000 }, undefined, true).then(
       (receipt) => {
-        if (receipt.outcome === "busy/not_admitted" || receipt.outcome === "abandoned") refund();
+        const refunded = receipt.outcome === "busy/not_admitted" || receipt.outcome === "abandoned";
+        if (refunded) refund();
+        this.logEventPersonDiagnostic(
+          `probe outcome=${receipt.outcome} elapsedMs=${receipt.elapsedMs} rows=${receipt.rowCount} resultCode=${receipt.resultCode} compressedBytes=${receipt.compressedBytes} decompressedBytes=${receipt.decompressedBytes} ownerContinuous=${receipt.ownerContinuous} generationContinuous=${receipt.generationContinuous} refunded=${refunded} attempt=${attempt}/3`,
+        );
       },
-      () => {},
+      (error: unknown) => {
+        let errorName = "Unknown";
+        try {
+          const name = error == null ? "Unknown" : error.constructor.name;
+          if (/^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(name)) errorName = name;
+        } catch {}
+        this.logEventPersonDiagnostic(`probe outcome=error errorName=${errorName} attempt=${attempt}/3`);
+      },
     );
+  }
+
+  /** Fixed probe states have process-wide deduplication, including when the log cannot be written. */
+  private logEventPersonProbeOnce(state: string): void {
+    if (loggedEventPersonProbeStates.has(state)) return;
+    loggedEventPersonProbeStates.add(state);
+    this.logEventPersonDiagnostic(`probe ${state}`);
   }
 
   /** Abort optional person diagnostics and expose lease cleanup before foreground admission. */
@@ -450,9 +478,16 @@ export class RtcCommandRouter {
   /** Only a row count and value-free schema are appended; filesystem failure is isolated from the read. */
   private logEventPersonKeys(rows: readonly unknown[]): void {
     try {
+      this.logEventPersonDiagnostic(`row keys ${eventRowKeyShape(rows, true)}`);
+    } catch {}
+  }
+
+  /** Timestamped value-free person-table diagnostics never propagate filesystem failures. */
+  private logEventPersonDiagnostic(line: string): void {
+    try {
       appendFileSync(
         process.env.EUFY_EVENT_ROW_KEYS_FILE ?? "/tmp/eufy-event-row-keys.log",
-        `[rtc] event_person_list row keys ${eventRowKeyShape(rows, true)}\n`,
+        `${new Date().toISOString()} [rtc] event_person_list ${line}\n`,
         { mode: 0o600 },
       );
     } catch {}
