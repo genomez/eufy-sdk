@@ -148,7 +148,7 @@ describe("recent person crops", () => {
   it("refuses without acquiring an owner and enforces narrow option bounds", async () => {
     const { session } = await fixture();
     expect(await router.readRecentPersonCrops("missing-station")).toEqual({ outcome: "busy/not_admitted" });
-    for (const options of [{ count: 21 }, { count: 0 }, { timeoutMs: 2001 }, { timeoutMs: 0 }])
+    for (const options of [{ count: 101 }, { count: 0 }, { timeoutMs: 2001 }, { timeoutMs: 0 }])
       await expect(router.readRecentPersonCrops(station, options)).rejects.toThrow(RangeError);
     expect(session.sent).toHaveLength(0);
   });

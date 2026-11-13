@@ -2303,7 +2303,7 @@ export class RtcCommandRouter {
     if (
       !Number.isSafeInteger(count) ||
       count < 1 ||
-      count > 20 ||
+      count > 100 ||
       !Number.isSafeInteger(timeoutMs) ||
       timeoutMs < 1 ||
       timeoutMs > 2000
