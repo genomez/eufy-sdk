@@ -5,7 +5,7 @@ export const EVENT_TABLE_BYTE_CAP = 256 * 1024;
 /** An array of n empty JSON objects requires at least 3n + 1 bytes within the decoded table budget. */
 export const CATALOG_QUERY_COUNT_MAX = Math.floor((EVENT_TABLE_BYTE_CAP - 1) / 3);
 const TABLE = "history_record_info";
-export type EventTableName = typeof TABLE | "event_person_list";
+export type EventTableName = typeof TABLE | "person_basic_info" | "record_crop_picture_info";
 const TOP_FIELDS = ["cmd", "count", "data", "end_id", "mIntRet", "msg", "start_id", "table", "transaction", "version"];
 const ROW_FIELDS = [
   "device_sn",
@@ -63,12 +63,28 @@ const DIGIT_RUN = /\d{4,}/;
 /** A nested object with more distinct names than this is treated as a data-keyed map. */
 const NESTED_KEY_MAX = 12;
 const ROW_KEY_LIMIT = 150;
+/** Only fixed schema names may appear in top-level person-table diagnostics; arbitrary names can be identities. */
+const PERSON_ROW_KEYS = new Set([
+  ...ROW_FIELDS,
+  "person_id",
+  "name",
+  "relation",
+  "group_id",
+  "face_name",
+  "face_id",
+  "face_path",
+  "crop_picture_path",
+  "person_recog_flag",
+  "update_time",
+  "people",
+  "extra",
+]);
 
 /**
  * Value-free shape of event-table rows for one diagnostic log line: every column name with its value
  * type and row count, plus one level of nested names inside object values or JSON-object strings.
  * Names that do not look like identifiers are counted as `<other>`; no value ever appears.
- * With topLevelOnly, object and JSON-string contents are never inspected.
+ * With topLevelOnly, only allowlisted column names appear; object and JSON-string contents are never inspected.
  */
 export function eventRowKeyShape(rows: readonly unknown[], topLevelOnly = false): string {
   const counts = new Map<string, number>();
@@ -92,7 +108,7 @@ export function eventRowKeyShape(rows: readonly unknown[], topLevelOnly = false)
       continue;
     }
     for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-      if (!ROW_KEY_NAME.test(key) || DIGIT_RUN.test(key)) {
+      if (!ROW_KEY_NAME.test(key) || DIGIT_RUN.test(key) || (topLevelOnly && !PERSON_ROW_KEYS.has(key))) {
         bump("<other>");
         continue;
       }

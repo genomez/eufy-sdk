@@ -387,8 +387,14 @@ function untilAborted<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
 /** Anonymous process-local ordinal; never derived from connection or account data. */
 let nextRefreshOwnerIncarnation = 0;
 
-/** Shared across routers and replacement sessions; optional person-table diagnostics stop after three attempts. */
-let eventPersonProbeAttempts = 0;
+/** Ordered rotation shared across routers and replacement sessions, with three attempts per table. */
+const EVENT_PERSON_PROBE_TABLES = ["person_basic_info", "record_crop_picture_info"] as const;
+type EventPersonProbeTable = (typeof EVENT_PERSON_PROBE_TABLES)[number];
+const eventPersonProbeAttempts: Record<EventPersonProbeTable, number> = {
+  person_basic_info: 0,
+  record_crop_picture_info: 0,
+};
+let nextEventPersonProbeTable = 0;
 
 /** Eligibility and each skip reason are logged at most once across routers for the process. */
 const loggedEventPersonProbeStates = new Set<string>();
@@ -450,12 +456,16 @@ export class RtcCommandRouter {
   private readonly eventPersonProbeSessions = new WeakSet<RtcSession>();
   private readonly eventPersonProbes = new Map<string, { controller: AbortController; finished: Promise<void> }>();
 
-  /** On unless EUFY_EVENT_PERSON_PROBE=0: one 100-row/2-second read per session, three attempts per process; no acquisition or retry. */
+  /** On unless EUFY_EVENT_PERSON_PROBE=0: one 100-row/2-second read per session, three attempts per table per process. */
   private probeEventPersons(stationSn: string, owner: StationSession): void {
+    const table = EVENT_PERSON_PROBE_TABLES.map(
+      (_, offset) =>
+        EVENT_PERSON_PROBE_TABLES[(nextEventPersonProbeTable + offset) % EVENT_PERSON_PROBE_TABLES.length]!,
+    ).find((table) => eventPersonProbeAttempts[table] < 3);
     const reason =
       process.env.EUFY_EVENT_PERSON_PROBE === "0"
         ? "disabled"
-        : eventPersonProbeAttempts >= 3
+        : table === undefined
           ? "attempt_cap"
           : this.sessions.get(stationSn) !== owner
             ? "owner_changed"
@@ -467,15 +477,17 @@ export class RtcCommandRouter {
       this.logEventPersonProbeOnce(`skipped reason=${reason}`);
       return;
     }
+    if (table === undefined) return;
     this.logEventPersonProbeOnce("eligible");
     this.eventPersonProbeSessions.add(owner.session);
-    const attempt = ++eventPersonProbeAttempts;
+    const attempt = ++eventPersonProbeAttempts[table];
+    nextEventPersonProbeTable = (EVENT_PERSON_PROBE_TABLES.indexOf(table) + 1) % EVENT_PERSON_PROBE_TABLES.length;
     /** Refused or pre-empted probes return their attempt and session mark for later idle admission. */
     const refund = () => {
-      eventPersonProbeAttempts = Math.max(0, eventPersonProbeAttempts - 1);
+      eventPersonProbeAttempts[table] = Math.max(0, eventPersonProbeAttempts[table] - 1);
       this.eventPersonProbeSessions.delete(owner.session);
     };
-    void this.readEventCandidate(stationSn, { timeoutMs: 2000 }, undefined, true).then(
+    void this.readEventCandidate(stationSn, { timeoutMs: 2000 }, undefined, table).then(
       (receipt) => {
         const refunded = receipt.outcome === "busy/not_admitted" || receipt.outcome === "abandoned";
         if (refunded) {
@@ -488,7 +500,7 @@ export class RtcCommandRouter {
           eventPersonProbeRefundedLines++;
         }
         this.logEventPersonDiagnostic(
-          `probe outcome=${receipt.outcome}${receipt.refusal ? ` refusal=${receipt.refusal}` : ""} elapsedMs=${receipt.elapsedMs} rows=${receipt.rowCount} resultCode=${receipt.resultCode} compressedBytes=${receipt.compressedBytes} decompressedBytes=${receipt.decompressedBytes} ownerContinuous=${receipt.ownerContinuous} generationContinuous=${receipt.generationContinuous} refunded=${refunded} attempt=${attempt}/3`,
+          `table=${table} outcome=${receipt.outcome}${receipt.refusal ? ` refusal=${receipt.refusal}` : ""} elapsedMs=${receipt.elapsedMs} rows=${receipt.rowCount} resultCode=${receipt.resultCode} compressedBytes=${receipt.compressedBytes} decompressedBytes=${receipt.decompressedBytes} ownerContinuous=${receipt.ownerContinuous} generationContinuous=${receipt.generationContinuous} refunded=${refunded} attempt=${attempt}/3`,
         );
       },
       (error: unknown) => {
@@ -497,7 +509,7 @@ export class RtcCommandRouter {
           const name = error == null ? "Unknown" : error.constructor.name;
           if (/^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(name)) errorName = name;
         } catch {}
-        this.logEventPersonDiagnostic(`probe outcome=error errorName=${errorName} attempt=${attempt}/3`);
+        this.logEventPersonDiagnostic(`table=${table} outcome=error errorName=${errorName} attempt=${attempt}/3`);
       },
     );
   }
@@ -505,7 +517,7 @@ export class RtcCommandRouter {
   /** Fixed probe states have process-wide deduplication after a successful write. */
   private logEventPersonProbeOnce(state: string): void {
     if (loggedEventPersonProbeStates.has(state)) return;
-    if (this.logEventPersonDiagnostic(`probe ${state}`)) loggedEventPersonProbeStates.add(state);
+    if (this.logEventPersonDiagnostic(state)) loggedEventPersonProbeStates.add(state);
   }
 
   /** Changed counters are reported opportunistically without a timer or work on quiet reads. */
@@ -515,7 +527,7 @@ export class RtcCommandRouter {
     if (eventPersonProbeSummaryAt !== undefined && now - eventPersonProbeSummaryAt < 3_600_000) return;
     if (
       this.logEventPersonDiagnostic(
-        `probe skip_counts disabled=${eventPersonProbeCounts.disabled} attempt_cap=${eventPersonProbeCounts.attempt_cap} owner_changed=${eventPersonProbeCounts.owner_changed} session_already_probed=${eventPersonProbeCounts.session_already_probed} no_event_rows=${eventPersonProbeCounts.no_event_rows} refunded=${eventPersonProbeCounts.refunded}`,
+        `skip_counts disabled=${eventPersonProbeCounts.disabled} attempt_cap=${eventPersonProbeCounts.attempt_cap} owner_changed=${eventPersonProbeCounts.owner_changed} session_already_probed=${eventPersonProbeCounts.session_already_probed} no_event_rows=${eventPersonProbeCounts.no_event_rows} refunded=${eventPersonProbeCounts.refunded}`,
       )
     )
       eventPersonProbeSummaryAt = now;
@@ -529,9 +541,9 @@ export class RtcCommandRouter {
   }
 
   /** Only a row count and value-free schema are appended; filesystem failure is isolated from the read. */
-  private logEventPersonKeys(rows: readonly unknown[]): void {
+  private logEventPersonKeys(table: EventPersonProbeTable, rows: readonly unknown[]): void {
     try {
-      this.logEventPersonDiagnostic(`row keys ${eventRowKeyShape(rows, true)}`);
+      this.logEventPersonDiagnostic(`table=${table} row keys ${eventRowKeyShape(rows, true)}`);
     } catch {}
   }
 
@@ -540,7 +552,7 @@ export class RtcCommandRouter {
     try {
       appendFileSync(
         process.env.EUFY_EVENT_ROW_KEYS_FILE ?? "/tmp/eufy-event-row-keys.log",
-        `${new Date().toISOString()} [rtc] event_person_list ${line}\n`,
+        `${new Date().toISOString()} [rtc] person_probe ${line}\n`,
         { mode: 0o600 },
       );
       return true;
@@ -2312,7 +2324,7 @@ export class RtcCommandRouter {
     stationSn: string,
     opts: { signal?: AbortSignal; timeoutMs?: number },
     thumb?: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt; shapes?: ThumbnailShapes },
-    personProbe = false,
+    personProbe?: EventPersonProbeTable,
   ): Promise<EventTableReceipt & { refusal?: EventPersonProbeRefusal }> {
     if (!personProbe) this.preemptRecordingReads(stationSn);
     const started = performance.now();
@@ -2410,7 +2422,7 @@ export class RtcCommandRouter {
                   this.eventTableReplies.set(transaction, {
                     owner: st,
                     expiresAtMs: Number.POSITIVE_INFINITY,
-                    table: personProbe ? "event_person_list" : "history_record_info",
+                    table: personProbe ?? "history_record_info",
                   }),
               },
               thumb
@@ -2419,11 +2431,11 @@ export class RtcCommandRouter {
                     thumb.file = selectThumbnail(rows);
                   }
                 : personProbe
-                  ? (rows) => this.logEventPersonKeys(rows)
+                  ? (rows) => this.logEventPersonKeys(personProbe, rows)
                   : undefined,
               undefined,
               personProbe ? 100 : 20,
-              personProbe ? "event_person_list" : "history_record_info",
+              personProbe ?? "history_record_info",
             );
             clearTimeout(tableTimer);
             if (!thumb) return table;
