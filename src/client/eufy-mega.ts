@@ -39,6 +39,7 @@ import {
   markRenewalInformationRead,
 } from "../transport/rtc/retired-information-read.js";
 import { RtcCommandRouter } from "../transport/rtc/command-router.js";
+import type { RecentPersonCropOptions, RecentPersonCropResult } from "../transport/rtc/recent-person-crops.js";
 import {
   recordingAccountNamespace,
   type RecordingReadScope,
@@ -3081,6 +3082,11 @@ export class EufyMega extends EventEmitter {
   /** Passive bounded information-exchange observations. */
   getRtcReadDiagnostics() {
     return this.rtc.getReadDiagnostics();
+  }
+
+  /** Newest sanitized crop metadata from an existing idle station session; no acquisition or retry. */
+  readRecentPersonCrops(stationSn: string, options: RecentPersonCropOptions = {}): Promise<RecentPersonCropResult> {
+    return this.rtc.readRecentPersonCrops(stationSn, options);
   }
 
   /** Passive target association for an already attempted command; does not allocate an association. */

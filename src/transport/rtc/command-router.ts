@@ -42,6 +42,12 @@ import {
   type ConnectionRecord,
 } from "./connection-diagnostics.js";
 import { appendFileSync } from "node:fs";
+import {
+  projectPersonCrop,
+  type PersonCropRow,
+  type RecentPersonCropOptions,
+  type RecentPersonCropResult,
+} from "./recent-person-crops.js";
 import { performance } from "node:perf_hooks";
 import { StationWorkScheduler, StationWorkError, type StationWorkDiagnostics } from "./station-work-scheduler.js";
 import {
@@ -2290,6 +2296,33 @@ export class RtcCommandRouter {
     return this.readEventCandidate(stationSn, opts);
   }
 
+  /** Newest crop metadata over FULL_TABLE on an existing idle owner; no acquisition, keepalive or retry. */
+  async readRecentPersonCrops(stationSn: string, opts: RecentPersonCropOptions = {}): Promise<RecentPersonCropResult> {
+    const count = opts.count ?? 20;
+    const timeoutMs = opts.timeoutMs ?? 2000;
+    if (
+      !Number.isSafeInteger(count) ||
+      count < 1 ||
+      count > 20 ||
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs < 1 ||
+      timeoutMs > 2000
+    )
+      throw new RangeError("Crop read options are outside their bounds");
+    let rows: PersonCropRow[] | undefined;
+    const receipt = await this.readEventCandidate(
+      stationSn,
+      { ...opts, timeoutMs, queryCount: count },
+      undefined,
+      "record_crop_picture_info",
+      (raw, envelopeValid) => {
+        if (envelopeValid && raw.length <= count) rows = raw.map(projectPersonCrop);
+      },
+    );
+    if (receipt.outcome !== "success" && receipt.outcome !== "empty") return { outcome: receipt.outcome };
+    return rows ? { outcome: receipt.outcome, rows } : { outcome: "invalid_reply" };
+  }
+
   /** One table followed by at most one stored JPEG on the same admitted owner. */
   async readEventThumbnailCandidate(
     stationSn: string,
@@ -2335,6 +2368,7 @@ export class RtcCommandRouter {
     opts: { signal?: AbortSignal; timeoutMs?: number; queryCount?: number },
     thumb?: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt; shapes?: ThumbnailShapes },
     personProbe?: EventPersonProbeTable,
+    onPersonRows?: (rows: unknown[], envelopeValid: boolean) => void,
   ): Promise<EventTableReceipt & { refusal?: EventPersonProbeRefusal }> {
     if (!personProbe) this.preemptRecordingReads(stationSn);
     const started = performance.now();
@@ -2410,6 +2444,21 @@ export class RtcCommandRouter {
           if (!continuity().ownerContinuous || !continuity().generationContinuous)
             return refused("owner_not_continuous");
           if (this.lives.has(stationSn)) return refused("live_view");
+          if (
+            personProbe &&
+            (st.informationTainted ||
+              st.replacement ||
+              st.refreshPending ||
+              st.leases !== 1 ||
+              st.pendingExchanges !== 1 ||
+              st.scheduler.snapshot().queued !== 0 ||
+              (st.refreshBusyCooldownAtMs ??
+                st.refreshRetryAtMs ??
+                (refreshInterval ? st.connectedAtMs! + refreshInterval : Number.POSITIVE_INFINITY)) -
+                Date.now() <=
+                8_000)
+          )
+            return refused("run_gate");
           if (this.eventTableReplies.size + this.eventThumbReplies.size >= 16) return refused("reply_table_full");
           const observe = (observe: (decodedBytes: number, frame: PortalResponse) => void) => {
             this.eventTableObservers.set(st.session, observe);
@@ -2441,7 +2490,7 @@ export class RtcCommandRouter {
                     thumb.file = selectThumbnail(rows);
                   }
                 : personProbe
-                  ? (rows) => this.logEventPersonKeys(personProbe, rows)
+                  ? (onPersonRows ?? ((rows) => this.logEventPersonKeys(personProbe, rows)))
                   : undefined,
               undefined,
               personProbe ? (opts.queryCount ?? eventPersonProbeRowCounts[personProbe]) : 20,
