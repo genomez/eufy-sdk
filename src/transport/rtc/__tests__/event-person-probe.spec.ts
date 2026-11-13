@@ -31,6 +31,7 @@ beforeEach(async () => {
   fixture = (await import("./recordings-fixture.js")).recordingFixture;
 });
 afterEach(async () => {
+  vi.useRealTimers();
   router?.close();
   for (const owner of routers.splice(0)) owner.close();
   await tick();
@@ -52,6 +53,198 @@ const invokeProbe = (target: RtcCommandRouter, owner = Reflect.get(target, "sess
 const skipped = (reason: string) => logLines().filter((line) => line.endsWith(`probe skipped reason=${reason}`));
 
 describe("event person table probe", () => {
+  it("logs the real catalog trigger once for reads without rows and once when armed", async () => {
+    const f = await fixture();
+    router = f.router;
+    f.session.accept = false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(await router.readRecordingCatalog(scope)).toMatchObject({ status: "unavailable", reason: "send_refused" });
+      f.advance(61_000);
+    }
+    expect(logLines().filter((line) => line.endsWith("probe trigger_skipped reason=no_event_rows"))).toHaveLength(1);
+    expect(logLines().filter((line) => line.endsWith("probe armed"))).toHaveLength(0);
+    expect(outcomes()).toHaveLength(0);
+    f.session.accept = true;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const read = router.readRecordingCatalog(scope);
+      await sent(f.session, attempt === 0 ? 3 : 5);
+      f.session.table([row()]);
+      expect((await read).status).toBe("ok");
+      if (attempt === 0) {
+        await sent(f.session, 4);
+        f.session.table([], { table: "event_person_list" });
+      }
+      await tick();
+      f.advance(61_000);
+    }
+    expect(logLines().filter((line) => line.endsWith("probe armed"))).toHaveLength(1);
+    expect(outcomes()).toHaveLength(1);
+  });
+
+  it("caps refunded outcome volume across routers and preserves later non-refunded outcomes", async () => {
+    const f = await fixture();
+    router = f.router;
+    const other = await fixture();
+    routers.push(other.router);
+    const owner = Reflect.get(router, "sessions").get(station);
+    const otherOwner = Reflect.get(other.router, "sessions").get(station);
+    owner.leases++;
+    otherOwner.leases++;
+    for (let attempt = 0; attempt < 70; attempt++) {
+      invokeProbe(attempt % 2 ? other.router : router);
+      await tick();
+    }
+    expect(outcomes()).toHaveLength(50);
+    expect(
+      outcomes().every((line) => line.includes("refusal=leases") && line.endsWith("refunded=true attempt=1/3")),
+    ).toBe(true);
+    expect(logLines().filter((line) => line.endsWith("probe refunded_lines_suppressed after=50"))).toHaveLength(1);
+    owner.leases--;
+    otherOwner.leases--;
+    invokeProbe(router);
+    await sent(f.session);
+    f.session.table([], { table: "event_person_list" });
+    await tick();
+    expect(outcomes()).toHaveLength(51);
+    expect(outcomes().at(-1)).toMatch(/outcome=empty .*refunded=false attempt=1\/3$/);
+  });
+
+  it.each(["leases", "pending_exchanges", "information_tainted", "renewal_soon", "owner_not_continuous"] as const)(
+    "logs the first failing refusal code for %s without consuming the attempt",
+    async (cause) => {
+      const f = await fixture();
+      router = f.router;
+      const owner = Reflect.get(router, "sessions").get(station);
+      if (cause === "leases") {
+        owner.leases = 1;
+        owner.pendingExchanges = 1;
+      } else if (cause === "pending_exchanges") owner.pendingExchanges = 1;
+      else if (cause === "information_tainted") {
+        owner.informationTainted = true;
+        owner.leases = 1;
+      } else if (cause === "renewal_soon") owner.refreshRetryAtMs = Date.now() + 8_000;
+      else f.changeAccount();
+      invokeProbe(router);
+      await tick();
+      expect(outcomes()).toEqual([
+        expect.stringMatching(new RegExp(`outcome=busy/not_admitted refusal=${cause} .*refunded=true attempt=1/3$`)),
+      ]);
+      expect(f.session.sent).toHaveLength(0);
+      owner.leases = 0;
+      owner.pendingExchanges = 0;
+    },
+  );
+
+  it.each(["aborted", "run_gate", "owner_not_continuous", "live_view", "reply_table_full"] as const)(
+    "retains refusal diagnostics when the scheduler run gate fails with %s",
+    async (cause) => {
+      const f = await fixture();
+      router = f.router;
+      const owner = Reflect.get(router, "sessions").get(station);
+      vi.spyOn(owner.scheduler, "enqueue").mockImplementationOnce(async (input) => {
+        const job = input as { run: () => Promise<EventTableReceipt> };
+        if (cause === "aborted") Reflect.get(router!, "eventPersonProbes").get(station).controller.abort();
+        else if (cause === "run_gate") f.advance(2_000);
+        else if (cause === "owner_not_continuous") owner.generation++;
+        else if (cause === "live_view") Reflect.get(router!, "lives").has = () => true;
+        else
+          for (let i = 0; i < 16; i++)
+            Reflect.get(router!, "eventTableReplies").set(`synthetic-${i}`, { expiresAtMs: Infinity });
+        return job.run();
+      });
+      invokeProbe(router);
+      await tick();
+      expect(outcomes()).toEqual([expect.stringContaining(`outcome=busy/not_admitted refusal=${cause} `)]);
+      expect(outcomes()[0]).toMatch(/refunded=true attempt=1\/3$/);
+      expect(f.session.sent).toHaveLength(0);
+      expect(owner.leases).toBe(0);
+      expect(owner.pendingExchanges).toBe(0);
+    },
+  );
+
+  it("keeps refusal fields absent for non-person callers", async () => {
+    const f = await fixture();
+    router = f.router;
+    const owner = Reflect.get(router, "sessions").get(station);
+    owner.leases++;
+    const receipt = await Reflect.get(router, "readEventCandidate").call(router, station, {});
+    expect(receipt.outcome).toBe("busy/not_admitted");
+    expect(receipt).not.toHaveProperty("refusal");
+    owner.leases--;
+  });
+
+  it("logs result_nonzero without row values or a refund", async () => {
+    const f = await fixture();
+    router = f.router;
+    invokeProbe(router);
+    await sent(f.session);
+    f.session.table([{ name: "synthetic-private-value" }], { table: "event_person_list", mIntRet: 7 });
+    await tick();
+    expect(outcomes()).toEqual([
+      expect.stringMatching(/outcome=result_nonzero .*rows=null resultCode=7 .*refunded=false attempt=1\/3$/),
+    ]);
+    expect(personLines()).toHaveLength(0);
+    expect(readFileSync(logFile, "utf8")).not.toContain("synthetic-private-value");
+  });
+
+  it("preserves an abandoned receipt and its refund when every diagnostic write fails", async () => {
+    vi.stubEnv("EUFY_EVENT_ROW_KEYS_FILE", directory);
+    const f = await fixture();
+    router = f.router;
+    const readCandidate = vi.fn(Reflect.get(router, "readEventCandidate").bind(router));
+    Reflect.set(router, "readEventCandidate", readCandidate);
+    invokeProbe(router);
+    await sent(f.session);
+    const probe = Reflect.get(router, "eventPersonProbes").get(station);
+    router.preemptRecordingReads();
+    await probe.finished;
+    await tick();
+    await expect(readCandidate.mock.results[0]!.value).resolves.toMatchObject({ outcome: "abandoned" });
+    expect(Reflect.get(router, "eventPersonProbes").size).toBe(0);
+    expect(Reflect.get(router, "sessions").get(station)).toMatchObject({ leases: 0, pendingExchanges: 0 });
+    vi.stubEnv("EUFY_EVENT_ROW_KEYS_FILE", logFile);
+    invokeProbe(router);
+    await sent(f.session, 2);
+    f.session.table([], { table: "event_person_list" });
+    await tick();
+    expect(outcomes()).toEqual([expect.stringMatching(/outcome=empty .*refunded=false attempt=1\/3$/)]);
+    expect(logLines().filter((line) => line.endsWith("probe eligible"))).toHaveLength(1);
+  });
+
+  it("summarizes changed skip and refund counters at most hourly without a background timer", async () => {
+    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "0");
+    const f = await fixture();
+    router = f.router;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const epoch = Date.now();
+    vi.spyOn(performance, "now").mockImplementation(() => Date.now() - epoch + 161_000);
+    const summaries = () => logLines().filter((line) => line.includes("probe skip_counts "));
+    invokeProbe(router);
+    invokeProbe(router);
+    expect(summaries()).toEqual([
+      expect.stringMatching(
+        /disabled=1 attempt_cap=0 owner_changed=0 session_already_probed=0 no_event_rows=0 refunded=0$/,
+      ),
+    ]);
+    vi.advanceTimersByTime(3_599_999);
+    invokeProbe(router);
+    expect(summaries()).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    invokeProbe(router);
+    expect(summaries()).toHaveLength(2);
+    expect(summaries()[1]).toMatch(/disabled=4 /);
+    vi.advanceTimersByTime(3_600_000);
+    expect(summaries()).toHaveLength(2);
+    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "1");
+    const owner = Reflect.get(router, "sessions").get(station);
+    owner.leases++;
+    invokeProbe(router);
+    await tick();
+    expect(summaries()).toHaveLength(3);
+    expect(summaries()[2]).toMatch(/refunded=1$/);
+    owner.leases--;
+  });
+
   it("is enabled by default when the environment variable is unset", async () => {
     vi.stubEnv("EUFY_EVENT_PERSON_PROBE", undefined);
     const f = await fixture();
@@ -389,7 +582,7 @@ describe("event person table probe", () => {
     owner.leases--;
     expect(outcomes()).toEqual([
       expect.stringMatching(
-        /probe outcome=busy\/not_admitted elapsedMs=0 rows=null resultCode=null compressedBytes=null decompressedBytes=0 ownerContinuous=true generationContinuous=true refunded=true attempt=1\/3$/,
+        /probe outcome=busy\/not_admitted refusal=leases elapsedMs=0 rows=null resultCode=null compressedBytes=null decompressedBytes=0 ownerContinuous=true generationContinuous=true refunded=true attempt=1\/3$/,
       ),
       expect.stringMatching(/probe outcome=busy\/not_admitted .* refunded=true attempt=1\/3$/),
     ]);
@@ -458,7 +651,7 @@ describe("event person table probe", () => {
       .mock.calls.flatMap(([path], index) =>
         path === directory ? [vi.mocked(appendFileSync).mock.results[index]!.type] : [],
       );
-    expect(failedWrites).toEqual(["throw", "throw", "throw", "throw"]);
+    expect(failedWrites).toEqual(["throw", "throw", "throw", "throw", "throw"]);
     vi.stubEnv("EUFY_EVENT_ROW_KEYS_FILE", logFile);
     invokeProbe(router);
     expect(skipped("session_already_probed")).toHaveLength(1);

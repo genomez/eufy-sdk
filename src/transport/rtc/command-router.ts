@@ -393,6 +393,38 @@ let eventPersonProbeAttempts = 0;
 /** Eligibility and each skip reason are logged at most once across routers for the process. */
 const loggedEventPersonProbeStates = new Set<string>();
 
+/** Process-wide diagnostic counters; summaries are emitted on changed activity at most hourly. */
+const eventPersonProbeCounts = {
+  disabled: 0,
+  attempt_cap: 0,
+  owner_changed: 0,
+  session_already_probed: 0,
+  no_event_rows: 0,
+  refunded: 0,
+};
+let eventPersonProbeSummaryAt: number | undefined;
+/** Counts attempted outcome writes so an unwritable destination cannot replenish the volume budget. */
+let eventPersonProbeRefundedLines = 0;
+
+type EventPersonProbeRefusal =
+  | "aborted"
+  | "no_session"
+  | "disconnected"
+  | "not_connected_yet"
+  | "information_tainted"
+  | "leases"
+  | "pending_exchanges"
+  | "scheduler_busy"
+  | "replacement"
+  | "refresh_pending"
+  | "live_view"
+  | "event_table_probe"
+  | "playback_probe"
+  | "reply_table_full"
+  | "owner_not_continuous"
+  | "renewal_soon"
+  | "run_gate";
+
 interface RecordingAttemptBudget {
   catalog?: number;
   coverFinished?: number;
@@ -431,6 +463,7 @@ export class RtcCommandRouter {
               ? "session_already_probed"
               : undefined;
     if (reason) {
+      this.countEventPersonProbe(reason);
       this.logEventPersonProbeOnce(`skipped reason=${reason}`);
       return;
     }
@@ -445,9 +478,17 @@ export class RtcCommandRouter {
     void this.readEventCandidate(stationSn, { timeoutMs: 2000 }, undefined, true).then(
       (receipt) => {
         const refunded = receipt.outcome === "busy/not_admitted" || receipt.outcome === "abandoned";
-        if (refunded) refund();
+        if (refunded) {
+          refund();
+          this.countEventPersonProbe("refunded");
+          if (eventPersonProbeRefundedLines >= 50) {
+            this.logEventPersonProbeOnce("refunded_lines_suppressed after=50");
+            return;
+          }
+          eventPersonProbeRefundedLines++;
+        }
         this.logEventPersonDiagnostic(
-          `probe outcome=${receipt.outcome} elapsedMs=${receipt.elapsedMs} rows=${receipt.rowCount} resultCode=${receipt.resultCode} compressedBytes=${receipt.compressedBytes} decompressedBytes=${receipt.decompressedBytes} ownerContinuous=${receipt.ownerContinuous} generationContinuous=${receipt.generationContinuous} refunded=${refunded} attempt=${attempt}/3`,
+          `probe outcome=${receipt.outcome}${receipt.refusal ? ` refusal=${receipt.refusal}` : ""} elapsedMs=${receipt.elapsedMs} rows=${receipt.rowCount} resultCode=${receipt.resultCode} compressedBytes=${receipt.compressedBytes} decompressedBytes=${receipt.decompressedBytes} ownerContinuous=${receipt.ownerContinuous} generationContinuous=${receipt.generationContinuous} refunded=${refunded} attempt=${attempt}/3`,
         );
       },
       (error: unknown) => {
@@ -461,11 +502,23 @@ export class RtcCommandRouter {
     );
   }
 
-  /** Fixed probe states have process-wide deduplication, including when the log cannot be written. */
+  /** Fixed probe states have process-wide deduplication after a successful write. */
   private logEventPersonProbeOnce(state: string): void {
     if (loggedEventPersonProbeStates.has(state)) return;
-    loggedEventPersonProbeStates.add(state);
-    this.logEventPersonDiagnostic(`probe ${state}`);
+    if (this.logEventPersonDiagnostic(`probe ${state}`)) loggedEventPersonProbeStates.add(state);
+  }
+
+  /** Changed counters are reported opportunistically without a timer or work on quiet reads. */
+  private countEventPersonProbe(reason: keyof typeof eventPersonProbeCounts): void {
+    eventPersonProbeCounts[reason]++;
+    const now = performance.now();
+    if (eventPersonProbeSummaryAt !== undefined && now - eventPersonProbeSummaryAt < 3_600_000) return;
+    if (
+      this.logEventPersonDiagnostic(
+        `probe skip_counts disabled=${eventPersonProbeCounts.disabled} attempt_cap=${eventPersonProbeCounts.attempt_cap} owner_changed=${eventPersonProbeCounts.owner_changed} session_already_probed=${eventPersonProbeCounts.session_already_probed} no_event_rows=${eventPersonProbeCounts.no_event_rows} refunded=${eventPersonProbeCounts.refunded}`,
+      )
+    )
+      eventPersonProbeSummaryAt = now;
   }
 
   /** Abort optional person diagnostics and expose lease cleanup before foreground admission. */
@@ -483,14 +536,17 @@ export class RtcCommandRouter {
   }
 
   /** Timestamped value-free person-table diagnostics never propagate filesystem failures. */
-  private logEventPersonDiagnostic(line: string): void {
+  private logEventPersonDiagnostic(line: string): boolean {
     try {
       appendFileSync(
         process.env.EUFY_EVENT_ROW_KEYS_FILE ?? "/tmp/eufy-event-row-keys.log",
         `${new Date().toISOString()} [rtc] event_person_list ${line}\n`,
         { mode: 0o600 },
       );
-    } catch {}
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Diagnostic: log each new value-free event-table row shape once (column names, types, counts). */
@@ -1762,7 +1818,13 @@ export class RtcCommandRouter {
         if (this.recordingReads.get(scope.stationSn) === controller) this.recordingReads.delete(scope.stationSn);
         st.pendingExchanges--;
         this.release(scope.stationSn, st);
-        if (eventRowsRead) setImmediate(() => this.probeEventPersons(scope.stationSn, st));
+        if (eventRowsRead) {
+          this.logEventPersonProbeOnce("armed");
+          setImmediate(() => this.probeEventPersons(scope.stationSn, st));
+        } else if (!selected) {
+          this.countEventPersonProbe("no_event_rows");
+          this.logEventPersonProbeOnce("trigger_skipped reason=no_event_rows");
+        }
       }
     } catch {
       return failure("scope_invalid", "unavailable");
@@ -2251,7 +2313,7 @@ export class RtcCommandRouter {
     opts: { signal?: AbortSignal; timeoutMs?: number },
     thumb?: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt; shapes?: ThumbnailShapes },
     personProbe = false,
-  ): Promise<EventTableReceipt> {
+  ): Promise<EventTableReceipt & { refusal?: EventPersonProbeRefusal }> {
     if (!personProbe) this.preemptRecordingReads(stationSn);
     const started = performance.now();
     const limit = thumb ? 16_000 : 8_000;
@@ -2265,8 +2327,9 @@ export class RtcCommandRouter {
       ownerContinuous: !!st && st.session.isConnected && this.storageCandidateOwnerMatches(stationSn, st),
       generationContinuous: !!st && this.sessions.get(stationSn) === st && st.generation === generation,
     });
-    const refused = (): EventTableReceipt => ({
+    const refused = (refusal: EventPersonProbeRefusal): EventTableReceipt & { refusal?: EventPersonProbeRefusal } => ({
       outcome: "busy/not_admitted",
+      ...(personProbe ? { refusal } : {}),
       elapsedMs: Math.max(0, Math.round(performance.now() - started)),
       compressedBytes: null,
       decompressedBytes: 0,
@@ -2275,30 +2338,27 @@ export class RtcCommandRouter {
       resultCode: null,
       ...continuity(),
     });
-    if (
-      opts.signal?.aborted ||
-      !st ||
-      !st.session.isConnected ||
-      st.connectedAtMs === undefined ||
-      st.informationTainted ||
-      st.leases !== 0 ||
-      st.pendingExchanges !== 0 ||
-      !st.scheduler.idle ||
-      st.replacement ||
-      st.refreshPending ||
-      this.lives.has(stationSn) ||
-      this.eventTableProbes.has(stationSn) ||
-      this.playbackProbes.has(stationSn) ||
-      this.eventTableReplies.size + this.eventThumbReplies.size >= 16 ||
-      !continuity().ownerContinuous
-    )
-      return refused();
+    if (opts.signal?.aborted) return refused("aborted");
+    if (!st) return refused("no_session");
+    if (!st.session.isConnected) return refused("disconnected");
+    if (st.connectedAtMs === undefined) return refused("not_connected_yet");
+    if (st.informationTainted) return refused("information_tainted");
+    if (st.leases !== 0) return refused("leases");
+    if (st.pendingExchanges !== 0) return refused("pending_exchanges");
+    if (!st.scheduler.idle) return refused("scheduler_busy");
+    if (st.replacement) return refused("replacement");
+    if (st.refreshPending) return refused("refresh_pending");
+    if (this.lives.has(stationSn)) return refused("live_view");
+    if (this.eventTableProbes.has(stationSn)) return refused("event_table_probe");
+    if (this.playbackProbes.has(stationSn)) return refused("playback_probe");
+    if (this.eventTableReplies.size + this.eventThumbReplies.size >= 16) return refused("reply_table_full");
+    if (!continuity().ownerContinuous) return refused("owner_not_continuous");
     const refreshInterval = this.deps.sessionRefreshMs ?? 0;
     const renewalAt =
       st.refreshBusyCooldownAtMs ??
       st.refreshRetryAtMs ??
       (refreshInterval ? st.connectedAtMs + refreshInterval : Number.POSITIVE_INFINITY);
-    if (renewalAt - Date.now() <= 8_000) return refused();
+    if (renewalAt - Date.now() <= 8_000) return refused("renewal_soon");
     const controller = new AbortController();
     const signal = opts.signal ? AbortSignal.any([opts.signal, controller.signal]) : controller.signal;
     const deadlineMs = started + timeoutMs;
@@ -2313,7 +2373,7 @@ export class RtcCommandRouter {
     st.leases++;
     st.pendingExchanges++;
     if (st.idle) clearTimeout(st.idle);
-    let result: EventTableReceipt | undefined;
+    let result: (EventTableReceipt & { refusal?: EventPersonProbeRefusal }) | undefined;
     let exchange: Promise<EventTableReceipt> | undefined;
     try {
       result = await st.scheduler.enqueue({
@@ -2323,15 +2383,12 @@ export class RtcCommandRouter {
         sendByMs: deadlineMs,
         signal: personProbe ? undefined : signal,
         run: async () => {
-          if (
-            signal.aborted ||
-            performance.now() >= deadlineMs ||
-            !continuity().ownerContinuous ||
-            !continuity().generationContinuous ||
-            this.lives.has(stationSn) ||
-            this.eventTableReplies.size + this.eventThumbReplies.size >= 16
-          )
-            return refused();
+          if (signal.aborted) return refused("aborted");
+          if (performance.now() >= deadlineMs) return refused("run_gate");
+          if (!continuity().ownerContinuous || !continuity().generationContinuous)
+            return refused("owner_not_continuous");
+          if (this.lives.has(stationSn)) return refused("live_view");
+          if (this.eventTableReplies.size + this.eventThumbReplies.size >= 16) return refused("reply_table_full");
           const observe = (observe: (decodedBytes: number, frame: PortalResponse) => void) => {
             this.eventTableObservers.set(st.session, observe);
             return () => {
@@ -2419,7 +2476,7 @@ export class RtcCommandRouter {
     } catch {
       result = exchange
         ? await exchange
-        : { ...refused(), outcome: performance.now() >= deadlineMs ? "timeout" : "abandoned" };
+        : { ...refused("run_gate"), outcome: performance.now() >= deadlineMs ? "timeout" : "abandoned" };
     } finally {
       clearTimeout(timer);
       clearTimeout(tableTimer);
