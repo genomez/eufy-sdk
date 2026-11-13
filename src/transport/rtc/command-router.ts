@@ -394,6 +394,11 @@ const eventPersonProbeAttempts: Record<EventPersonProbeTable, number> = {
   person_basic_info: 0,
   record_crop_picture_info: 0,
 };
+/** Per-table row limits halve after receive rejection, with a minimum of five rows. */
+const eventPersonProbeRowCounts: Record<EventPersonProbeTable, number> = {
+  person_basic_info: 100,
+  record_crop_picture_info: 20,
+};
 let nextEventPersonProbeTable = 0;
 
 /** Eligibility and each skip reason are logged at most once across routers for the process. */
@@ -456,7 +461,7 @@ export class RtcCommandRouter {
   private readonly eventPersonProbeSessions = new WeakSet<RtcSession>();
   private readonly eventPersonProbes = new Map<string, { controller: AbortController; finished: Promise<void> }>();
 
-  /** On unless EUFY_EVENT_PERSON_PROBE=0: one 100-row/2-second read per session, three attempts per table per process. */
+  /** On unless EUFY_EVENT_PERSON_PROBE=0: one bounded 2-second read per session, three attempts per table per process. */
   private probeEventPersons(stationSn: string, owner: StationSession): void {
     const table = EVENT_PERSON_PROBE_TABLES.map(
       (_, offset) =>
@@ -481,14 +486,17 @@ export class RtcCommandRouter {
     this.logEventPersonProbeOnce("eligible");
     this.eventPersonProbeSessions.add(owner.session);
     const attempt = ++eventPersonProbeAttempts[table];
+    const count = eventPersonProbeRowCounts[table];
     nextEventPersonProbeTable = (EVENT_PERSON_PROBE_TABLES.indexOf(table) + 1) % EVENT_PERSON_PROBE_TABLES.length;
     /** Refused or pre-empted probes return their attempt and session mark for later idle admission. */
     const refund = () => {
       eventPersonProbeAttempts[table] = Math.max(0, eventPersonProbeAttempts[table] - 1);
       this.eventPersonProbeSessions.delete(owner.session);
     };
-    void this.readEventCandidate(stationSn, { timeoutMs: 2000 }, undefined, table).then(
+    void this.readEventCandidate(stationSn, { timeoutMs: 2000, queryCount: count }, undefined, table).then(
       (receipt) => {
+        if (receipt.outcome === "receive_rejected")
+          eventPersonProbeRowCounts[table] = Math.max(5, Math.floor(eventPersonProbeRowCounts[table] / 2));
         const refunded = receipt.outcome === "busy/not_admitted" || receipt.outcome === "abandoned";
         if (refunded) {
           refund();
@@ -500,7 +508,7 @@ export class RtcCommandRouter {
           eventPersonProbeRefundedLines++;
         }
         this.logEventPersonDiagnostic(
-          `table=${table} outcome=${receipt.outcome}${receipt.refusal ? ` refusal=${receipt.refusal}` : ""} elapsedMs=${receipt.elapsedMs} rows=${receipt.rowCount} resultCode=${receipt.resultCode} compressedBytes=${receipt.compressedBytes} decompressedBytes=${receipt.decompressedBytes} ownerContinuous=${receipt.ownerContinuous} generationContinuous=${receipt.generationContinuous} refunded=${refunded} attempt=${attempt}/3`,
+          `table=${table} outcome=${receipt.outcome}${receipt.refusal ? ` refusal=${receipt.refusal}` : ""} elapsedMs=${receipt.elapsedMs} rows=${receipt.rowCount} resultCode=${receipt.resultCode} compressedBytes=${receipt.compressedBytes} decompressedBytes=${receipt.decompressedBytes} count=${count} ownerContinuous=${receipt.ownerContinuous} generationContinuous=${receipt.generationContinuous} refunded=${refunded} attempt=${attempt}/3`,
         );
       },
       (error: unknown) => {
@@ -509,7 +517,9 @@ export class RtcCommandRouter {
           const name = error == null ? "Unknown" : error.constructor.name;
           if (/^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(name)) errorName = name;
         } catch {}
-        this.logEventPersonDiagnostic(`table=${table} outcome=error errorName=${errorName} attempt=${attempt}/3`);
+        this.logEventPersonDiagnostic(
+          `table=${table} outcome=error errorName=${errorName} count=${count} attempt=${attempt}/3`,
+        );
       },
     );
   }
@@ -2322,7 +2332,7 @@ export class RtcCommandRouter {
   /** Person probes cancel through the collector, retaining scheduler ownership until exchange cleanup completes. */
   private async readEventCandidate(
     stationSn: string,
-    opts: { signal?: AbortSignal; timeoutMs?: number },
+    opts: { signal?: AbortSignal; timeoutMs?: number; queryCount?: number },
     thumb?: { file?: string; image?: ThumbnailImageResult; table?: EventTableReceipt; shapes?: ThumbnailShapes },
     personProbe?: EventPersonProbeTable,
   ): Promise<EventTableReceipt & { refusal?: EventPersonProbeRefusal }> {
@@ -2434,7 +2444,7 @@ export class RtcCommandRouter {
                   ? (rows) => this.logEventPersonKeys(personProbe, rows)
                   : undefined,
               undefined,
-              personProbe ? 100 : 20,
+              personProbe ? (opts.queryCount ?? eventPersonProbeRowCounts[personProbe]) : 20,
               personProbe ?? "history_record_info",
             );
             clearTimeout(tableTimer);

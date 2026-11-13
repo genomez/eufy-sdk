@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildEventTableRequest } from "../event-table-candidate.js";
+import { buildEventTableRequest, EVENT_TABLE_BYTE_CAP } from "../event-table-candidate.js";
 import { parsePortalHeader } from "../portal-packet.js";
 import { recordingFixture, RecordingSession, row, scope, sent, station, control } from "./recordings-fixture.js";
 import type { RtcSession } from "../session.js";
@@ -139,6 +139,80 @@ describe("event person table probe", () => {
     expect(skipped("attempt_cap")).toHaveLength(1);
   });
 
+  it("keeps the rotation cursor after a refund and ignores a late roster reply during the crop probe", async () => {
+    const f = await fixture();
+    router = f.router;
+    invokeProbe(router);
+    await sent(f.session);
+    const roster = request(f.session.sent[0]!).payload;
+    expect(roster.table).toBe("person_basic_info");
+    const probe = Reflect.get(router, "eventPersonProbes").get(station);
+    router.preemptRecordingReads();
+    await probe.finished;
+    await tick();
+    expect(outcomes()).toEqual([
+      expect.stringMatching(/table=person_basic_info outcome=abandoned .*refunded=true attempt=1\/3$/),
+    ]);
+    invokeProbe(router);
+    await sent(f.session, 2);
+    const crop = request(f.session.sent[1]!).payload;
+    expect(crop.table).toBe("record_crop_picture_info");
+    expect(crop.transaction).not.toBe(roster.transaction);
+    f.onFrame.mockClear();
+    f.session.table([{ name: "synthetic-late-private" }], {
+      table: roster.table,
+      transaction: roster.transaction,
+    });
+    await tick();
+    expect(outcomes()).toHaveLength(1);
+    expect(personLines()).toHaveLength(0);
+    expect(Reflect.get(router, "eventPersonProbes").size).toBe(1);
+    expect(f.onFrame).not.toHaveBeenCalled();
+    f.session.table([], { table: crop.table });
+    await tick();
+    expect(outcomes().at(-1)).toMatch(/table=record_crop_picture_info outcome=empty .*attempt=1\/3$/);
+    const next = await fixture();
+    routers.push(next.router);
+    invokeProbe(next.router);
+    await sent(next.session);
+    expect(request(next.session.sent[0]!).payload.table).toBe("person_basic_info");
+    next.session.table([], { table: "person_basic_info" });
+    await tick();
+    expect(outcomes().at(-1)).toMatch(/table=person_basic_info outcome=empty .*attempt=1\/3$/);
+    expect(readFileSync(logFile, "utf8")).not.toContain("synthetic-late-private");
+  });
+
+  it("consumes oversized attempts without key lines and halves only that table's next count to a floor of five", async () => {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const f = await fixture();
+      routers.push(f.router);
+      invokeProbe(f.router);
+      await sent(f.session);
+      const table = attempt % 2 ? "record_crop_picture_info" : "person_basic_info";
+      const count = [100, 20, 50, 10, 25, 5][attempt]!;
+      expect(request(f.session.sent[0]!).payload).toMatchObject({ table, payload: { count } });
+      f.session.table([{ face_data: "x".repeat(EVENT_TABLE_BYTE_CAP) }], { table });
+      await tick();
+      expect(outcomes()).toHaveLength(attempt + 1);
+      expect(outcomes().at(-1)).toMatch(
+        new RegExp(
+          `table=${table} outcome=receive_rejected .*rows=null .*count=${count} .*refunded=false attempt=${Math.floor(attempt / 2) + 1}/3$`,
+        ),
+      );
+      expect(personLines()).toHaveLength(0);
+      expect(Reflect.get(f.router, "eventPersonProbes").size).toBe(0);
+      invokeProbe(f.router);
+      expect(f.session.sent).toHaveLength(1);
+    }
+    const final = await fixture();
+    routers.push(final.router);
+    invokeProbe(final.router);
+    await tick();
+    expect(final.session.sent).toHaveLength(0);
+    expect(skipped("attempt_cap")).toHaveLength(1);
+    expect(personLines()).toHaveLength(0);
+  });
+
   it("keeps roster and crop names, ids, paths, encoded data and data-keyed maps out of the file", async () => {
     const secrets = [
       "Synthetic Ada Example",
@@ -178,8 +252,8 @@ describe("event person table probe", () => {
     for (const secret of secrets) expect(text).not.toContain(secret);
     expect(personLines()).toHaveLength(2);
     for (const [, line] of personLines()) {
-      expect(line).toContain("<other>x10");
-      expect(line).toContain("name:stringx1");
+      expect(line).toContain("<other>:string[<=64]x10");
+      expect(line).toContain("name:string[<=64]x1");
       expect(line).toContain("people:objectx1");
       expect(line).not.toContain("{json}");
     }
@@ -651,14 +725,14 @@ describe("event person table probe", () => {
       [
         logFile,
         expect.stringMatching(
-          /Z \[rtc\] person_probe table=person_basic_info row keys rows=1 extra:stringx1 name:stringx1 people:objectx1 person_id:stringx1 record_id:numberx1\n$/,
+          /Z \[rtc\] person_probe table=person_basic_info row keys rows=1 extra:string\[<=64\]x1 name:string\[<=64\]x1 people:objectx1 person_id:string\[<=64\]x1 record_id:numberx1\n$/,
         ),
         { mode: 0o600 },
       ],
     ]);
     expect(outcomes()).toEqual([
       expect.stringMatching(
-        /Z \[rtc\] person_probe table=person_basic_info outcome=success elapsedMs=0 rows=1 resultCode=0 compressedBytes=null decompressedBytes=\d+ ownerContinuous=true generationContinuous=true refunded=false attempt=1\/3$/,
+        /Z \[rtc\] person_probe table=person_basic_info outcome=success elapsedMs=0 rows=1 resultCode=0 compressedBytes=null decompressedBytes=\d+ count=100 ownerContinuous=true generationContinuous=true refunded=false attempt=1\/3$/,
       ),
     ]);
     expect(logLines().every((line) => isoPrefix.test(line))).toBe(true);
@@ -723,7 +797,7 @@ describe("event person table probe", () => {
     owner.leases--;
     expect(outcomes()).toEqual([
       expect.stringMatching(
-        /table=person_basic_info outcome=busy\/not_admitted refusal=leases elapsedMs=0 rows=null resultCode=null compressedBytes=null decompressedBytes=0 ownerContinuous=true generationContinuous=true refunded=true attempt=1\/3$/,
+        /table=person_basic_info outcome=busy\/not_admitted refusal=leases elapsedMs=0 rows=null resultCode=null compressedBytes=null decompressedBytes=0 count=100 ownerContinuous=true generationContinuous=true refunded=true attempt=1\/3$/,
       ),
       expect.stringMatching(/table=record_crop_picture_info outcome=busy\/not_admitted .* refunded=true attempt=1\/3$/),
     ]);
@@ -761,9 +835,14 @@ describe("event person table probe", () => {
     await tick();
     invokeProbe(router);
     await tick();
-    expect(read).toHaveBeenCalledExactlyOnceWith(station, { timeoutMs: 2000 }, undefined, "person_basic_info");
+    expect(read).toHaveBeenCalledExactlyOnceWith(
+      station,
+      { timeoutMs: 2000, queryCount: 100 },
+      undefined,
+      "person_basic_info",
+    );
     expect(outcomes()).toEqual([
-      expect.stringMatching(/table=person_basic_info outcome=error errorName=TypeError attempt=1\/3$/),
+      expect.stringMatching(/table=person_basic_info outcome=error errorName=TypeError count=100 attempt=1\/3$/),
     ]);
     expect(skipped("session_already_probed")).toHaveLength(1);
     const text = readFileSync(logFile, "utf8");
@@ -838,7 +917,7 @@ describe("event person table probe", () => {
       expect(outcomes()).toEqual([
         expect.stringMatching(
           new RegExp(
-            `table=person_basic_info outcome=${ack ? "ack_only/timeout" : "timeout"} elapsedMs=0 rows=null resultCode=null compressedBytes=null decompressedBytes=0 ownerContinuous=true generationContinuous=true refunded=false attempt=1/3$`,
+            `table=person_basic_info outcome=${ack ? "ack_only/timeout" : "timeout"} elapsedMs=0 rows=null resultCode=null compressedBytes=null decompressedBytes=0 count=100 ownerContinuous=true generationContinuous=true refunded=false attempt=1/3$`,
           ),
         ),
       ]);

@@ -63,7 +63,8 @@ const DIGIT_RUN = /\d{4,}/;
 /** A nested object with more distinct names than this is treated as a data-keyed map. */
 const NESTED_KEY_MAX = 12;
 const ROW_KEY_LIMIT = 150;
-/** Only fixed schema names may appear in top-level person-table diagnostics; arbitrary names can be identities. */
+const PERSON_SCHEMA_KEY_MAX = 40;
+/** Fixed schema names may appear even in a single-row person-table diagnostic. */
 const PERSON_ROW_KEYS = new Set([
   ...ROW_FIELDS,
   "person_id",
@@ -84,12 +85,20 @@ const PERSON_ROW_KEYS = new Set([
  * Value-free shape of event-table rows for one diagnostic log line: every column name with its value
  * type and row count, plus one level of nested names inside object values or JSON-object strings.
  * Names that do not look like identifiers are counted as `<other>`; no value ever appears.
- * With topLevelOnly, only allowlisted column names appear; object and JSON-string contents are never inspected.
+ * With topLevelOnly, unknown names require schema-like spelling, presence in every row, at least two
+ * rows and at most 40 distinct top-level keys. Masked names retain only their value type. String
+ * lengths use per-bucket counts (UTF-16 code units: <=64, <=1k, >1k); no contents are inspected.
+ * Object and JSON-string contents are never traversed on that path.
  */
 export function eventRowKeyShape(rows: readonly unknown[], topLevelOnly = false): string {
   const counts = new Map<string, number>();
   const bump = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
   const type = (value: unknown) => (value === null ? "null" : Array.isArray(value) ? "array" : typeof value);
+  const keyRows = new Map<string, number>();
+  if (topLevelOnly && rows.length >= 2)
+    for (const raw of rows)
+      if (raw && typeof raw === "object" && !Array.isArray(raw))
+        for (const key of Object.keys(raw)) keyRows.set(key, (keyRows.get(key) ?? 0) + 1);
   const nested = (prefix: string, value: unknown) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return;
     const entries = Object.entries(value as Record<string, unknown>);
@@ -108,11 +117,23 @@ export function eventRowKeyShape(rows: readonly unknown[], topLevelOnly = false)
       continue;
     }
     for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-      if (!ROW_KEY_NAME.test(key) || DIGIT_RUN.test(key) || (topLevelOnly && !PERSON_ROW_KEYS.has(key))) {
-        bump("<other>");
+      const valueType =
+        topLevelOnly && typeof value === "string"
+          ? `string[${value.length <= 64 ? "<=64" : value.length <= 1024 ? "<=1k" : ">1k"}]`
+          : type(value);
+      const visible = topLevelOnly
+        ? PERSON_ROW_KEYS.has(key) ||
+          (NESTED_KEY_NAME.test(key) &&
+            !DIGIT_RUN.test(key) &&
+            rows.length >= 2 &&
+            keyRows.size <= PERSON_SCHEMA_KEY_MAX &&
+            keyRows.get(key) === rows.length)
+        : ROW_KEY_NAME.test(key) && !DIGIT_RUN.test(key);
+      if (!visible) {
+        bump(topLevelOnly ? `<other>:${valueType}` : "<other>");
         continue;
       }
-      bump(`${key}:${type(value)}`);
+      bump(`${key}:${valueType}`);
       if (topLevelOnly) continue;
       nested(key, value);
       if (typeof value === "string" && value.trimStart().startsWith("{")) {
