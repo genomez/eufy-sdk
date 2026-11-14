@@ -42,12 +42,12 @@ import {
   type ConnectionRecord,
 } from "./connection-diagnostics.js";
 import { appendFileSync } from "node:fs";
+import { projectPersonCrop, type RecentPersonCropOptions, type RecentPersonCropResult } from "./recent-person-crops.js";
 import {
-  projectPersonCrop,
-  type PersonCropRow,
-  type RecentPersonCropOptions,
-  type RecentPersonCropResult,
-} from "./recent-person-crops.js";
+  projectPersonRosterRow,
+  type StationPersonRosterOptions,
+  type StationPersonRosterResult,
+} from "./station-person-roster.js";
 import { performance } from "node:perf_hooks";
 import { StationWorkScheduler, StationWorkError, type StationWorkDiagnostics } from "./station-work-scheduler.js";
 import {
@@ -2298,7 +2298,26 @@ export class RtcCommandRouter {
 
   /** Newest crop metadata over FULL_TABLE on an existing idle owner; no acquisition, keepalive or retry. */
   async readRecentPersonCrops(stationSn: string, opts: RecentPersonCropOptions = {}): Promise<RecentPersonCropResult> {
-    const count = opts.count ?? 20;
+    return this.readPersonTable(stationSn, opts, "record_crop_picture_info", 20, projectPersonCrop);
+  }
+
+  /** Sanitized roster over FULL_TABLE on an existing idle owner; no acquisition, keepalive or retry. */
+  async readStationPersonRoster(
+    stationSn: string,
+    opts: StationPersonRosterOptions = {},
+  ): Promise<StationPersonRosterResult> {
+    return this.readPersonTable(stationSn, opts, "person_basic_info", 100, projectPersonRosterRow);
+  }
+
+  /** Strict person-table reads share admission, bounded collection and final receipt validation. */
+  private async readPersonTable<Row>(
+    stationSn: string,
+    opts: RecentPersonCropOptions,
+    table: EventPersonProbeTable,
+    defaultCount: number,
+    projectRow: (raw: unknown) => Row,
+  ): Promise<{ outcome: EventTableReceipt["outcome"]; rows?: Row[] }> {
+    const count = opts.count ?? defaultCount;
     const timeoutMs = opts.timeoutMs ?? 2000;
     if (
       !Number.isSafeInteger(count) ||
@@ -2308,15 +2327,17 @@ export class RtcCommandRouter {
       timeoutMs < 1 ||
       timeoutMs > 2000
     )
-      throw new RangeError("Crop read options are outside their bounds");
-    let rows: PersonCropRow[] | undefined;
+      throw new RangeError(
+        `${table === "record_crop_picture_info" ? "Crop" : "Roster"} read options are outside their bounds`,
+      );
+    let rows: Row[] | undefined;
     const receipt = await this.readEventCandidate(
       stationSn,
       { ...opts, timeoutMs, queryCount: count },
       undefined,
-      "record_crop_picture_info",
+      table,
       (raw, envelopeValid) => {
-        if (envelopeValid && raw.length <= count) rows = raw.map(projectPersonCrop);
+        if (envelopeValid && raw.length <= count) rows = raw.map(projectRow);
       },
     );
     if (receipt.outcome !== "success" && receipt.outcome !== "empty") return { outcome: receipt.outcome };

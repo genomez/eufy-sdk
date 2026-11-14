@@ -40,6 +40,7 @@ import {
 } from "../transport/rtc/retired-information-read.js";
 import { RtcCommandRouter } from "../transport/rtc/command-router.js";
 import type { RecentPersonCropOptions, RecentPersonCropResult } from "../transport/rtc/recent-person-crops.js";
+import type { StationPersonRosterOptions, StationPersonRosterResult } from "../transport/rtc/station-person-roster.js";
 import {
   recordingAccountNamespace,
   type RecordingReadScope,
@@ -3087,6 +3088,14 @@ export class EufyMega extends EventEmitter {
   /** Newest sanitized crop metadata from an existing idle station session; no acquisition or retry. */
   readRecentPersonCrops(stationSn: string, options: RecentPersonCropOptions = {}): Promise<RecentPersonCropResult> {
     return this.rtc.readRecentPersonCrops(stationSn, options);
+  }
+
+  /** Sanitized person roster from an existing idle station session; no acquisition or retry. */
+  readStationPersonRoster(
+    stationSn: string,
+    options: StationPersonRosterOptions = {},
+  ): Promise<StationPersonRosterResult> {
+    return this.rtc.readStationPersonRoster(stationSn, options);
   }
 
   /** Passive target association for an already attempted command; does not allocate an association. */

@@ -1,4 +1,5 @@
 import type { EventTableReceipt } from "./event-table-candidate.js";
+import { personTableInteger as integer, personTableUpdateTime } from "./person-table-values.js";
 
 /** Bounds apply to one existing idle session; cancellation never acquires a replacement. */
 export interface RecentPersonCropOptions {
@@ -61,12 +62,6 @@ export interface RecentPersonCropResult {
   rows?: PersonCropRow[];
 }
 
-/** Decimal integer strings and safe integers are the only accepted numeric representations. */
-function integer(value: unknown): number | null {
-  const parsed = typeof value === "string" && /^-?\d{1,16}$/.test(value) ? Number(value) : value;
-  return typeof parsed === "number" && Number.isSafeInteger(parsed) ? parsed : null;
-}
-
 /** Explicit projection excludes paths, features, bounding boxes and arbitrary row properties. */
 export function projectPersonCrop(raw: unknown): PersonCropRow {
   const row = raw as Record<string, unknown>;
@@ -86,12 +81,7 @@ export function projectPersonCrop(raw: unknown): PersonCropRow {
     start_time: integer(row.start_time),
     end_time: integer(row.end_time),
     image_cutout_timestamp: integer(row.image_cutout_timestamp),
-    update_time:
-      integer(row.update_time) ??
-      (typeof row.update_time === "string" &&
-      /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})?$/.test(row.update_time)
-        ? row.update_time
-        : null),
+    update_time: personTableUpdateTime(row.update_time),
     clock_shapes: Object.fromEntries(
       CLOCK_FIELDS.map((key) => [key, clockShape(row[key])]),
     ) as PersonCropRow["clock_shapes"],

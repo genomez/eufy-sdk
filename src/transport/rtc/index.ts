@@ -25,6 +25,11 @@ export type {
 export { CATALOG_QUERY_COUNT_MAX } from "./event-table-candidate.js";
 export type { EventTableReceipt } from "./event-table-candidate.js";
 export type { PersonCropRow, RecentPersonCropOptions, RecentPersonCropResult } from "./recent-person-crops.js";
+export type {
+  PersonRosterRow,
+  StationPersonRosterOptions,
+  StationPersonRosterResult,
+} from "./station-person-roster.js";
 
 export type { EventThumbnailReceipt } from "./event-thumb-candidate.js";
 export type { PlaybackReceipt, PlaybackSelectionOutcome } from "./event-playback-candidate.js";
