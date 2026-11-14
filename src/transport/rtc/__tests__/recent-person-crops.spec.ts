@@ -4,7 +4,10 @@ import type { RtcCommandRouter } from "../command-router.js";
 import { clockShape, projectPersonCrop } from "../recent-person-crops.js";
 
 let router: RtcCommandRouter;
-beforeEach(() => vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "0"));
+beforeEach(() => {
+  vi.stubEnv("EUFY_EVENT_PERSON_PROBE", undefined);
+  vi.stubEnv("EUFY_EVENT_DIAGNOSTICS", undefined);
+});
 afterEach(() => {
   router?.close();
   vi.restoreAllMocks();

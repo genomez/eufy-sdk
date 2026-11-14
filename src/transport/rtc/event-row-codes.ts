@@ -47,8 +47,9 @@ export class EventRowCodeDiagnostic {
       appendFileSync(process.env.EUFY_EVENT_ROW_CODES_FILE ?? "/tmp/eufy-event-row-codes.log", line, { mode: 0o600 }),
   ) {}
 
-  /** Writes JSON lines containing only record_id, epoch start_time, camera_index, codes and str_extra integers. */
+  /** EUFY_EVENT_DIAGNOSTICS=1 enables JSON lines with record_id, epoch start_time, camera_index and integers. */
   writeRows(rows: readonly unknown[], timeZone?: string, station?: string): void {
+    if (process.env.EUFY_EVENT_DIAGNOSTICS !== "1") return;
     for (const raw of rows) {
       if (this.written >= LINE_CAP) return;
       try {

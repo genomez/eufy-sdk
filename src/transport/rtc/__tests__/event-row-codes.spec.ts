@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventRowCodeDiagnostic } from "../event-row-codes.js";
+
+beforeEach(() => vi.stubEnv("EUFY_EVENT_DIAGNOSTICS", "1"));
+afterEach(() => vi.unstubAllEnvs());
 
 const row = (extra: Record<string, unknown> = {}) => ({
   record_id: 1,
@@ -15,6 +18,16 @@ function fixture() {
 }
 
 describe("event row code diagnostic", () => {
+  it.each([undefined, "0", "true", ""])("writes nothing unless explicitly enabled (setting=%s)", (setting) => {
+    vi.stubEnv("EUFY_EVENT_DIAGNOSTICS", setting);
+    const f = fixture();
+    f.diagnostic.writeRows([row()]);
+    expect(f.lines).toEqual([]);
+    vi.stubEnv("EUFY_EVENT_DIAGNOSTICS", "1");
+    f.diagnostic.writeRows([row()]);
+    expect(f.lines).toHaveLength(1);
+  });
+
   it("writes exact numeric fields while excluding identity, paths, names and text", () => {
     const f = fixture();
     f.diagnostic.writeRows([

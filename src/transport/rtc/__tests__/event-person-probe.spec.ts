@@ -28,6 +28,8 @@ beforeEach(async () => {
   directory = mkdtempSync(join(tmpdir(), "eufy-person-probe-"));
   logFile = join(directory, "keys.log");
   vi.stubEnv("EUFY_EVENT_ROW_KEYS_FILE", logFile);
+  vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "1");
+  vi.stubEnv("EUFY_EVENT_DIAGNOSTICS", "1");
   fixture = (await import("./recordings-fixture.js")).recordingFixture;
 });
 afterEach(async () => {
@@ -455,18 +457,58 @@ describe("event person table probe", () => {
     owner.leases--;
   });
 
-  it("is enabled by default when the environment variable is unset", async () => {
-    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", undefined);
+  it.each([undefined, "0", "true", ""])("requires an explicit person-probe opt-in (setting=%s)", async (setting) => {
+    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", setting);
     const f = await fixture();
     router = f.router;
     const read = router.readRecordingCatalog(scope);
     await sent(f.session);
     f.session.table([row()]);
     expect((await read).status).toBe("ok");
-    await sent(f.session, 2);
-    expect(request(f.session.sent[1]!).payload.table).toBe("person_basic_info");
-    f.session.table([], { table: "person_basic_info" });
     await tick();
+    expect(f.session.sent).toHaveLength(1);
+    expect(skipped("disabled")).toHaveLength(1);
+    expect(outcomes()).toEqual([]);
+  });
+
+  it.each([undefined, "0", "true", ""])(
+    "keeps opted-in probes silent without diagnostics (setting=%s)",
+    async (setting) => {
+      vi.stubEnv("EUFY_EVENT_DIAGNOSTICS", setting);
+      const f = await fixture();
+      router = f.router;
+      const info = vi.spyOn(console, "info").mockImplementation(() => {});
+      f.logger.info.mockClear();
+      const read = router.readRecordingCatalog(scope);
+      await sent(f.session);
+      f.session.table([row()]);
+      expect((await read).status).toBe("ok");
+      await sent(f.session, 2);
+      expect(request(f.session.sent[1]!).payload.table).toBe("person_basic_info");
+      f.session.table([], { table: "person_basic_info" });
+      await tick();
+      expect(appendFileSync).not.toHaveBeenCalled();
+      expect(info).not.toHaveBeenCalled();
+      expect(f.logger.info).not.toHaveBeenCalled();
+    },
+  );
+
+  it("enables row-shape file and console output only on opt-in without consuming the shape budget while off", async () => {
+    const f = await fixture();
+    router = f.router;
+    Reflect.set(router, "deps", { ...Reflect.get(router, "deps"), logger: undefined });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const logKeys = () => Reflect.get(router!, "logEventRowKeys").call(router, [row()]);
+    vi.stubEnv("EUFY_EVENT_DIAGNOSTICS", undefined);
+    logKeys();
+    expect(appendFileSync).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
+    vi.stubEnv("EUFY_EVENT_DIAGNOSTICS", "1");
+    logKeys();
+    logKeys();
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(appendFileSync).toHaveBeenCalledTimes(1);
+    expect(logLines()).toEqual([expect.stringContaining("[rtc] event table row keys")]);
   });
 
   it("wires catalog rows, timezone and station to the injected numeric diagnostic writer", async () => {

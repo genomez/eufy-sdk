@@ -467,14 +467,14 @@ export class RtcCommandRouter {
   private readonly eventPersonProbeSessions = new WeakSet<RtcSession>();
   private readonly eventPersonProbes = new Map<string, { controller: AbortController; finished: Promise<void> }>();
 
-  /** On unless EUFY_EVENT_PERSON_PROBE=0: one bounded 2-second read per session, three attempts per table per process. */
+  /** Opt-in with EUFY_EVENT_PERSON_PROBE=1: one bounded 2-second read per session, three attempts per table per process. */
   private probeEventPersons(stationSn: string, owner: StationSession): void {
     const table = EVENT_PERSON_PROBE_TABLES.map(
       (_, offset) =>
         EVENT_PERSON_PROBE_TABLES[(nextEventPersonProbeTable + offset) % EVENT_PERSON_PROBE_TABLES.length]!,
     ).find((table) => eventPersonProbeAttempts[table] < 3);
     const reason =
-      process.env.EUFY_EVENT_PERSON_PROBE === "0"
+      process.env.EUFY_EVENT_PERSON_PROBE !== "1"
         ? "disabled"
         : table === undefined
           ? "attempt_cap"
@@ -563,8 +563,9 @@ export class RtcCommandRouter {
     } catch {}
   }
 
-  /** Timestamped value-free person-table diagnostics never propagate filesystem failures. */
+  /** EUFY_EVENT_DIAGNOSTICS=1 enables timestamped person-table diagnostics; filesystem failures are isolated. */
   private logEventPersonDiagnostic(line: string): boolean {
+    if (process.env.EUFY_EVENT_DIAGNOSTICS !== "1") return false;
     try {
       appendFileSync(
         process.env.EUFY_EVENT_ROW_KEYS_FILE ?? "/tmp/eufy-event-row-keys.log",
@@ -577,8 +578,9 @@ export class RtcCommandRouter {
     }
   }
 
-  /** Diagnostic: log each new value-free event-table row shape once (column names, types, counts). */
+  /** EUFY_EVENT_DIAGNOSTICS=1 enables row-shape and event-code diagnostics; both are off by default. */
   private logEventRowKeys(rows: readonly unknown[]): void {
+    if (process.env.EUFY_EVENT_DIAGNOSTICS !== "1") return;
     if (this.loggedEventRowShapes.size >= 4) return;
     try {
       const shape = eventRowKeyShape(rows);
@@ -592,8 +594,6 @@ export class RtcCommandRouter {
       const key = [...names].sort().join(" ");
       if (this.loggedEventRowShapes.has(key)) return;
       this.loggedEventRowShapes.add(key);
-      // The bridge installs no SDK logger sink and its launcher drops other stdout, so also append the
-      // value-free line to a container-local file that is readable with docker exec.
       const line = `[rtc] event table row keys ${shape}`;
       const info = this.deps.logger?.info?.bind(this.deps.logger) ?? console.info;
       info(line);
