@@ -1,13 +1,9 @@
 {
   "schemaVersion": 1,
-  "version": "0.2.1-s1.experimental.12",
-  "status": "local-build-unpublished",
+  "version": "0.2.1-s1.experimental.15",
+  "status": "local-release-candidate",
   "published": false,
-  "exactInputCommit": "d167bc3a6e00774474266a1a57239bba78a26c56",
-  "relayDefault": false,
-  "keepaliveMs": 29000,
-  "lightCorrectionDefault": false,
+  "exactInputCommit": "153c0169c49f8a1601292458d4815c5076292a3a",
   "registryManifestDigest": null,
-  "runtimeSourceRelease": null,
   "installationAcceptance": false
 }
