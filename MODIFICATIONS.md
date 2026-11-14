@@ -1,14 +1,157 @@
-# Experimental.15 local release candidate
+# S1 experimental.15
 
 Guard receipt ordering, bounded inventory evidence and recovery confirmation; bounded person roster and crop reads. Event person probing and event diagnostics require explicit opt-in.
 
-Prepared for owner review on 2026-11-14. No live-device acceptance or publication is claimed.
+Prepared for experimental.15 publication on 2026-11-14. No live-device acceptance is claimed.
 
 Pair SDK 0.2.1-s1.experimental.15, bridge/integration 0.3.1-s1.experimental.15 and add-on 0.4.1-s1.experimental.15.
 
 Diagnostic switches remain opt-in; no new add-on option is introduced. Playback remains silent and bounded; multi-lens playback guarantees only one view.
 
-## Prior notices
+## Historical public documentation through experimental.14
+
+Modified for genomez experimental.14, 2026-11-09
+
+## .14 changes
+
+- Fixed: S350 (T8416) cameras no longer show a spotlight switch they don't have. A push connection that silently stops delivering events is now detected and reconnected. Camera settings are no longer overwritten by older values when a startup or refresh overlaps a change. Snapshot refreshes are no longer lost when they overlap; queued refreshes stop after a sign-in failure.
+- Changed: Floodlight brightness/spotlight controls that HomeBase S1 can't drive are hidden. Number settings use per-model ranges. Media → Eufy shows "Playback not yet supported for this camera", "No playable recordings yet" or "No recordings yet" instead of an empty camera folder. More playback diagnostics.
+- Upgrade: Update the add-on and integration together, then restart Home Assistant after the add-on is running, so removed controls are cleaned up.
+- Known limits: Playback is silent; multi-lens cameras show one view; a late update from a camera can still briefly show an old state.
+
+## Previous notices
+
+Modified for genomez experimental.13, 2026-11-07
+
+Release packaging, current recordings/playback runtime and extra-model support.
+Modified paths since published experimental.12:
+
+- `BUILD_PROVENANCE.json`
+- `EXPERIMENTAL.md`
+- `ICE_DIAGNOSTICS.md`
+- `MODIFICATIONS.md`
+- `PUBLICATION.json`
+- `README.md`
+- `SOURCE_MANIFEST.json`
+- `docs/recordings-sdk.md`
+- `docs/recordings-validation.md`
+- `package-lock.json`
+- `package.json`
+- `scripts/replay-playback-capture.mjs`
+- `src/client/__tests__/device-registry.spec.ts`
+- `src/client/__tests__/poll.spec.ts`
+- `src/client/__tests__/rtc-effect-confirmation.spec.ts`
+- `src/client/__tests__/rtc-last-seen.spec.ts`
+- `src/client/__tests__/rtc-state.spec.ts`
+- `src/client/__tests__/state-refresh-renewal.spec.ts`
+- `src/client/device-registry.ts`
+- `src/client/eufy-mega.ts`
+- `src/client/index.ts`
+- `src/client/state-refresh-diagnostics.ts`
+- `src/client/types.ts`
+- `src/transport/http/__tests__/key-persistence-file-faults.spec.ts`
+- `src/transport/http/__tests__/key-persistence-qualification.spec.ts`
+- `src/transport/http/mega-client.ts`
+- `src/transport/rtc/__tests__/command-keepalive.spec.ts`
+- `src/transport/rtc/__tests__/event-download-experiment.spec.ts`
+- `src/transport/rtc/__tests__/event-playback-candidate.spec.ts`
+- `src/transport/rtc/__tests__/event-playback-router.spec.ts`
+- `src/transport/rtc/__tests__/event-table-candidate.spec.ts`
+- `src/transport/rtc/__tests__/event-thumb-candidate.spec.ts`
+- `src/transport/rtc/__tests__/framing-diagnostics.spec.ts`
+- `src/transport/rtc/__tests__/ice-safety.spec.ts`
+- `src/transport/rtc/__tests__/information-refresh.spec.ts`
+- `src/transport/rtc/__tests__/peer.spec.ts`
+- `src/transport/rtc/__tests__/playback-expiry.spec.ts`
+- `src/transport/rtc/__tests__/playback-qualification.spec.ts`
+- `src/transport/rtc/__tests__/playback-quarantine.spec.ts`
+- `src/transport/rtc/__tests__/playback-replay.spec.ts`
+- `src/transport/rtc/__tests__/playback-station-flags.spec.ts`
+- `src/transport/rtc/__tests__/playback-telemetry.spec.ts`
+- `src/transport/rtc/__tests__/playback-transfer-speed.spec.ts`
+- `src/transport/rtc/__tests__/ptcs-compression.spec.ts`
+- `src/transport/rtc/__tests__/ptcs-reassembler.spec.ts`
+- `src/transport/rtc/__tests__/recording-clip.spec.ts`
+- `src/transport/rtc/__tests__/recordings-arbitration.spec.ts`
+- `src/transport/rtc/__tests__/recordings-fixture.ts`
+- `src/transport/rtc/__tests__/recordings-query-count.spec.ts`
+- `src/transport/rtc/__tests__/recordings.spec.ts`
+- `src/transport/rtc/__tests__/session.spec.ts`
+- `src/transport/rtc/command-router.ts`
+- `src/transport/rtc/connection-diagnostics.ts`
+- `src/transport/rtc/event-download-experiment.ts`
+- `src/transport/rtc/event-playback-candidate.ts`
+- `src/transport/rtc/event-table-candidate.ts`
+- `src/transport/rtc/event-thumb-candidate.ts`
+- `src/transport/rtc/event-time.ts`
+- `src/transport/rtc/framer.ts`
+- `src/transport/rtc/ice-diagnostics.ts`
+- `src/transport/rtc/index.ts`
+- `src/transport/rtc/peer.ts`
+- `src/transport/rtc/playback-ingress.ts`
+- `src/transport/rtc/playback-telemetry.ts`
+- `src/transport/rtc/ptcs-framer.ts`
+- `src/transport/rtc/recordings.ts`
+- `src/transport/rtc/renewal-diagnostics.ts`
+- `src/transport/rtc/retired-information-read.ts`
+- `src/transport/rtc/session.ts`
+
+## Previous notices
+
+# S1 experimental.12
+
+Update the add-on and integration together: add-on `0.4.1-s1.experimental.12`, integration and bridge `0.3.1-s1.experimental.12`, SDK `0.2.1-s1.experimental.12`.
+
+- Push-store save failures are caught and reported through push-connection diagnostics (#539).
+- Session and FCM files use an owner-only temporary file and atomic rename where the filesystem permits (#540). On restricted directories or single-file mounts, the existing in-place fallback is non-atomic and retains existing file permissions.
+- Stored snapshots recover after a successful re-login, including when an older in-flight download fails afterwards (#545).
+- Optional HomeBase S1 storage telemetry also supports firmware 4.4.1.4; it remains off by default.
+- After an acknowledged light command, Home Assistant holds the requested display value for up to 45 seconds. A matching boolean report releases it early. The acknowledgement does not confirm the physical light state.
+- A registry identity conflict invalidates the affected child-camera status to unknown.
+- HomeBase firmware metadata updates from newly received inventory without a Home Assistant restart. A new Firmware version sensor exposes the received version.
+- Dated experimental.11 and experimental.12 modification notices are retained, including the restored integration notice.
+
+Defaults are unchanged. Live view and optional floodlight safety remain off by default. Keep battery-camera preload off. Verify the integration ZIP checksum and restart Home Assistant after replacing the integration. Changing live-view opt-in requires an add-on restart. Command keepalive remains 29000 ms.
+
+Known live-view stalls, unexplained floodlight ON events and brightness/spotlight formatting issues remain unresolved. This is an experimental fork.
+
+Runtime and corresponding source: https://github.com/genomez/ha-eufy-sdk-addon/releases/tag/s1-runtime-0.4.1.experimental.12
+
+Integration ZIP and checksum: https://github.com/genomez/ha-eufy-sdk/releases/tag/0.3.1-s1.experimental.12
+
+Publication availability is pending. The accepted image is delivered without rebuilding. Earlier release records below are historical.
+
+Modified for genomez experimental.11, 2026-10-31
+
+Modified for genomez experimental.12, 2026-11-02
+
+## Files modified in experimental.12
+
+- `BUILD_PROVENANCE.json`
+- `EXPERIMENTAL.md`
+- `MODIFICATIONS.md`
+- `PUBLICATION.json`
+- `README.md`
+- `SOURCE_MANIFEST.json`
+- `package-lock.json`
+- `package.json`
+- `src/client/__tests__/camera-health-ingress.spec.ts`
+- `src/client/__tests__/connect.spec.ts`
+- `src/client/__tests__/firmware-refresh.spec.ts`
+- `src/client/__tests__/stored-snapshot-lifecycle.spec.ts`
+- `src/client/camera-health-ingress.ts`
+- `src/client/camera-health.ts`
+- `src/client/eufy-mega.ts`
+- `src/client/types.ts`
+- `src/core/__tests__/store-concurrent.spec.ts`
+- `src/core/__tests__/store.spec.ts`
+- `src/core/store.ts`
+- `src/model/device.ts`
+- `src/transport/__tests__/stored-image-retry.spec.ts`
+- `src/transport/push/store.ts`
+- `src/transport/stored-image-cache.ts`
+
+## Historical modification notices
 
 Modified for genomez experimental.12, 2026-11-02
 
@@ -155,7 +298,7 @@ Modified for genomez experimental.9, 2026-10-27.
 
 # Experimental.8 local preparation
 
-Version `0.2.1-s1.experimental.8` is prepared locally and unpublished. Pair add-on `0.4.1-s1.experimental.8`, integration/bridge `0.3.1-s1.experimental.8` and SDK `0.2.1-s1.experimental.8`.
+Version `0.2.1-s1.experimental.8` is described in this historical notice. Pair add-on `0.4.1-s1.experimental.8`, integration/bridge `0.3.1-s1.experimental.8` and SDK `0.2.1-s1.experimental.8`.
 
 RTC late-viewer keyframe gating; bounded refresh backoff and recovery; isolated slow replies; camera connectivity and hub reply evidence; T8171 detection; opt-in floodlight safety with bounded confirmation and problem notices; observation-only media stall evidence.
 
@@ -543,7 +686,7 @@ Version `0.2.1-s1.experimental.5`: Floodlight write confirmation; complete realt
 
 ## Experimental.6 preparation, 2026-10-16
 
-Version `0.2.1-s1.experimental.6` is prepared locally and has not been published. Packaging-only version update; SDK implementation and tests are unchanged from experimental.5, including token redaction and opt-in command-session keepalive.
+Version `0.2.1-s1.experimental.6` is described in this historical notice. Packaging-only version update; SDK implementation and tests are unchanged from experimental.5, including token redaction and opt-in command-session keepalive.
 
 The live-view changes are confined to the paired bridge; no SDK implementation or test files changed for this candidate. Existing licenses and attribution are preserved.
 
@@ -1001,7 +1144,7 @@ Version `0.2.1-s1.experimental.5`: Floodlight write confirmation; complete realt
 
 ## Experimental.6 preparation, 2026-10-16
 
-Version `0.2.1-s1.experimental.6` is prepared locally and has not been published. Packaging-only version update; SDK implementation and tests are unchanged from experimental.5, including token redaction and opt-in command-session keepalive.
+Version `0.2.1-s1.experimental.6` is described in this historical notice. Packaging-only version update; SDK implementation and tests are unchanged from experimental.5, including token redaction and opt-in command-session keepalive.
 
 The live-view changes are confined to the paired bridge; no SDK implementation or test files changed for this candidate. Existing licenses and attribution are preserved.
 

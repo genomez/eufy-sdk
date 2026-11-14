@@ -1,14 +1,58 @@
-# Experimental.15 local release candidate
+# S1 experimental.15
 
 Guard receipt ordering, bounded inventory evidence and recovery confirmation; bounded person roster and crop reads. Event person probing and event diagnostics require explicit opt-in.
 
-Prepared for owner review on 2026-11-14. No live-device acceptance or publication is claimed.
+Prepared for experimental.15 publication on 2026-11-14. No live-device acceptance is claimed.
 
 Pair SDK 0.2.1-s1.experimental.15, bridge/integration 0.3.1-s1.experimental.15 and add-on 0.4.1-s1.experimental.15.
 
 Diagnostic switches remain opt-in; no new add-on option is introduced. Playback remains silent and bounded; multi-lens playback guarantees only one view.
 
-## Prior notices
+## Historical public documentation through experimental.14
+
+# S1 experimental.14
+
+## .14 changes
+
+- Fixed: S350 (T8416) cameras no longer show a spotlight switch they don't have. A push connection that silently stops delivering events is now detected and reconnected. Camera settings are no longer overwritten by older values when a startup or refresh overlaps a change. Snapshot refreshes are no longer lost when they overlap; queued refreshes stop after a sign-in failure.
+- Changed: Floodlight brightness/spotlight controls that HomeBase S1 can't drive are hidden. Number settings use per-model ranges. Media → Eufy shows "Playback not yet supported for this camera", "No playable recordings yet" or "No recordings yet" instead of an empty camera folder. More playback diagnostics.
+- Upgrade: Update the add-on and integration together, then restart Home Assistant after the add-on is running, so removed controls are cleaned up.
+- Known limits: Playback is silent; multi-lens cameras show one view; a late update from a camera can still briefly show an old state.
+
+SDK 0.2.1-s1.experimental.14; bridge/integration 0.3.1-s1.experimental.14; add-on 0.4.1-s1.experimental.14. Linux amd64.
+
+Recorded playback is progressive by default. Extra camera models are an eligibility opt-in, not proof of codec or lens compatibility. Keep the previous add-on/integration pair and backups for rollback; restore both together and restart Home Assistant. Live view and floodlight safety remain opt-in; keep battery preload off. Command keepalive is 29000 ms.
+
+## Historical documentation through experimental.12
+
+# S1 experimental.12
+
+Update the add-on and integration together: add-on `0.4.1-s1.experimental.12`, integration and bridge `0.3.1-s1.experimental.12`, SDK `0.2.1-s1.experimental.12`.
+
+- Push-store save failures are caught and reported through push-connection diagnostics (#539).
+- Session and FCM files use an owner-only temporary file and atomic rename where the filesystem permits (#540). On restricted directories or single-file mounts, the existing in-place fallback is non-atomic and retains existing file permissions.
+- Stored snapshots recover after a successful re-login, including when an older in-flight download fails afterwards (#545).
+- Optional HomeBase S1 storage telemetry also supports firmware 4.4.1.4; it remains off by default.
+- After an acknowledged light command, Home Assistant holds the requested display value for up to 45 seconds. A matching boolean report releases it early. The acknowledgement does not confirm the physical light state.
+- A registry identity conflict invalidates the affected child-camera status to unknown.
+- HomeBase firmware metadata updates from newly received inventory without a Home Assistant restart. A new Firmware version sensor exposes the received version.
+- Dated experimental.11 and experimental.12 modification notices are retained, including the restored integration notice.
+
+Defaults are unchanged. Live view and optional floodlight safety remain off by default. Keep battery-camera preload off. Verify the integration ZIP checksum and restart Home Assistant after replacing the integration. Changing live-view opt-in requires an add-on restart. Command keepalive remains 29000 ms.
+
+Known live-view stalls, unexplained floodlight ON events and brightness/spotlight formatting issues remain unresolved. This is an experimental fork.
+
+Runtime and corresponding source: https://github.com/genomez/ha-eufy-sdk-addon/releases/tag/s1-runtime-0.4.1.experimental.12
+
+Integration ZIP and checksum: https://github.com/genomez/ha-eufy-sdk/releases/tag/0.3.1-s1.experimental.12
+
+Publication availability is pending. The accepted image is delivered without rebuilding. Earlier release records below are historical.
+
+Modified for genomez experimental.11, 2026-10-31
+
+Modified for genomez experimental.12, 2026-11-02
+
+## Historical documentation before experimental.12 publication
 
 Current local candidate: experimental.12 (2026-11-02). Unpublished; no installation or device acceptance. Earlier release references below are historical.
 
@@ -105,7 +149,7 @@ The official integration ZIP remains frozen at 6bb1365de39615d9e094b44b766511845
 
 # Experimental.8 local preparation
 
-Version `0.2.1-s1.experimental.8` is prepared locally and unpublished. Pair add-on `0.4.1-s1.experimental.8`, integration/bridge `0.3.1-s1.experimental.8` and SDK `0.2.1-s1.experimental.8`.
+Version `0.2.1-s1.experimental.8` is described in this historical notice. Pair add-on `0.4.1-s1.experimental.8`, integration/bridge `0.3.1-s1.experimental.8` and SDK `0.2.1-s1.experimental.8`.
 
 RTC late-viewer keyframe gating; bounded refresh backoff and recovery; isolated slow replies; camera connectivity and hub reply evidence; T8171 detection; opt-in floodlight safety with bounded confirmation and problem notices; observation-only media stall evidence.
 
@@ -211,7 +255,7 @@ This replaces the earlier review.7 candidate with review.9 input `681efd9` (impl
 
 # Experimental SDK release candidate
 
-Version `0.2.1-s1.experimental.6` is prepared locally and has not been published. This independently maintained S1/T9000 source is not an official upstream release. The package remains private, npm publication is disabled, and release qualification is pending.
+Version `0.2.1-s1.experimental.6` is described in this historical notice. This independently maintained S1/T9000 source is not an official upstream release. The package remains private, npm publication is disabled, and release qualification is pending.
 
 The implementation preserves the prior signaling safety fix and adds one bounded renewal retry when a verified replacement times out while an original-session lease is held. Eligibility requires the original session to remain connected and untainted, stable identity, a fresh complete information read after failure, lease release, and a thirty-second cooldown. The existing two-attempt budget and cancellation rules remain in force. ACK-only evidence cannot authorize retry.
 
@@ -231,13 +275,13 @@ Version `0.2.1-s1.experimental.4` adds an `origin` label to SDK error events. Ex
 
 ## Experimental.5 preparation, 2026-10-16
 
-Version `0.2.1-s1.experimental.5` is prepared locally and has not been published. Floodlight write confirmation; complete realtime teardown and empty-refresh backoff; withhold battery charge source on known mains cameras; treat -100 Wi-Fi as no reading; opt-in command-session keepalive; redact echoed tokens from RTC sign refusals.
+Version `0.2.1-s1.experimental.5` is described in this historical notice. Floodlight write confirmation; complete realtime teardown and empty-refresh backoff; withhold battery charge source on known mains cameras; treat -100 Wi-Fi as no reading; opt-in command-session keepalive; redact echoed tokens from RTC sign refusals.
 
 The keepalive is opt-in in source; the paired experimental.5 Linux amd64 runtime enables it every 29 seconds. An earlier implementation test on one S1 ran about 9.5 hours with 1,138/1,138 echoes and no keepalive drops. This is limited prior hardware evidence, not verification of the final experimental.5 image. One night does not establish that keepalive prevents outages. Live view is outside this release qualification.
 
 ## Experimental.6 preparation, 2026-10-16
 
-Version `0.2.1-s1.experimental.6` is prepared locally and has not been published. Packaging-only version update; SDK implementation and tests are unchanged from experimental.5, including token redaction and opt-in command-session keepalive.
+Version `0.2.1-s1.experimental.6` is described in this historical notice. Packaging-only version update; SDK implementation and tests are unchanged from experimental.5, including token redaction and opt-in command-session keepalive.
 
 The live-view changes are confined to the paired bridge; no SDK implementation or test files changed for this candidate. Existing licenses and attribution are preserved.
 
