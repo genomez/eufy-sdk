@@ -59,6 +59,29 @@ const invokeProbe = (target: RtcCommandRouter, owner = Reflect.get(target, "sess
 const skipped = (reason: string) => logLines().filter((line) => line.endsWith(`person_probe skipped reason=${reason}`));
 
 describe("event person table probe", () => {
+  it("reads the catalog without probe reads or diagnostic writes when both switches are unset", async () => {
+    vi.stubEnv("EUFY_EVENT_PERSON_PROBE", undefined);
+    vi.stubEnv("EUFY_EVENT_DIAGNOSTICS", undefined);
+    const codeFile = join(directory, "codes.log");
+    vi.stubEnv("EUFY_EVENT_ROW_CODES_FILE", codeFile);
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const f = await fixture({ recordingTimeZone: "UTC" });
+    router = f.router;
+    f.logger.info.mockClear();
+    const read = router.readRecordingCatalog(scope);
+    await sent(f.session);
+    f.session.table([row({ trigger_type: 3102 })]);
+    expect((await read).status).toBe("ok");
+    await tick();
+    expect(f.session.sent).toHaveLength(1);
+    expect(request(f.session.sent[0]!).payload.table).toBe("history_record_info");
+    expect(appendFileSync).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
+    expect(f.logger.info).not.toHaveBeenCalled();
+    expect(existsSync(logFile)).toBe(false);
+    expect(existsSync(codeFile)).toBe(false);
+  });
+
   it("moves from a refused roster to crop success and rejects mismatched tables on both paths", async () => {
     for (const table of ["person_basic_info", "record_crop_picture_info"] as const) {
       const f = await fixture();
