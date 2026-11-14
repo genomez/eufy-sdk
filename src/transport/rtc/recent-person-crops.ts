@@ -18,7 +18,42 @@ export interface PersonCropRow {
   device_sn: string | null;
   start_utc: number | null;
   end_utc: number | null;
+  start_time: number | null;
+  end_time: number | null;
+  image_cutout_timestamp: number | null;
   update_time: number | string | null;
+  /** Value-free format class of each raw clock field (for diagnostics; never contains the value). */
+  clock_shapes: Record<(typeof CLOCK_FIELDS)[number], string>;
+}
+
+export const CLOCK_FIELDS = [
+  "start_utc",
+  "end_utc",
+  "start_time",
+  "end_time",
+  "image_cutout_timestamp",
+  "update_time",
+] as const;
+
+/** Classify a raw clock value by format only; the result never includes any part of the value. */
+export function clockShape(value: unknown): string {
+  if (value === undefined || value === null) return "missing";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "nonfinite";
+    if (!Number.isInteger(value)) return "float";
+    if (value === 0) return "zero";
+    if (value < 0) return "negative";
+    return value < 100_000_000_000 ? "s" : "ms";
+  }
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return "empty";
+    if (/^\d+$/.test(text)) return `digits${Math.min(text.length, 20)}`;
+    if (/^\d+\.\d+$/.test(text)) return "decimal";
+    if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(text)) return "datetime";
+    return "text";
+  }
+  return typeof value === "boolean" ? "boolean" : typeof value === "object" ? "object" : "other";
 }
 
 export interface RecentPersonCropResult {
@@ -48,11 +83,17 @@ export function projectPersonCrop(raw: unknown): PersonCropRow {
         : null,
     start_utc: integer(row.start_utc),
     end_utc: integer(row.end_utc),
+    start_time: integer(row.start_time),
+    end_time: integer(row.end_time),
+    image_cutout_timestamp: integer(row.image_cutout_timestamp),
     update_time:
       integer(row.update_time) ??
       (typeof row.update_time === "string" &&
       /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})?$/.test(row.update_time)
         ? row.update_time
         : null),
+    clock_shapes: Object.fromEntries(
+      CLOCK_FIELDS.map((key) => [key, clockShape(row[key])]),
+    ) as PersonCropRow["clock_shapes"],
   };
 }

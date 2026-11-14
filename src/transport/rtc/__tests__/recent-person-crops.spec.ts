@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { recordingFixture, station, sent, control } from "./recordings-fixture.js";
 import type { RtcCommandRouter } from "../command-router.js";
+import { clockShape, projectPersonCrop } from "../recent-person-crops.js";
 
 let router: RtcCommandRouter;
 beforeEach(() => vi.stubEnv("EUFY_EVENT_PERSON_PROBE", "0"));
@@ -68,9 +69,58 @@ describe("recent person crops", () => {
     session.ackPacket(session.sent[0]!);
     expect(await pending).toEqual({
       outcome: "success",
-      rows: [crop({ person_id: 19, person_recog_flag: null, update_time: "2020-01-01 00:00:00" })],
+      rows: [
+        {
+          ...crop({ person_id: 19, person_recog_flag: null, update_time: "2020-01-01 00:00:00" }),
+          start_time: null,
+          end_time: null,
+          image_cutout_timestamp: null,
+          clock_shapes: {
+            start_utc: "s",
+            end_utc: "s",
+            start_time: "missing",
+            end_time: "missing",
+            image_cutout_timestamp: "missing",
+            update_time: "datetime",
+          },
+        },
+      ],
     });
     expect(session.sent).toHaveLength(1);
+  });
+
+  it("passes integer clocks through and classifies raw clock formats without values", () => {
+    const row = projectPersonCrop(
+      crop({
+        start_utc: 1_700_000_000.5,
+        end_utc: "1700000010123",
+        start_time: 1_700_000_000_000,
+        end_time: "private-clock-text",
+        image_cutout_timestamp: 0,
+        update_time: "",
+      }),
+    );
+    expect(row).toMatchObject({ start_utc: null, end_utc: 1_700_000_010_123, start_time: 1_700_000_000_000 });
+    expect(row).toMatchObject({ end_time: null, image_cutout_timestamp: 0, update_time: null });
+    expect(row.clock_shapes).toEqual({
+      start_utc: "float",
+      end_utc: "digits13",
+      start_time: "ms",
+      end_time: "text",
+      image_cutout_timestamp: "zero",
+      update_time: "empty",
+    });
+    expect(JSON.stringify(row.clock_shapes)).not.toMatch(/private|1700/);
+    for (const [value, expected] of [
+      [undefined, "missing"],
+      [-5, "negative"],
+      [Number.NaN, "nonfinite"],
+      ["12.5", "decimal"],
+      ["2026-11-13T17:55:00", "datetime"],
+      [true, "boolean"],
+      [{}, "object"],
+    ] as const)
+      expect(clockShape(value)).toBe(expected);
   });
 
   it.each(["count", "length", "version"])("rejects invalid envelope %s", async (kind) => {
