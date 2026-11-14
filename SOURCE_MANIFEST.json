@@ -2068,8 +2068,8 @@
       "sha256": "03a6587e4abbb3ad6ffbb08bef0153d31b5dc2d1c81950123d5ae482e4be17ae"
     },
     "src/transport/rtc/__tests__/event-row-key-shape.spec.ts": {
-      "bytes": 4325,
-      "sha256": "94ba93ec621179ae3c45cf7d405c0a76304566dbd5bed38ad08fa1f26472755b"
+      "bytes": 4382,
+      "sha256": "205ba629f17dff4013d7f126312efe9af0ed19592d54ef80a276e8c2e35797b6"
     },
     "src/transport/rtc/__tests__/event-table-candidate.spec.ts": {
       "bytes": 27170,

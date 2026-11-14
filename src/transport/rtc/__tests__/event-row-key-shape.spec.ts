@@ -54,7 +54,7 @@ describe("eventRowKeyShape", () => {
   });
   it("names columns, types and counts without any value", () => {
     const shape = eventRowKeyShape([
-      { record_id: 7, device_sn: "SECRETSERIAL1", ai_info: { face_id: 3, nick: "Jason" }, extra: '{"person":"Jason"}' },
+      { record_id: 7, device_sn: "SECRETSERIAL1", ai_info: { face_id: 3, nick: "Personfixture" }, extra: '{"person":"Personfixture"}' },
       { record_id: 8, device_sn: "SECRETSERIAL2", ai_info: null, extra: "{bad" },
       "not a row",
       { "has space": 1, "x/y": "v" },
@@ -70,7 +70,7 @@ describe("eventRowKeyShape", () => {
     expect(shape).toContain("extra{json}:unparsedx1");
     expect(shape).toContain("<non-object row>x1");
     expect(shape).toContain("<other>x2");
-    for (const secret of ["SECRETSERIAL", "Jason", "7", "bad"])
+    for (const secret of ["SECRETSERIAL", "Personfixture", "7", "bad"])
       expect(shape.replace(/x\d+/g, "").replace("rows=4", "")).not.toContain(secret);
   });
 
@@ -82,16 +82,16 @@ describe("eventRowKeyShape", () => {
   it("never prints data-like nested keys", () => {
     const shape = eventRowKeyShape([
       {
-        by_camera: { T8214P1234567890: 1 },
-        people: { Jason: 1, jason: 2 },
+        by_camera: { T9000SYNTHETIC001: 1 },
+        people: { Personfixture: 1, personfixture: 2 },
         big: Object.fromEntries(Array.from({ length: 13 }, (_, i) => [`n${i}`, i])),
         T8170T1023350: "top-level serial-shaped key",
       },
     ]);
-    expect(shape).not.toMatch(/T8214|T8170|Jason/);
+    expect(shape).not.toMatch(/T8214|T8170|Personfixture/);
     expect(shape).toContain("by_camera.<other>x1");
     expect(shape).toContain("people.<other>x1");
-    expect(shape).toContain("people.jason:numberx1");
+    expect(shape).toContain("people.personfixture:numberx1");
     expect(shape).toContain("big.<many>x1");
     expect(shape).toContain("<other>x1");
   });
